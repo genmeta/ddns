@@ -35,11 +35,11 @@ use crate::parser::{
 /// ```
 ///
 /// ### flags (u8) 字段定义:
-/// - bit 7 (0x80): MAIN - 主地址标志
-/// - bit 6 (0x40): SIGNED - 是否有签名标志  
+/// - bit 7 (0x80): FAMILY - 0=IPv4, 1=IPv6
+/// - bit 6 (0x40): MAIN - 主地址标志
 /// - bit 5 (0x20): SEQUENCED - 是否有序号
-/// - bit 4 (0x10): FAMILY - 0=IPv4, 1=IPv6
-/// - bit 3 (0x08): FORWARD - 0=直连, 1=中转
+/// - bit 4 (0x10): FORWARD - 0=直连, 1=中转
+/// - bit 3 (0x08): SIGNED - 是否有签名标志
 /// - bits 2-0: 保留位
 ///
 /// ### 地址格式:
@@ -67,11 +67,11 @@ pub struct EndpointAddr {
 }
 
 impl EndpointAddr {
-    const FLAG_MAIN: u8 = 0b1000_0000;
-    const FLAG_SIGNED: u8 = 0b0100_0000;
+    const FLAG_FAMILY: u8 = 0b1000_0000;  // 0=IPv4, 1=IPv6
+    const FLAG_MAIN: u8 = 0b0100_0000;
     const FLAG_SEQUENCED: u8 = 0b0010_0000;
-    const FLAG_FAMILY: u8 = 0b0001_0000;  // 0=IPv4, 1=IPv6
-    const FLAG_FORWARD: u8 = 0b0000_1000; // 0=直连, 1=中转
+    const FLAG_FORWARD: u8 = 0b0001_0000; // 0=直连, 1=中转
+    const FLAG_SIGNED: u8 = 0b0000_1000;
 
     pub fn direct_v4(addr: SocketAddrV4) -> Self {
         Self {
@@ -572,7 +572,7 @@ mod tests {
     fn flag_bit_ops_work() {
         let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 5353);
         let mut ep = EndpointAddr {
-            flags: 0b0011_1111,
+            flags: 0b0011_0111,
             sequence: None,
             signature: None,
             primary: addr.into(),
@@ -584,20 +584,20 @@ mod tests {
 
         ep.set_main(true);
         assert!(ep.is_main());
-        assert_eq!(ep.flags, 0b1011_1111);
+        assert_eq!(ep.flags, 0b0111_0111);
 
         ep.set_signed(true);
         assert!(ep.is_signed());
-        assert_eq!(ep.flags, 0b1111_1111);
+        assert_eq!(ep.flags, 0b0111_1111);
 
         ep.set_main(false);
         assert!(!ep.is_main());
         assert!(ep.is_signed());
-        assert_eq!(ep.flags, 0b0111_1111);
+        assert_eq!(ep.flags, 0b0011_1111);
 
         ep.set_signed(false);
         assert!(!ep.is_signed());
-        assert_eq!(ep.flags, 0b0011_1111);
+        assert_eq!(ep.flags, 0b0011_0111);
     }
 
     #[test]
