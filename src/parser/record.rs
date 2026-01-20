@@ -151,7 +151,7 @@ impl TryFrom<u16> for Type {
             12 => Self::Ptr,
             266 => Self::E,
             // 保持向后兼容，将旧的类型映射到统一的 E 类型
-            267 | 268 | 269 => Self::E,
+            267..=269 => Self::E,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -283,8 +283,7 @@ fn be_rdata<'a>(
         }
         Type::Ptr => be_ptr(input, origin).map(|(remain, ptr)| (remain, RData::Ptr(ptr))),
         Type::Ns => be_name(input, origin).map(|(remain, name)| (remain, RData::CName(name))),
-        Type::E => be_endpoint_addr_compat(input, rdlen)
-            .map(|(remain, e)| (remain, RData::E(e))),
+        Type::E => be_endpoint_addr_compat(input, rdlen).map(|(remain, e)| (remain, RData::E(e))),
     }
 }
 

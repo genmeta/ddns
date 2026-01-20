@@ -17,7 +17,7 @@ rand = "0.9"
 futures = "0.3"
 flume = "0.11.1"
 thiserror = "2.0.12"
-rustls = { version = "0.23", default-features = false, features = ["logging"] }
+rustls = { version = "0.23", default-features = false, features = ["logging", "ring"] }
 snafu = "0.8"
 ring = "0.17"
 x509-parser = "0.18"
@@ -65,4 +65,9 @@ path = "examples/discover.rs"
 [[example]]
 name = "h3_server"
 path = "examples/h3x_server.rs"
+required-features = ["h3x-resolver"]
+
+[[example]]
+name = "h3_client"
+path = "examples/h3x_client.rs"
 required-features = ["h3x-resolver"]

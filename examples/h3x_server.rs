@@ -1,6 +1,7 @@
 use std::{collections::HashMap, io, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use clap::Parser;
+use dashmap::DashMap;
 use deadpool_redis::Pool;
 use futures::future::BoxFuture;
 use gm_quic::prelude::handy::{ToCertificate, ToPrivateKey};
@@ -11,30 +12,32 @@ use h3x::{
 };
 use redis::AsyncCommands;
 use rustls::{RootCertStore, server::WebPkiClientVerifier};
+use rustls_pemfile;
+use tokio::time::{Duration, Instant};
 use tracing::{info, warn};
 
 #[derive(Parser, Clone, Debug)]
 #[command(version, about, long_about = None)]
 struct Options {
-    #[arg(long, default_value = "redis://127.0.0.1:6379")]
-    redis: String,
+    #[arg(long)]
+    redis: Option<String>,
 
-    #[arg(long, default_value = "0.0.0.0:0")]
+    #[arg(long, default_value = "127.0.0.1:4433")]
     listen: SocketAddr,
 
     #[arg(long, default_value = "localhost")]
     server_name: String,
 
-    #[arg(long)]
+    #[arg(long, default_value = "examples/keychain/localhost/server.cert")]
     cert: PathBuf,
 
-    #[arg(long)]
+    #[arg(long, default_value = "examples/keychain/localhost/server.key")]
     key: PathBuf,
 
-    #[arg(long)]
+    #[arg(long, default_value = "examples/keychain/localhost/ca.cert")]
     client_ca: PathBuf,
 
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     require_signature: bool,
 
     #[arg(long, default_value_t = 30)]
@@ -42,8 +45,14 @@ struct Options {
 }
 
 #[derive(Clone)]
+enum Storage {
+    Redis(Pool),
+    Memory(Arc<DashMap<String, (Vec<u8>, Instant)>>),
+}
+
+#[derive(Clone)]
 struct AppState {
-    redis_pool: Pool,
+    storage: Storage,
     require_signature: bool,
     ttl_secs: u64,
 }
@@ -259,21 +268,29 @@ async fn publish(state: AppState, mut req: Request, resp: &mut Response) {
         return;
     }
 
-    let mut conn = match state.redis_pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
-            write_error(resp, AppError::Redis(e.to_string())).await;
-            return;
-        }
-    };
+    match &state.storage {
+        Storage::Redis(pool) => {
+            let mut conn = match pool.get().await {
+                Ok(c) => c,
+                Err(e) => {
+                    write_error(resp, AppError::Redis(e.to_string())).await;
+                    return;
+                }
+            };
 
-    let ttl_secs: usize = state.ttl_secs.try_into().unwrap_or(usize::MAX);
-    if let Err(e) = conn
-        .set_ex::<_, _, ()>(&host, body.as_ref(), ttl_secs)
-        .await
-    {
-        write_error(resp, AppError::Redis(e.to_string())).await;
-        return;
+            let ttl_secs: usize = state.ttl_secs.try_into().unwrap_or(usize::MAX);
+            if let Err(e) = conn
+                .set_ex::<_, _, ()>(&host, body.as_ref(), ttl_secs)
+                .await
+            {
+                write_error(resp, AppError::Redis(e.to_string())).await;
+                return;
+            }
+        }
+        Storage::Memory(map) => {
+            let expire = Instant::now() + Duration::from_secs(state.ttl_secs);
+            map.insert(host.clone(), (body.to_vec(), expire));
+        }
     }
 
     info!(host = %host, ttl = state.ttl_secs, bytes = body.len(), "publish.ok");
@@ -297,27 +314,48 @@ async fn lookup(state: AppState, req: Request, resp: &mut Response) {
         }
     };
 
-    let mut conn = match state.redis_pool.get().await {
-        Ok(c) => c,
-        Err(e) => {
-            write_error(resp, AppError::Redis(e.to_string())).await;
-            return;
-        }
-    };
+    match &state.storage {
+        Storage::Redis(pool) => {
+            let mut conn = match pool.get().await {
+                Ok(c) => c,
+                Err(e) => {
+                    write_error(resp, AppError::Redis(e.to_string())).await;
+                    return;
+                }
+            };
 
-    match conn.get::<_, Option<Vec<u8>>>(&host).await {
-        Ok(Some(bytes)) => {
-            resp.set_status(http::StatusCode::OK)
-                .set_body(bytes::Bytes::from(bytes));
-            let _ = resp.flush().await;
+            match conn.get::<_, Option<Vec<u8>>>(&host).await {
+                Ok(Some(bytes)) => {
+                    resp.set_status(http::StatusCode::OK)
+                        .set_body(bytes::Bytes::from(bytes));
+                    let _ = resp.flush().await;
+                }
+                Ok(None) => {
+                    resp.set_status(http::StatusCode::NOT_FOUND)
+                        .set_body(bytes::Bytes::from_static(b"Not Found"));
+                    let _ = resp.flush().await;
+                }
+                Err(e) => {
+                    write_error(resp, AppError::Redis(e.to_string())).await;
+                }
+            }
         }
-        Ok(None) => {
+        Storage::Memory(map) => {
+            let now = Instant::now();
+            if let Some(entry) = map.get(&host) {
+                let (bytes, expire) = entry.value();
+                if *expire > now {
+                    resp.set_status(http::StatusCode::OK)
+                        .set_body(bytes::Bytes::from(bytes.clone()));
+                    let _ = resp.flush().await;
+                    return;
+                }
+            }
+
+            map.remove(&host);
             resp.set_status(http::StatusCode::NOT_FOUND)
                 .set_body(bytes::Bytes::from_static(b"Not Found"));
             let _ = resp.flush().await;
-        }
-        Err(e) => {
-            write_error(resp, AppError::Redis(e.to_string())).await;
         }
     }
 }
@@ -363,19 +401,33 @@ fn load_root_store_from_pem(pem: &[u8]) -> io::Result<RootCertStore> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Install ring crypto provider
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install ring crypto provider");
+
     tracing_subscriber::fmt::init();
 
     let options = Options::parse();
 
-    let redis_cfg = deadpool_redis::Config::from_url(options.redis.clone());
-    let redis_pool = redis_cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))?;
+    let storage = match options.redis.clone() {
+        Some(url) => {
+            let redis_cfg = deadpool_redis::Config::from_url(url);
+            let redis_pool = redis_cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))?;
+            Storage::Redis(redis_pool)
+        }
+        None => Storage::Memory(Arc::new(DashMap::new())),
+    };
 
-    let client_ca_pem = std::fs::read(&options.client_ca)?;
-    let roots = load_root_store_from_pem(&client_ca_pem)?;
-    let verifier = WebPkiClientVerifier::builder(Arc::new(roots)).build()?;
+    // Load the root CA that signed the client certificates
+    let root_ca_pem = std::fs::read(&options.client_ca)?;
+    let roots = load_root_store_from_pem(&root_ca_pem)?;
+    let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+        .build()
+        .unwrap();
 
     let state = AppState {
-        redis_pool,
+        storage,
         require_signature: options.require_signature,
         ttl_secs: options.ttl_secs,
     };
