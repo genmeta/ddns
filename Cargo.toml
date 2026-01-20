@@ -9,7 +9,7 @@ bytes = "1"
 bitfield-struct = "0.10"
 tracing = "0.1"
 socket2 = { version = "0.5.8", features = ["all"] }
-tokio = { version = "1", features = ["time", "macros", "net", "sync", "rt"] }
+tokio = { version = "1", features = ["time", "macros", "net", "sync", "rt", "rt-multi-thread"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 dashmap = "6"
 rand = "0.9"
@@ -20,11 +20,27 @@ rustls = { version = "0.23", default-features = false, features = ["logging"] }
 snafu = "0.8"
 ring = "0.17"
 x509-parser = "0.18"
+async-trait = "0.1"
+reqwest = { version = "0.12", default-features = false, features = [
+    "charset",
+    "rustls-tls",
+    "http2",
+    "macos-system-configuration",
+    "json",
+] }
+url = "2"
+serde = "1"
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }
 criterion = "0.5"
 tracing-subscriber = "0.3"
+axum = { version = "0.8", features = ["macros"] }
+axum-server = { version = "0.7.2", features = ["tls-rustls"] }
+redis = { version = "0.23", features = ["tokio-comp", "aio"] }
+tower-http = { version = "0.6.4", features = ["trace"] }
+tracing-appender = "0.2"
+deadpool-redis = "0.12"
 
 [[example]]
 name = "query"
@@ -34,6 +50,6 @@ path = "examples/query.rs"
 name = "discover"
 path = "examples/discover.rs"
 
-[[bench]]
-name = "name_compression"
-harness = false
+[[example]]
+name = "server"
+path = "examples/server.rs"

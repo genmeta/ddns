@@ -1,25 +1,25 @@
 # GMDNS
 
-GMDNS 是一个基于 Rust 开发的高性能 mDNS (Multicast DNS) 协议库，专门为 P2P 网络发现和穿透场景设计。它不仅支持标准的 RFC 6762 协议，还通过自定义资源记录扩展了端点（Endpoint）发现能力，支持直连和中继地址的发布与验证。
+GMDNS is a high-performance mDNS (Multicast DNS) protocol library built with Rust, specifically designed for P2P network discovery and NAT traversal scenarios. It supports the standard RFC 6762 protocol while extending endpoint discovery capabilities through custom resource records, enabling publication and verification of both direct and relay addresses.
 
-## 🌟 核心特性
+## 🌟 Key Features
 
-- **标准兼容**：支持标准 DNS 报文格式及 mDNS 组播发现。
-- **P2P 增强**：自定义 `E` 记录，支持 IPv4/IPv6 的直连与中继地址。
-- **安全验证**：内置 Ed25519 等签名方案，确保端点数据的真实性与完整性。
-- **高性能解析**：基于 `nom` 零拷贝解析框架，提供极速的报文处理能力。
-- **异步驱动**：完全适配 `tokio` 异步运行时，适用于高并发网络环境。
+- **Standards Compliant**: Supports standard DNS packet format and mDNS multicast discovery.
+- **P2P Enhanced**: Custom `E` record type supporting IPv4/IPv6 direct and relay addresses.
+- **Security Verification**: Built-in signature schemes (Ed25519, etc.) ensuring endpoint data authenticity and integrity.
+- **High Performance Parsing**: Zero-copy parsing framework based on `nom` for blazing-fast packet processing.
+- **Async-Driven**: Fully compatible with `tokio` async runtime for high-concurrency network environments.
 
-## 🚀 快速开始
+## 🚀 Quick Start
 
-在 `Cargo.toml` 中引用：
+Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
 gmdns = { path = "../gmdns" }
 ```
 
-### 简单发现示例
+### Simple Discovery Example
 
 ```rust
 use gmdns::mdns::Mdns;
@@ -27,13 +27,13 @@ use futures::StreamExt;
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
-    // 创建 mDNS 实例
+    // Create mDNS instance
     let mdns = Mdns::new("_genmeta.local", "127.0.0.1".parse().unwrap(), "lo0")?;
     
-    // 监听发现流
+    // Listen to discovery stream
     let mut stream = mdns.discover();
     while let Some((addr, packet)) = stream.next().await {
-        println!("发现来自 {} 的报文: {:?}", addr, packet);
+        println!("Discovered packet from {}: {:?}", addr, packet);
     }
     Ok(())
 }
@@ -41,47 +41,48 @@ async fn main() -> Result<(), std::io::Error> {
 
 ---
 
-## 📖 协议规范 (Protocol Specification)
+## 📖 Protocol Specification
 
-### 1. 整体报文结构 (Packet Layout)
+### 1. Packet Layout
 
-DNS 报文由固定头部和四个变长部分组成：
+DNS packets consist of a fixed header and four variable-length sections:
 
 ```text
 +---------------------+-----------------------+-----------------------+-----------------------+-----------------------+
 | Header (12 bytes)   | Question Section      | Answer Section        | Nameserver Section    | Additional Section    |
 +---------------------+-----------------------+-----------------------+-----------------------+-----------------------+
-| 事务 ID 与标志位      | 查询请求列表           | 回答资源记录列表       | 授权服务器记录列表     | 附加资源记录列表       |
+| Transaction ID      | Query list            | Answer RR list        | Authority RR list     | Additional RR list    |
+| and Flags           |                       |                       |                       |                       |
 +---------------------+-----------------------+-----------------------+-----------------------+-----------------------+
 ```
 
-#### 1.1 Header (头部)
-固定长度为 12 字节。包含 ID、Flags、以及后续各部分的计数器（QDCOUNT, ANCOUNT, NSCOUNT, ARCOUNT）。
+#### 1.1 Header
+Fixed length of 12 bytes. Contains ID, Flags, and counters for subsequent sections (QDCOUNT, ANCOUNT, NSCOUNT, ARCOUNT).
 
-#### 1.2 Resource Record (资源记录)
-Answer, Nameserver, Additional 部分均使用此格式：
+#### 1.2 Resource Record
+Answer, Nameserver, and Additional sections all use this format:
 
-- **NAME**: 变长域名，支持 RFC 1035 压缩算法。
-- **TYPE (u16)**: 记录类型（如 A=1, SRV=33, E=266 等）。
-- **CLASS (u16)**: 协议类。mDNS 中最高位 (bit 15) 用于缓存刷新标志。
-- **TTL (u32)**: 缓存生存时间（秒）。
-- **RDLEN (u16)**: 资源数据 (RDATA) 的长度。
-- **RDATA**: 具体的资源内容，格式由 TYPE 决定。
+- **NAME**: Variable-length domain name, supports RFC 1035 compression.
+- **TYPE (u16)**: Record type (e.g., A=1, SRV=33, E=266).
+- **CLASS (u16)**: Protocol class. In mDNS, the highest bit (bit 15) is used for cache-flush flag.
+- **TTL (u32)**: Cache time-to-live (seconds).
+- **RDLEN (u16)**: Length of resource data (RDATA).
+- **RDATA**: Specific resource content, format determined by TYPE.
 
-### 2. 自定义类型定义 (QType)
+### 2. Custom Type Definitions (QType)
 
-| 类型     | 数值 | 描述      | RDATA 格式                        |
-| :------- | :--- | :-------- | :-------------------------------- |
-| **A**    | 1    | IPv4 地址 | 4 字节 IP                         |
-| **AAAA** | 28   | IPv6 地址 | 16 字节 IP                        |
-| **SRV**  | 33   | 服务定位  | Priority + Weight + Port + Target |
-| **E**    | 266  | 端点地址  | Flags + Seq + Addr(s) + [Sig]     |
+| Type     | Value | Description       | RDATA Format                      |
+| :------- | :---- | :---------------- | :-------------------------------- |
+| **A**    | 1     | IPv4 address      | 4-byte IP                         |
+| **AAAA** | 28    | IPv6 address      | 16-byte IP                        |
+| **SRV**  | 33    | Service location  | Priority + Weight + Port + Target |
+| **E**    | 266   | Endpoint address  | Flags + Seq + Addr(s) + [Sig]     |
 
-### 3. 端点扩展细节 (Endpoint Extensions)
+### 3. Endpoint Extensions (Type E)
 
-#### 3.1 RDATA 线协议格式
+#### 3.1 RDATA Wire Format
 
-##### 包格式
+##### Packet Format
 
 ```text
 +--------+-----------------+--------------------+----------------------------+
@@ -91,39 +92,42 @@ Answer, Nameserver, Additional 部分均使用此格式：
 +--------+-----------------+--------------------+----------------------------+
 ```
 
-##### flags (u8) 字段定义:
-- bit 7 (0x80): MAIN - 主地址标志
-- bit 6 (0x40): SIGNED - 是否有签名标志  
-- bit 5 (0x20): SEQUENCED - 是否有序号
-- bit 4 (0x10): FAMILY - 0=IPv4, 1=IPv6
-- bit 3 (0x08): FORWARD - 0=直连, 1=中转
-- bits 2-0: 保留位
+##### flags (u8) Field Definition:
+- bit 7 (0x80): **FAMILY** - Address family (0=IPv4, 1=IPv6)
+- bit 6 (0x40): **MAIN** - Primary address flag
+- bit 5 (0x20): **SEQUENCED** - Sequence number present
+- bit 4 (0x10): **FORWARD** - Connection type (0=direct, 1=relay)
+- bit 3 (0x08): **SIGNED** - Signature present
+- bits 2-0: Reserved
 
-##### 地址格式:
-- 直连: `port(u16)` + `IP(u32/u128)`
-- 中转: `outer_port(u16)` + `outer_IP(u32/u128)` + `agent_port(u16)` + `agent_IP(u32/u128)`
-- `sequence`: DNS 记录编号，同一编号的记录视为一个机器，可以使用多路径连接
-- `signature`: 当 `SIGNED` 置位时，允许附加签名字段
+##### Address Format:
+- **Direct**: `port(u16)` + `IP(u32/u128)`
+- **Relay**: `outer_port(u16)` + `outer_IP(u32/u128)` + `agent_port(u16)` + `agent_IP(u32/u128)`
+- **sequence**: DNS record sequence number. Records with the same sequence are considered from the same machine and can use multipath connections.
+- **signature**: When `SIGNED` flag is set, signature field is appended.
 
-#### 3.2 标志位掩码 (Flags Mask)
-- `0b1000_0000`: **MAIN** (主地址标志)
-- `0b0100_0000`: **SIGNED** (包含签名标志)
-- `0b0010_0000`: **SEQUENCED** (包含序号标志)
-- `0b0001_0000`: **FAMILY** (地址族: 0=IPv4, 1=IPv6)
-- `0b0000_1000`: **FORWARD** (连接类型: 0=直连, 1=中继)
+#### 3.2 Flag Bit Masks
 
-#### 3.3 地址格式 (Address Format)
-- **直连**: `Port(u16)` + `IP(u32/u128)`
-- **中继**: `OuterPort(u16)` + `OuterIP(u32/u128)` + `AgentPort(u16)` + `AgentIP(u32/u128)`
+- `0b1000_0000`: **FAMILY** (Address family: 0=IPv4, 1=IPv6)
+- `0b0100_0000`: **MAIN** (Primary address flag)
+- `0b0010_0000`: **SEQUENCED** (Sequence number present)
+- `0b0001_0000`: **FORWARD** (Connection type: 0=direct, 1=relay)
+- `0b0000_1000`: **SIGNED** (Signature present)
 
-#### 3.4 签名格式 (Signature)
-若包含签名，格式为：`Scheme (u16)` + `Length (VarInt)` + `Data (N bytes)`。
+#### 3.3 Address Format Details
+
+- **Direct**: `Port(u16)` + `IP(u32/u128)`
+- **Relay**: `OuterPort(u16)` + `OuterIP(u32/u128)` + `AgentPort(u16)` + `AgentIP(u32/u128)`
+
+#### 3.4 Signature Format
+
+When signature is present: `Scheme (u16)` + `Length (VarInt)` + `Data (N bytes)`.
 
 ---
 
-## 🛠 项目结构
+## 🛠 Project Structure
 
-- `src/parser/`：核心协议解析实现（Nom 解析器）。
-- `src/protocol.rs`：UDP 组播与报文路由逻辑。
-- `src/mdns.rs`：高层 mDNS 发现与响应 API。
-- `examples/`：包含查询、发现与广播的示例代码。
+- `src/parser/`: Core protocol parsing implementation (Nom parsers).
+- `src/protocol.rs`: UDP multicast and packet routing logic.
+- `src/mdns.rs`: High-level mDNS discovery and response API.
+- `examples/`: Sample code for querying, discovery, and broadcasting.
