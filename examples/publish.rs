@@ -35,21 +35,13 @@ struct Options {
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     sign: bool,
 
-    /// DNS name to publish/lookup. Must match the single DNS SAN in the client cert.
+    /// DNS name to publish. Must match the single DNS SAN in the client cert.
     #[arg(long, default_value = "client")]
     host: String,
 
     /// Socket addresses to publish.
     #[arg(long, value_delimiter = ',', num_args = 1.., default_value = "127.0.0.1:5555")]
     addr: Vec<SocketAddr>,
-
-    /// Whether to call /publish.
-    #[arg(long, default_value_t = true)]
-    publish: bool,
-
-    /// Whether to call /lookup.
-    #[arg(long, default_value_t = true)]
-    lookup: bool,
 
     #[arg(long, default_value_t = true)]
     is_main: bool,
@@ -107,6 +99,7 @@ fn pick_signature_scheme(key: &dyn SigningKey) -> io::Result<SignatureScheme> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Unsupported key type/scheme"))?;
     Ok(signer.scheme())
 }
+
 #[tokio::main]
 async fn main() -> io::Result<()> {
     // Install ring crypto provider
@@ -128,6 +121,7 @@ async fn main() -> io::Result<()> {
         .transpose()?;
     let signer_scheme = signer.as_deref().map(pick_signature_scheme).transpose()?;
 
+    // Uses H3Resolver which uses gm-quic internally aka HTTP/3
     let resolver = H3Resolver::new_with_identity(
         opt.base_url,
         root_store,
@@ -136,31 +130,23 @@ async fn main() -> io::Result<()> {
         private_key_pem.as_slice(),
     )?;
 
-    if opt.publish {
-        info!(host = %opt.host, addrs = ?opt.addr, "publish.start");
-        if let Some(scheme) = signer_scheme {
-            info!(?scheme, "publish.endpoint_signing.enabled");
-        } else {
-            info!("publish.endpoint_signing.disabled");
-        }
-        resolver
-            .publish(
-                &opt.host,
-                opt.is_main,
-                opt.sequence,
-                signer.as_deref().zip(signer_scheme).map(|(k, s)| (k, s)),
-                &opt.addr,
-            )
-            .await?;
-        info!("publish.ok");
+    info!(host = %opt.host, addrs = ?opt.addr, "publish.start");
+    if let Some(scheme) = signer_scheme {
+        info!(?scheme, "publish.endpoint_signing.enabled");
+    } else {
+        info!("publish.endpoint_signing.disabled");
     }
-
-    if opt.lookup {
-        info!(host = %opt.host, "lookup.start");
-        let addrs = resolver.lookup(&opt.host).await?;
-        info!(?addrs, "lookup.ok");
-        println!("lookup result: {addrs:?}");
-    }
+    
+    resolver
+        .publish(
+            &opt.host,
+            opt.is_main,
+            opt.sequence,
+            signer.as_deref().zip(signer_scheme).map(|(k, s)| (k, s)),
+            &opt.addr,
+        )
+        .await?;
+    info!("publish.ok");
 
     Ok(())
 }

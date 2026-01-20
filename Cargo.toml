@@ -55,19 +55,24 @@ tracing-appender = "0.2"
 deadpool-redis = "0.12"
 
 [[example]]
-name = "query"
-path = "examples/query.rs"
+name = "mdns_discover"
+path = "examples/mdns_discover.rs"
 
 [[example]]
-name = "discover"
-path = "examples/discover.rs"
+name = "mdns_query"
+path = "examples/mdns_query.rs"
 
 [[example]]
-name = "h3_server"
-path = "examples/h3x_server.rs"
+name = "server"
+path = "examples/server.rs"
 required-features = ["h3x-resolver"]
 
 [[example]]
-name = "h3_client"
-path = "examples/h3x_client.rs"
+name = "publish"
+path = "examples/publish.rs"
+required-features = ["h3x-resolver"]
+
+[[example]]
+name = "query"
+path = "examples/query.rs"
 required-features = ["h3x-resolver"]

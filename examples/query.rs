@@ -1,28 +1,88 @@
-use std::{io::Error, net::Ipv4Addr};
+use std::io;
+use std::path::PathBuf;
 
 use clap::Parser;
-
-const SERVICE_NAME: &str = "_genmeta.local";
+use rustls::RootCertStore;
+use tracing::info;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
-struct Args {
-    #[arg(long, default_value = "127.0.0.1")]
-    ip: Ipv4Addr,
-    #[arg(long, default_value = "lo0")]
-    device: String,
+struct Options {
+    /// Base URL of the HTTP DNS server (TCP/HTTPS), e.g. https://localhost:4433/
+    #[arg(long, default_value = "https://localhost:4433/")]
+    base_url: String,
+
+    /// PEM file containing CA certificates that can verify the server certificate.
+    #[arg(long, default_value = "examples/keychain/localhost/ca.cert")]
+    server_ca: PathBuf,
+
+    /// DNS name to lookup.
+    #[arg(long, default_value = "client")]
+    host: String,
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Error> {
-    tracing_subscriber::fmt::init();
-    let args = Args::parse();
-    let mdns = gmdns::mdns::Mdns::new(SERVICE_NAME, args.ip, &args.device)?;
+fn load_root_store_from_pem(path: &PathBuf) -> io::Result<RootCertStore> {
+    let pem = std::fs::read(path)?;
+    let mut store = RootCertStore::empty();
+    let mut reader: &[u8] = pem.as_slice();
 
-    let ret = mdns
-        .query("mdns.test.genmeta.net".to_string())
-        .await
-        .unwrap();
-    println!("{ret:?}\n");
+    for cert in rustls_pemfile::certs(&mut reader) {
+        let cert = cert.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        store
+            .add(cert)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    }
+    Ok(store)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install ring crypto provider");
+    tracing_subscriber::fmt::init();
+
+    let opt = Options::parse();
+
+    let root_store = load_root_store_from_pem(&opt.server_ca)?;
+
+    // Use regular reqwest client (HTTP/1.1 or HTTP/2 over TCP)
+    // This demonstrates decouple: The query does not use gm-quic/H3.
+    let client = reqwest::Client::builder()
+        .use_rustls_tls()
+        .add_root_certificate(
+            reqwest::tls::Certificate::from_pem(&std::fs::read(&opt.server_ca)?)?
+        )
+        .build()?;
+
+    let url = format!("{}lookup?host={}", opt.base_url, opt.host);
+    info!(url = %url, "lookup.start");
+
+    let resp = client.get(&url).send().await?;
+    
+    if resp.status().is_success() {
+        let bytes = resp.bytes().await?;
+        // In this example, the server returns raw bytes (e.g., DNS packet or custom format).
+        // Since the resolver example was returning serialized data, we just print it.
+        // If it returns MDNS packet bytes, we could parse it, but for now we just show we got it.
+        
+        // Try to parse as gmdns packet for display if possible, or just raw
+        match gmdns::parser::packet::be_packet(&bytes) {
+            Ok((_, packet)) => {
+                 info!(?packet, "lookup.ok.parsed");
+                 println!("Lookup Result: {:?}", packet);
+            }
+            Err(_) => {
+                 info!(bytes = bytes.len(), "lookup.ok.raw");
+                 println!("Lookup Result (Raw): {:?}", bytes);
+            }
+        }
+    } else {
+        let status = resp.status();
+        let text = resp.text().await?;
+        info!(%status, error = %text, "lookup.failed");
+        eprintln!("Lookup failed: {} - {}", status, text);
+    }
+
     Ok(())
 }
