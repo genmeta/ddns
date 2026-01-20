@@ -1,5 +1,9 @@
 use std::{collections::HashMap, io, net::SocketAddr, path::PathBuf, sync::Arc};
 
+use axum::{
+    extract::{Query, State},
+    response::IntoResponse,
+};
 use clap::Parser;
 use dashmap::DashMap;
 use deadpool_redis::Pool;
@@ -35,7 +39,7 @@ struct Options {
     key: PathBuf,
 
     #[arg(long, default_value = "examples/keychain/localhost/ca.cert")]
-    client_ca: PathBuf,
+    root_cert: PathBuf,
 
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     require_signature: bool,
@@ -95,6 +99,12 @@ impl AppError {
             AppError::Redis(s) => format!("Redis error: {s}"),
             _ => format!("{self:?}"),
         }
+    }
+}
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> axum::response::Response {
+        (self.status(), self.message()).into_response()
     }
 }
 
@@ -200,6 +210,36 @@ fn validate_dns_packet(
         .ok_or(AppError::NoAnswersInPacket)
 }
 
+// 核心查询逻辑，独立于 transport
+async fn perform_lookup(state: &AppState, host: &str) -> Result<Option<Vec<u8>>, AppError> {
+    let host = normalize_host(host)?;
+
+    match &state.storage {
+        Storage::Redis(pool) => {
+            let mut conn = pool
+                .get()
+                .await
+                .map_err(|e| AppError::Redis(e.to_string()))?;
+
+            match conn.get::<_, Option<Vec<u8>>>(&host).await {
+                Ok(bytes) => Ok(bytes),
+                Err(e) => Err(AppError::Redis(e.to_string())),
+            }
+        }
+        Storage::Memory(map) => {
+            let now = Instant::now();
+            if let Some(entry) = map.get(&host) {
+                let (bytes, expire) = entry.value();
+                if *expire > now {
+                    return Ok(Some(bytes.clone()));
+                }
+            }
+            map.remove(&host);
+            Ok(None)
+        }
+    }
+}
+
 async fn write_error(resp: &mut Response, err: AppError) {
     resp.set_status(err.status())
         .set_body(bytes::Bytes::from(err.message()));
@@ -299,6 +339,7 @@ async fn publish(state: AppState, mut req: Request, resp: &mut Response) {
     let _ = resp.flush().await;
 }
 
+// H3 lookup handler
 async fn lookup(state: AppState, req: Request, resp: &mut Response) {
     let params = parse_query_params(&req.uri());
     let Some(host) = params.get("host") else {
@@ -306,57 +347,40 @@ async fn lookup(state: AppState, req: Request, resp: &mut Response) {
         return;
     };
 
-    let host = match normalize_host(host) {
-        Ok(h) => h,
-        Err(e) => {
-            write_error(resp, e).await;
-            return;
+    match perform_lookup(&state, host).await {
+        Ok(Some(bytes)) => {
+            resp.set_status(http::StatusCode::OK)
+                .set_body(bytes::Bytes::from(bytes));
+            let _ = resp.flush().await;
         }
-    };
-
-    match &state.storage {
-        Storage::Redis(pool) => {
-            let mut conn = match pool.get().await {
-                Ok(c) => c,
-                Err(e) => {
-                    write_error(resp, AppError::Redis(e.to_string())).await;
-                    return;
-                }
-            };
-
-            match conn.get::<_, Option<Vec<u8>>>(&host).await {
-                Ok(Some(bytes)) => {
-                    resp.set_status(http::StatusCode::OK)
-                        .set_body(bytes::Bytes::from(bytes));
-                    let _ = resp.flush().await;
-                }
-                Ok(None) => {
-                    resp.set_status(http::StatusCode::NOT_FOUND)
-                        .set_body(bytes::Bytes::from_static(b"Not Found"));
-                    let _ = resp.flush().await;
-                }
-                Err(e) => {
-                    write_error(resp, AppError::Redis(e.to_string())).await;
-                }
-            }
-        }
-        Storage::Memory(map) => {
-            let now = Instant::now();
-            if let Some(entry) = map.get(&host) {
-                let (bytes, expire) = entry.value();
-                if *expire > now {
-                    resp.set_status(http::StatusCode::OK)
-                        .set_body(bytes::Bytes::from(bytes.clone()));
-                    let _ = resp.flush().await;
-                    return;
-                }
-            }
-
-            map.remove(&host);
+        Ok(None) => {
             resp.set_status(http::StatusCode::NOT_FOUND)
                 .set_body(bytes::Bytes::from_static(b"Not Found"));
             let _ = resp.flush().await;
         }
+        Err(e) => {
+            write_error(resp, e).await;
+        }
+    }
+}
+
+// Axum lookup handler (TCP/HTTPS)
+async fn axum_lookup(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let Some(host) = params.get("host") else {
+        return AppError::MissingHostParam.into_response();
+    };
+
+    match perform_lookup(&state, host).await {
+        Ok(Some(bytes)) => (http::StatusCode::OK, bytes::Bytes::from(bytes)).into_response(),
+        Ok(None) => (
+            http::StatusCode::NOT_FOUND,
+            bytes::Bytes::from_static(b"Not Found"),
+        )
+            .into_response(),
+        Err(e) => e.into_response(),
     }
 }
 
@@ -420,7 +444,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Load the root CA that signed the client certificates
-    let root_ca_pem = std::fs::read(&options.client_ca)?;
+    let root_ca_pem = std::fs::read(&options.root_cert)?;
     let roots = load_root_store_from_pem(&root_ca_pem)?;
     let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
         .build()
@@ -431,6 +455,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         require_signature: options.require_signature,
         ttl_secs: options.ttl_secs,
     };
+
+    let cert_pem = std::fs::read(&options.cert)?;
+    let key_pem = std::fs::read(&options.key)?;
+
+    let state_tcp = state.clone();
+    let axum_app = axum::Router::new()
+        .route("/lookup", axum::routing::get(axum_lookup))
+        .with_state(state_tcp);
+
+    let tls_config =
+        axum_server::tls_rustls::RustlsConfig::from_pem(cert_pem.clone(), key_pem.clone()).await?;
+
+    let tcp_addr = options.listen;
+    info!(listen = %tcp_addr, "https_server.start");
+
+    // Spawn HTTPS server
+    tokio::spawn(async move {
+        axum_server::bind_rustls(tcp_addr, tls_config)
+            .serve(axum_app.into_make_service())
+            .await
+            .expect("Failed to start TCP/HTTPS server");
+    });
 
     let router = Router::new()
         .post(
@@ -445,9 +491,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state: state.clone(),
             },
         );
-
-    let cert_pem = std::fs::read(&options.cert)?;
-    let key_pem = std::fs::read(&options.key)?;
 
     let bind = {
         let base = gm_quic::prelude::BindUri::from(format!("inet://{}", options.listen));
