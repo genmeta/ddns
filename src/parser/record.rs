@@ -64,6 +64,18 @@ impl ResourceRecord {
     pub fn name(&self) -> Name {
         self.name.clone()
     }
+
+    pub fn typ(&self) -> Type {
+        self.typ
+    }
+
+    pub fn cls(&self) -> Class {
+        self.cls
+    }
+
+    pub fn ttl(&self) -> u32 {
+        self.ttl
+    }
 }
 
 /// The CLASS value according to RFC 1035

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt};
 
 use bytes::BufMut;
 
@@ -14,13 +14,61 @@ use crate::parser::{
 };
 
 /// Parsed DNS packet
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct Packet {
     pub header: Header,
     pub questions: Vec<Question>,
     pub answers: Vec<ResourceRecord>,
     pub nameservers: Vec<ResourceRecord>,
     pub additional: Vec<ResourceRecord>,
+}
+
+impl fmt::Display for Packet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "DNS Packet:")?;
+        writeln!(
+            f,
+            "  Header: ID={}, QR={}, AA={}, RCODE={:?}",
+            self.header.id,
+            self.header.flags.query(),
+            self.header.flags.authoritative(),
+            self.header.flags.response_code()
+        )?;
+        if !self.questions.is_empty() {
+            writeln!(f, "  Questions:")?;
+            for q in &self.questions {
+                writeln!(f, "    {} {:?} {:?}", q.name, q.qclass, q.qtype)?;
+            }
+        }
+        if !self.answers.is_empty() {
+            writeln!(f, "  Answers:")?;
+            for rr in &self.answers {
+                write!(f, "    {} {} {:?} {:?}", rr.name, rr.ttl, rr.cls, rr.typ)?;
+                match &rr.data {
+                    RData::A(ip) => writeln!(f, " A {}", ip)?,
+                    RData::AAAA(ip) => writeln!(f, " AAAA {}", ip)?,
+                    RData::CName(name) => writeln!(f, " CNAME {}", name)?,
+                    RData::E(ep) => {
+                        writeln!(f, " E {}", ep.primary)?;
+                    }
+                    _ => writeln!(f, " {:?}", rr.data)?,
+                }
+            }
+        }
+        if !self.nameservers.is_empty() {
+            writeln!(f, "  Nameservers:")?;
+            for rr in &self.nameservers {
+                writeln!(f, "    {} {} {:?} {:?}", rr.name, rr.ttl, rr.cls, rr.typ)?;
+            }
+        }
+        if !self.additional.is_empty() {
+            writeln!(f, "  Additional:")?;
+            for rr in &self.additional {
+                writeln!(f, "    {} {} {:?} {:?}", rr.name, rr.ttl, rr.cls, rr.typ)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Packet {
@@ -429,5 +477,22 @@ mod test {
 
         let ptr = (0xC000u16 | (skype_pos as u16)).to_be_bytes();
         assert_eq!(&bytes[mail_pos + 5..mail_pos + 7], &ptr);
+    }
+}
+
+impl fmt::Debug for Packet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Packet {{ id: {}, qr: {}, opcode: {:?}, rcode: {:?}, questions: {}, answers: {}, authorities: {}, additional: {} }}",
+            self.header.id,
+            self.header.flags.query(),
+            self.header.flags.opcode(),
+            self.header.flags.response_code(),
+            self.questions.len(),
+            self.answers.len(),
+            self.nameservers.len(),
+            self.additional.len()
+        )
     }
 }
