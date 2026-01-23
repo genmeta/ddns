@@ -2,15 +2,17 @@ use std::{collections::HashMap, fmt::Display, io};
 
 use dashmap::DashMap;
 use reqwest::{Client, IntoUrl, StatusCode, Url};
-use rustls::{SignatureScheme, sign::SigningKey};
 use tokio::time::Instant;
 
-use super::Resolve;
-use crate::{MdnsPacket, parser::packet::be_packet};
+use super::{Publisher, Resolver};
+use crate::{
+    MdnsPacket,
+    parser::{packet::be_packet, record::endpoint::EndpointAddr},
+};
 
 #[derive(Debug)]
 struct Record {
-    addrs: Vec<std::net::SocketAddr>,
+    addrs: Vec<EndpointAddr>,
     expire: Instant,
 }
 
@@ -89,64 +91,45 @@ impl From<io::Error> for Error {
 }
 
 #[async_trait::async_trait(?Send)]
-impl Resolve for HttpResolver {
-    async fn publish(
-        &self,
-        name: &str,
-        is_main: bool,
-        sequence: u64,
-        key: Option<(&dyn SigningKey, SignatureScheme)>,
-        addresses: &[std::net::SocketAddr],
-    ) -> io::Result<()> {
-        let publish = async {
-            tracing::debug!(name, ?addresses, "Publishing DNS for with addresses");
-            let dns_eps = addresses
-                .iter()
-                .map(|&addr| {
-                    let mut ep = match addr {
-                        std::net::SocketAddr::V4(v4) => crate::MdnsEndpoint::direct_v4(v4),
-                        std::net::SocketAddr::V6(v6) => crate::MdnsEndpoint::direct_v6(v6),
-                    };
-                    ep.set_main(is_main);
-                    ep.set_sequence(sequence);
-                    if let Some((k, s)) = key
-                        && let Err(e) = ep.sign_with(k, s)
-                    {
-                        return Err(io::Error::other(format!("Sign error: {}", e)));
-                    }
-                    Ok(ep)
-                })
-                .collect::<Result<Vec<_>, io::Error>>()?;
-            let mut hosts = HashMap::new();
+impl Publisher for HttpResolver {
+    async fn publish(&self, name: &str, endpoint: EndpointAddr) -> io::Result<()> {
+        let mut hosts = HashMap::new();
+        hosts.insert(name.to_string(), vec![endpoint]);
+        let answer = MdnsPacket::answer(0, &hosts);
+        let bytes = answer.to_bytes();
 
-            hosts.insert(name.to_string(), dns_eps);
-            let answer = MdnsPacket::answer(0, &hosts);
-            let bytes = answer.to_bytes();
+        let mut url = self.base_url.join("publish").expect("Invalid base URL");
+        url.set_query(Some(&format!("host={name}")));
+        let client = reqwest::Client::new();
+        let response = client
+            .post(url)
+            .header("Content-Type", "application/octet-stream")
+            .body(bytes)
+            .send()
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
 
-            let mut url = self.base_url.join("publish").expect("Invalid base URL");
-            url.set_query(Some(&format!("host={name}")));
-            let client = reqwest::Client::new();
-            let response = client
-                .post(url)
-                .header("Content-Type", "application/octet-stream")
-                .body(bytes)
-                .send()
-                .await;
-
-            let _response = response?.error_for_status()?;
-            Result::<_, Error>::Ok(())
-        };
-        publish.await.map_err(io::Error::other)
+        let _response = response
+            .error_for_status()
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        Ok(())
     }
+}
 
-    async fn lookup(&self, name: &str) -> io::Result<Vec<std::net::SocketAddr>> {
+#[async_trait::async_trait(?Send)]
+impl Resolver for HttpResolver {
+    async fn lookup(&self, name: &str) -> io::Result<Vec<(Option<String>, EndpointAddr)>> {
         let lookup = async {
             use crate::parser::record;
             let now = Instant::now();
             self.cached_records
                 .retain(|_host, Record { expire, .. }| *expire < now);
             if let Some(record) = self.cached_records.get(name) {
-                return Ok(record.addrs.clone());
+                return Ok(record
+                    .addrs
+                    .iter()
+                    .map(|e: &EndpointAddr| (None, e.clone()))
+                    .collect());
             }
             let response = self
                 .http_client
@@ -165,7 +148,7 @@ impl Resolve for HttpResolver {
                 .answers
                 .iter()
                 .filter_map(|answer| match answer.data() {
-                    record::RData::E(e) => Some(e.primary),
+                    record::RData::E(e) => Some((None, e.clone())),
                     _ => {
                         tracing::debug!(?answer, "Ignored record");
                         None
@@ -176,7 +159,17 @@ impl Resolve for HttpResolver {
                 return Err(Error::NoRecordFound {});
             }
 
-            Result::<_, Error>::Ok(ret)
+            // cache the addrs
+            let addrs = ret.iter().map(|(_, e)| e.clone()).collect();
+            self.cached_records.insert(
+                name.to_string(),
+                Record {
+                    addrs,
+                    expire: now + std::time::Duration::from_secs(300),
+                },
+            );
+
+            Ok(ret)
         };
         lookup.await.map_err(io::Error::other)
     }

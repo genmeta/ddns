@@ -1,6 +1,6 @@
 # GMDNS
 
-GMDNS is a high-performance mDNS (Multicast DNS) protocol library built with Rust, specifically designed for P2P network discovery and NAT traversal scenarios. It supports the standard RFC 6762 protocol while extending endpoint discovery capabilities through custom resource records, enabling publication and verification of both direct and relay addresses.
+GMDNS is a high-performance mDNS (Multicast DNS) protocol library built with Rust, specifically designed for P2P network discovery and NAT traversal scenarios. It supports the standard RFC 6762 protocol while extending endpoint discovery capabilities through custom resource records, enabling publication and verification of both direct and relay addresses. Additionally, it integrates HTTP/3 support for secure DNS over HTTP/3 (DoH3) interactions with remote DNS servers.
 
 ## 🌟 Key Features
 
@@ -9,6 +9,7 @@ GMDNS is a high-performance mDNS (Multicast DNS) protocol library built with Rus
 - **Security Verification**: Built-in signature schemes (Ed25519, etc.) ensuring endpoint data authenticity and integrity.
 - **High Performance Parsing**: Zero-copy parsing framework based on `nom` for blazing-fast packet processing.
 - **Async-Driven**: Fully compatible with `tokio` async runtime for high-concurrency network environments.
+- **HTTP/3 Integration**: Supports DNS over HTTP/3 (DoH3) for secure remote DNS queries and publishing.
 
 ## 🚀 Quick Start
 
@@ -19,7 +20,14 @@ Add to your `Cargo.toml`:
 gmdns = { path = "../gmdns" }
 ```
 
-### Simple Discovery Example
+For HTTP/3 features, enable the `h3x-resolver` feature:
+
+```toml
+[dependencies]
+gmdns = { path = "../gmdns", features = ["h3x-resolver"] }
+```
+
+### Simple mDNS Discovery Example
 
 ```rust
 use gmdns::mdns::Mdns;
@@ -38,6 +46,68 @@ async fn main() -> Result<(), std::io::Error> {
     Ok(())
 }
 ```
+
+### HTTP/3 DNS Publishing Example
+
+```rust
+use gmdns::resolver::h3_resolver::H3Resolver;
+use std::path::Path;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let resolver = H3Resolver::new(
+        "https://localhost:4433/",
+        Path::new("examples/keychain/localhost/ca.cert"),
+        "client",
+        Path::new("examples/keychain/localhost/client.cert"),
+        Path::new("examples/keychain/localhost/client.key"),
+    )?;
+
+    // Publish a DNS record
+    resolver.publish("client.genmeta.net", "127.0.0.1:5555").await?;
+    Ok(())
+}
+```
+
+---
+
+## 🌐 HTTP/3 DNS Server
+
+GMDNS includes support for DNS over HTTP/3 (DoH3), allowing secure publication and querying of DNS records via HTTP/3 protocol. This is useful for remote networks where multicast mDNS is not feasible.
+
+### Publishing Services
+
+Publish DNS service records to an HTTP/3 DNS server:
+
+```bash
+cargo run --example publish --features="h3x-resolver" \
+  --base-url https://localhost:4433/ \
+  --host client.genmeta.net \
+  --addr 192.168.1.100:8080
+```
+
+### Querying Services
+
+Query DNS service records from an HTTP/3 DNS server:
+
+```bash
+cargo run --example query --features="h3x-resolver" \
+  --base-url https://localhost:4433/ \
+  --host client.genmeta.net
+```
+
+### Running the DNS Server
+
+Start an HTTP/3 DNS server:
+
+```bash
+cargo run --example server --features="h3x-resolver" \
+  --listen 127.0.0.1:4433 \
+  --cert examples/keychain/localhost/server.cert \
+  --key examples/keychain/localhost/server.key
+```
+
+For detailed parameters and HTTP packet structures, see [examples/README.md](examples/README.md).
 
 ---
 
@@ -130,4 +200,5 @@ When signature is present: `Scheme (u16)` + `Length (VarInt)` + `Data (N bytes)`
 - `src/parser/`: Core protocol parsing implementation (Nom parsers).
 - `src/protocol.rs`: UDP multicast and packet routing logic.
 - `src/mdns.rs`: High-level mDNS discovery and response API.
-- `examples/`: Sample code for querying, discovery, and broadcasting.
+- `src/resolver/`: HTTP/3 resolver implementation for DoH3 support.
+- `examples/`: Sample code including mDNS discovery/query, and HTTP/3 publishing/querying/server examples.

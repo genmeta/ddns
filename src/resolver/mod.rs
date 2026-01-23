@@ -1,32 +1,27 @@
 use std::{
     fmt::{Debug, Display},
     io,
-    net::SocketAddr,
 };
 
 mod resolvers;
 
 pub use resolvers::*;
-use rustls::{SignatureScheme, sign::SigningKey};
 use thiserror::Error;
 
+use crate::parser::record::endpoint::EndpointAddr;
 pub use crate::parser::record::*;
 
 pub const HTTP_DNS_SERVER: &str = "https://dns.genmeta.net/";
 pub const MDNS_SERVICE: &str = "_genmeta.local";
 
 #[async_trait::async_trait(?Send)]
-pub trait Resolve: Display + Debug {
-    async fn publish(
-        &self,
-        name: &str,
-        is_main: bool,
-        sequence: u64,
-        key: Option<(&dyn SigningKey, SignatureScheme)>,
-        addresses: &[SocketAddr],
-    ) -> io::Result<()>;
+pub trait Publisher: Display + Debug {
+    async fn publish(&self, name: &str, endpoint: EndpointAddr) -> io::Result<()>;
+}
 
-    async fn lookup(&self, name: &str) -> io::Result<Vec<SocketAddr>>;
+#[async_trait::async_trait(?Send)]
+pub trait Resolver: Display + Debug {
+    async fn lookup(&self, name: &str) -> io::Result<Vec<(Option<String>, EndpointAddr)>>;
 }
 
 #[derive(Debug, Error)]

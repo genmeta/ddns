@@ -1,10 +1,11 @@
-use std::{error::Error, fmt::Debug, future, net::SocketAddr, sync::Arc};
+use std::{error::Error, fmt::Debug, sync::Arc};
 
 use futures::{Stream, StreamExt, stream};
 use snafu::Report;
 use tokio::io;
 
-use super::Resolve;
+use super::{Publisher, Resolver};
+use crate::parser::record::endpoint::EndpointAddr;
 
 #[cfg(feature = "h3x-resolver")]
 mod h3;
@@ -16,7 +17,7 @@ pub use h3::H3Resolver;
 pub use http::HttpResolver;
 pub use mdns::MdnsResolver;
 
-type ArcResolver = Arc<dyn Resolve + Send + Sync + 'static>;
+type ArcResolver = Arc<dyn Resolver + Send + Sync + 'static>;
 
 #[derive(Default, Clone)]
 pub struct Resolvers {
@@ -52,38 +53,16 @@ impl Resolvers {
         Self::default()
     }
 
-    pub fn with(mut self, resolver: Arc<dyn Resolve + Send + Sync + 'static>) -> Self {
+    pub fn with(mut self, resolver: Arc<dyn Resolver + Send + Sync + 'static>) -> Self {
         self.resolvers.push(resolver);
         self
     }
 
-    pub async fn lookup(
-        &self,
-        name: &str,
-    ) -> Result<impl Stream<Item = (ArcResolver, Vec<SocketAddr>)> + use<>, DnsErrors> {
-        let mut errors = vec![];
-
-        let mut lookups = stream::FuturesUnordered::from_iter(
-            (self.resolvers.clone().into_iter()).map(|resolver| {
-                let name = name.to_string();
-                async move { (resolver.clone(), resolver.lookup(&name).await) }
-            }),
-        );
-
-        let (resolver, endpoints) = loop {
-            match lookups.next().await {
-                Some((resolver, Ok(endpoints))) => break (resolver, endpoints),
-                Some((resolver, Err(error))) => errors.push((resolver, error)),
-                None => return Err(DnsErrors { errors }),
-            }
-        };
-
-        Ok(
-            stream::once(future::ready((resolver, endpoints))).chain(lookups.filter_map(
-                |(source, endpoints)| {
-                    future::ready(endpoints.ok().map(|endpoints| (source, endpoints)))
-                },
-            )),
-        )
+    pub fn lookup(&self, name: &str) -> impl Stream<Item = (Option<String>, EndpointAddr)> {
+        let futures = self.resolvers.iter().map(|resolver| {
+            let name = name.to_string();
+            async move { resolver.lookup(&name).await.unwrap_or_default() }
+        });
+        stream::FuturesUnordered::from_iter(futures).flat_map(stream::iter)
     }
 }

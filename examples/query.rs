@@ -1,7 +1,12 @@
-use std::{io, path::PathBuf};
+use std::{io, path::PathBuf, sync::Arc};
 
 use clap::Parser;
+use gm_quic::prelude::{
+    QuicClient,
+    handy::{ToCertificate, ToPrivateKey},
+};
 use gmdns::{MdnsPacket, parser::record::RData};
+use h3x::client::{BuildClientError, Client};
 use rustls::RootCertStore;
 use tracing::info;
 
@@ -16,8 +21,20 @@ struct Options {
     #[arg(long, default_value = "examples/keychain/localhost/ca.cert")]
     server_ca: PathBuf,
 
+    /// Client identity name (passed into h3x/gm-quic identity builder).
+    #[arg(long, default_value = "client.genmeta.net")]
+    client_name: String,
+
+    /// Client certificate chain in PEM.
+    #[arg(long, default_value = "examples/keychain/localhost/client.cert")]
+    client_cert: PathBuf,
+
+    /// Client private key in PEM (PKCS#8 or RSA).
+    #[arg(long, default_value = "examples/keychain/localhost/client.key")]
+    client_key: PathBuf,
+
     /// DNS name to lookup.
-    #[arg(long, default_value = "client")]
+    #[arg(long, default_value = "client.genmeta.net")]
     host: String,
 }
 
@@ -54,8 +71,6 @@ fn format_packet(packet: &MdnsPacket) -> String {
                 RData::E(ep) => {
                     output.push_str(&format!("Name:   {}\nAddress: {}\n", rr.name(), ep.primary));
                     if ep.is_signed() {
-                        // TODO: Provide SPKI to verify signature
-                        // For now, indicate signed but unable to verify without key
                         output.push_str("Signature: present (unable to verify without SPKI)\n");
                     }
                 }
@@ -77,23 +92,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
     let opt = Options::parse();
+    let root_store = load_root_store_from_pem(&opt.server_ca)?;
+    let cert_pem = std::fs::read(&opt.client_cert)?;
+    let key_pem = std::fs::read(&opt.client_key)?;
 
-    // Use regular reqwest client (HTTP/1.1 or HTTP/2 over TCP)
-    // This demonstrates decouple: The query does not use gm-quic/H3.
-    let client = reqwest::Client::builder()
-        .use_rustls_tls()
-        .add_root_certificate(reqwest::tls::Certificate::from_pem(&std::fs::read(
-            &opt.server_ca,
-        )?)?)
-        .build()?;
+    let client = Client::<QuicClient>::builder()
+        .with_root_certificates(Arc::new(root_store))
+        .with_identity(
+            opt.client_name,
+            cert_pem.to_certificate(),
+            key_pem.to_private_key(),
+        )
+        .map_err(|e: BuildClientError| io::Error::other(e.to_string()))?
+        .build();
 
     let url = format!("{}lookup?host={}", opt.base_url, opt.host);
     info!(url = %url, "lookup.start");
 
-    let resp = client.get(&url).send().await?;
+    let uri: http::Uri = url.parse()?;
+    let (_req, mut resp) = client.new_request().get(uri).await?;
 
     if resp.status().is_success() {
-        let bytes = resp.bytes().await?;
+        let bytes = resp.read_to_bytes().await?;
         // In this example, the server returns raw bytes (e.g., DNS packet or custom format).
         // Since the resolver example was returning serialized data, we just print it.
         // If it returns MDNS packet bytes, we could parse it, but for now we just show we got it.
@@ -111,9 +131,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     } else {
         let status = resp.status();
-        let text = resp.text().await?;
-        info!(%status, error = %text, "lookup.failed");
-        eprintln!("Lookup failed: {} - {}", status, text);
+        info!(%status, "lookup.failed");
+        eprintln!("Lookup failed: {}", status);
     }
 
     Ok(())

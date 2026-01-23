@@ -1,4 +1,4 @@
-use std::{fmt::Display, io, net::SocketAddr, sync::Arc};
+use std::{fmt::Display, io, sync::Arc};
 
 use dashmap::DashMap;
 use gm_quic::prelude::{
@@ -7,16 +7,19 @@ use gm_quic::prelude::{
 };
 use h3x::client::{BuildClientError, Client};
 use reqwest::IntoUrl;
-use rustls::{RootCertStore, SignatureScheme, sign::SigningKey};
+use rustls::RootCertStore;
 use tokio::{sync::Mutex, time::Instant};
 use url::Url;
 
-use super::Resolve;
-use crate::{MdnsPacket, parser::packet::be_packet};
+use super::{Publisher, Resolver};
+use crate::{
+    MdnsPacket,
+    parser::{packet::be_packet, record::endpoint::EndpointAddr},
+};
 
 #[derive(Debug)]
 struct Record {
-    addrs: Vec<SocketAddr>,
+    addrs: Vec<EndpointAddr>,
     expire: Instant,
 }
 
@@ -102,38 +105,11 @@ impl From<io::Error> for Error {
 }
 
 #[async_trait::async_trait(?Send)]
-impl Resolve for H3Resolver {
-    async fn publish(
-        &self,
-        name: &str,
-        is_main: bool,
-        sequence: u64,
-        key: Option<(&dyn SigningKey, SignatureScheme)>,
-        addresses: &[SocketAddr],
-    ) -> io::Result<()> {
-        tracing::debug!(name, ?addresses, "Publishing DNS with addresses via H3");
-
-        // 先完成签名与编码，避免把 `key` 的引用跨越 await
+impl Publisher for H3Resolver {
+    async fn publish(&self, name: &str, endpoint: EndpointAddr) -> io::Result<()> {
         let bytes = {
-            let dns_eps = addresses
-                .iter()
-                .map(|&addr| {
-                    let mut ep = match addr {
-                        SocketAddr::V4(v4) => crate::MdnsEndpoint::direct_v4(v4),
-                        SocketAddr::V6(v6) => crate::MdnsEndpoint::direct_v6(v6),
-                    };
-                    ep.set_main(is_main);
-                    ep.set_sequence(sequence);
-                    if let Some((k, s)) = key {
-                        ep.sign_with(k, s)
-                            .map_err(|e| io::Error::other(format!("Sign error: {e}")))?;
-                    }
-                    Ok(ep)
-                })
-                .collect::<Result<Vec<_>, io::Error>>()?;
-
             let mut hosts = std::collections::HashMap::new();
-            hosts.insert(name.to_string(), dns_eps);
+            hosts.insert(name.to_string(), vec![endpoint]);
             let answer = MdnsPacket::answer(0, &hosts);
             answer.to_bytes()
         };
@@ -167,8 +143,11 @@ impl Resolve for H3Resolver {
 
         Ok(())
     }
+}
 
-    async fn lookup(&self, name: &str) -> io::Result<Vec<SocketAddr>> {
+#[async_trait::async_trait(?Send)]
+impl Resolver for H3Resolver {
+    async fn lookup(&self, name: &str) -> io::Result<Vec<(Option<String>, EndpointAddr)>> {
         let lookup = async {
             use crate::parser::record;
 
@@ -176,7 +155,11 @@ impl Resolve for H3Resolver {
             self.cached_records
                 .retain(|_host, Record { expire, .. }| *expire < now);
             if let Some(record) = self.cached_records.get(name) {
-                return Ok(record.addrs.clone());
+                return Ok(record
+                    .addrs
+                    .iter()
+                    .map(|e: &EndpointAddr| (None, e.clone()))
+                    .collect());
             }
 
             let url = self.base_url.join("lookup").expect("Invalid URL");
@@ -209,7 +192,7 @@ impl Resolve for H3Resolver {
                 .answers
                 .iter()
                 .filter_map(|answer| match answer.data() {
-                    record::RData::E(e) => Some(e.primary),
+                    record::RData::E(e) => Some((None, e.clone())),
                     _ => None,
                 })
                 .collect::<Vec<_>>();
@@ -217,6 +200,16 @@ impl Resolve for H3Resolver {
             if ret.is_empty() {
                 return Err(Error::NoRecordFound {});
             }
+
+            // cache the addrs
+            let addrs = ret.iter().map(|(_, e)| e.clone()).collect();
+            self.cached_records.insert(
+                name.to_string(),
+                Record {
+                    addrs,
+                    expire: now + std::time::Duration::from_secs(300),
+                },
+            );
 
             Ok(ret)
         };

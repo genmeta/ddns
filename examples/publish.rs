@@ -1,7 +1,10 @@
 use std::{io, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use clap::Parser;
-use gmdns::resolver::{H3Resolver, Resolve};
+use gmdns::{
+    parser::record::endpoint::EndpointAddr,
+    resolver::{H3Resolver, Publisher},
+};
 use rustls::{RootCertStore, SignatureScheme, pki_types::PrivateKeyDer, sign::SigningKey};
 use tracing::info;
 
@@ -17,7 +20,7 @@ struct Options {
     server_ca: PathBuf,
 
     /// Client identity name (passed into h3x/gm-quic identity builder).
-    #[arg(long, default_value = "client")]
+    #[arg(long, default_value = "client.genmeta.net")]
     client_name: String,
 
     /// Client certificate chain in PEM.
@@ -36,7 +39,7 @@ struct Options {
     sign: bool,
 
     /// DNS name to publish. Must match the single DNS SAN in the client cert.
-    #[arg(long, default_value = "client")]
+    #[arg(long, default_value = "client.genmeta.net")]
     host: String,
 
     /// Socket addresses to publish.
@@ -136,16 +139,19 @@ async fn main() -> io::Result<()> {
     } else {
         info!("publish.endpoint_signing.disabled");
     }
-    
-    resolver
-        .publish(
-            &opt.host,
-            opt.is_main,
-            opt.sequence,
-            signer.as_deref().zip(signer_scheme).map(|(k, s)| (k, s)),
-            &opt.addr,
-        )
-        .await?;
+
+    for &addr in &opt.addr {
+        let mut endpoint = match addr {
+            SocketAddr::V4(v4) => EndpointAddr::direct_v4(v4),
+            SocketAddr::V6(v6) => EndpointAddr::direct_v6(v6),
+        };
+        endpoint.set_main(opt.is_main);
+        endpoint.set_sequence(opt.sequence);
+        if let Some((key, scheme)) = signer.as_deref().zip(signer_scheme) {
+            endpoint.sign_with(key, scheme).map_err(io::Error::other)?;
+        }
+        resolver.publish(&opt.host, endpoint).await?;
+    }
     info!("publish.ok");
 
     Ok(())

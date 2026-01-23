@@ -1,9 +1,5 @@
 use std::{collections::HashMap, io, net::SocketAddr, path::PathBuf, sync::Arc};
 
-use axum::{
-    extract::{Query, State},
-    response::IntoResponse,
-};
 use clap::Parser;
 use dashmap::DashMap;
 use deadpool_redis::Pool;
@@ -69,6 +65,8 @@ enum AppError {
     InvalidHost,
     #[error("Forbidden host")]
     ForbiddenHost,
+    #[error("Domain not allowed")]
+    DomainNotAllowed,
     #[error("Host mismatch")]
     HostMismatch,
     #[error("Missing client certificate")]
@@ -93,6 +91,7 @@ impl AppError {
             AppError::MissingHostParam => http::StatusCode::BAD_REQUEST,
             AppError::InvalidHost => http::StatusCode::BAD_REQUEST,
             AppError::ForbiddenHost => http::StatusCode::BAD_REQUEST,
+            AppError::DomainNotAllowed => http::StatusCode::FORBIDDEN,
             AppError::HostMismatch => http::StatusCode::BAD_REQUEST,
             AppError::MissingClientCertificate => http::StatusCode::UNAUTHORIZED,
             AppError::ClientCertDomainNotAllowed => http::StatusCode::FORBIDDEN,
@@ -102,12 +101,6 @@ impl AppError {
             AppError::InvalidSignature => http::StatusCode::BAD_REQUEST,
             AppError::Redis(_) => http::StatusCode::SERVICE_UNAVAILABLE,
         }
-    }
-}
-
-impl IntoResponse for AppError {
-    fn into_response(self) -> axum::response::Response {
-        (self.status(), format!("{}", self)).into_response()
     }
 }
 
@@ -124,7 +117,14 @@ fn normalize_host(host: &str) -> Result<String, AppError> {
     let host = host.strip_suffix('.').unwrap_or(host);
 
     let host = idna::domain_to_ascii(host).map_err(|_| AppError::InvalidHost)?;
-    Ok(host.to_ascii_lowercase())
+    let host = host.to_ascii_lowercase();
+
+    // 校验是否为 genmeta.net 域名
+    if !host.ends_with("genmeta.net") {
+        return Err(AppError::DomainNotAllowed);
+    }
+
+    Ok(host)
 }
 
 fn parse_query_params(uri: &http::Uri) -> HashMap<String, String> {
@@ -367,26 +367,6 @@ async fn lookup(state: AppState, req: Request, resp: &mut Response) {
     }
 }
 
-// Axum lookup handler (TCP/HTTPS)
-async fn axum_lookup(
-    State(state): State<AppState>,
-    Query(params): Query<HashMap<String, String>>,
-) -> impl IntoResponse {
-    let Some(host) = params.get("host") else {
-        return AppError::MissingHostParam.into_response();
-    };
-
-    match perform_lookup(&state, host).await {
-        Ok(Some(bytes)) => (http::StatusCode::OK, bytes::Bytes::from(bytes)).into_response(),
-        Ok(None) => (
-            http::StatusCode::NOT_FOUND,
-            bytes::Bytes::from_static(b"Not Found"),
-        )
-            .into_response(),
-        Err(e) => e.into_response(),
-    }
-}
-
 #[derive(Clone)]
 struct PublishSvc {
     state: AppState,
@@ -461,25 +441,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cert_pem = std::fs::read(&options.cert)?;
     let key_pem = std::fs::read(&options.key)?;
-
-    let state_tcp = state.clone();
-    let axum_app = axum::Router::new()
-        .route("/lookup", axum::routing::get(axum_lookup))
-        .with_state(state_tcp);
-
-    let tls_config =
-        axum_server::tls_rustls::RustlsConfig::from_pem(cert_pem.clone(), key_pem.clone()).await?;
-
-    let tcp_addr = options.listen;
-    info!(listen = %tcp_addr, "https_server.start");
-
-    // Spawn HTTPS server
-    tokio::spawn(async move {
-        axum_server::bind_rustls(tcp_addr, tls_config)
-            .serve(axum_app.into_make_service())
-            .await
-            .expect("Failed to start TCP/HTTPS server");
-    });
 
     let router = Router::new()
         .post(

@@ -1,29 +1,23 @@
 use std::io;
 
 use async_trait::async_trait;
-use rustls::{SignatureScheme, sign::SigningKey};
 
-use super::Resolve;
+use super::{Publisher, Resolver};
 pub use crate::mdns::Mdns as MdnsResolver;
+use crate::parser::record::endpoint::EndpointAddr;
 
 #[async_trait(?Send)]
-impl Resolve for MdnsResolver {
-    async fn publish(
-        &self,
-        name: &str,
-        _is_main: bool,
-        _sequence: u64,
-        _key: Option<(&dyn SigningKey, SignatureScheme)>,
-        addresses: &[std::net::SocketAddr],
-    ) -> io::Result<()> {
-        let addresses: Vec<_> = addresses.to_vec();
-        self.insert_host(name.to_string(), addresses);
+impl Publisher for MdnsResolver {
+    async fn publish(&self, name: &str, endpoint: EndpointAddr) -> io::Result<()> {
+        self.insert_host(name.to_string(), vec![endpoint.primary]);
         Ok(())
     }
+}
 
-    async fn lookup(&self, name: &str) -> io::Result<Vec<std::net::SocketAddr>> {
-        self.query(name.to_string())
-            .await
-            .map(|addr_list| addr_list.iter().map(|e| e.primary).collect::<Vec<_>>())
+#[async_trait(?Send)]
+impl Resolver for MdnsResolver {
+    async fn lookup(&self, name: &str) -> io::Result<Vec<(Option<String>, EndpointAddr)>> {
+        let addr_list = self.query(name.to_string()).await?;
+        Ok(addr_list.into_iter().map(|e| (None, e)).collect())
     }
 }
