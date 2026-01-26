@@ -34,7 +34,7 @@ serde = "1"
 
 # Optional HTTP/3 publisher/resolver via h3x
 h3x = { path = "../h3x", default-features = false, features = ["gm-quic"], optional = true }
-gm-quic = { path = "../gm-quic-traversal/gm-quic", optional = true }
+gm-quic = { path = "../gm-quic/gm-quic", optional = true }
 http = { version = "1", optional = true }
 
 [features]
@@ -44,13 +44,13 @@ h3x-resolver = ["dep:h3x", "dep:gm-quic", "dep:http"]
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }
 criterion = "0.5"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rustls-pemfile = "2"
 idna = "1"
 redis = { version = "0.23", features = ["tokio-comp", "aio"] }
 tracing-appender = "0.2"
 deadpool-redis = "0.12"
-qbase = { path = "../gm-quic-traversal/qbase" }
+qbase = { path = "../gm-quic/qbase" }
 
 [[example]]
 name = "mdns_discover"

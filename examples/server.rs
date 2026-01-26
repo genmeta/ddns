@@ -1,4 +1,4 @@
-use std::{collections::HashMap, io, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, fs::File, io, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use clap::Parser;
 use dashmap::DashMap;
@@ -12,9 +12,8 @@ use h3x::{
 };
 use redis::AsyncCommands;
 use rustls::{RootCertStore, server::WebPkiClientVerifier};
-use rustls_pemfile;
 use tokio::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::{Level, info, warn};
 
 #[derive(Parser, Clone, Debug)]
 #[command(version, about, long_about = None)]
@@ -22,19 +21,25 @@ struct Options {
     #[arg(long)]
     redis: Option<String>,
 
-    #[arg(long, default_value = "127.0.0.1:4433")]
+    #[arg(long, default_value = "0.0.0.0:4433")]
     listen: SocketAddr,
 
-    #[arg(long, default_value = "localhost")]
+    #[arg(long, default_value = "xforward.cloudns.ph")]
     server_name: String,
 
-    #[arg(long, default_value = "examples/keychain/localhost/server.cert")]
+    #[arg(
+        long,
+        default_value = "examples/keychain/xforward.cloudns.ph/xforward.cloudns.ph-ECC.crt"
+    )]
     cert: PathBuf,
 
-    #[arg(long, default_value = "examples/keychain/localhost/server.key")]
+    #[arg(
+        long,
+        default_value = "examples/keychain/xforward.cloudns.ph/xforward.cloudns.ph-ECC.key"
+    )]
     key: PathBuf,
 
-    #[arg(long, default_value = "examples/keychain/localhost/ca.cert")]
+    #[arg(long, default_value = "examples/keychain/root/rootCA-ECC.crt")]
     root_cert: PathBuf,
 
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
@@ -193,14 +198,14 @@ fn validate_dns_packet(
         }
 
         for record in &dns_packet.answers {
-            if let RData::E(endpoint) = record.data() {
-                if endpoint.is_signed() {
-                    let ok = endpoint
-                        .verify_signature(agent.public_key())
-                        .map_err(|_| AppError::InvalidSignature)?;
-                    if !ok {
-                        return Err(AppError::InvalidSignature);
-                    }
+            if let RData::E(endpoint) = record.data()
+                && endpoint.is_signed()
+            {
+                let ok = endpoint
+                    .verify_signature(agent.public_key())
+                    .map_err(|_| AppError::InvalidSignature)?;
+                if !ok {
+                    return Err(AppError::InvalidSignature);
                 }
             }
         }
@@ -413,7 +418,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .install_default()
         .expect("Failed to install ring crypto provider");
 
-    tracing_subscriber::fmt::init();
+    let file = File::create("error.log").expect("Failed to create error.log");
+    tracing_subscriber::fmt()
+        .with_writer(file)
+        .with_max_level(Level::ERROR)
+        .init();
 
     let options = Options::parse();
 
