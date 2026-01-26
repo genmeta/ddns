@@ -253,6 +253,23 @@ fn parse<'a, T>(
     Ok((input, records))
 }
 
+impl fmt::Debug for Packet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Packet {{ id: {}, qr: {}, opcode: {:?}, rcode: {:?}, questions: {}, answers: {}, authorities: {}, additional: {} }}",
+            self.header.id,
+            self.header.flags.query(),
+            self.header.flags.opcode(),
+            self.header.flags.response_code(),
+            self.questions.len(),
+            self.answers.len(),
+            self.nameservers.len(),
+            self.additional.len()
+        )
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -477,22 +494,5 @@ mod test {
 
         let ptr = (0xC000u16 | (skype_pos as u16)).to_be_bytes();
         assert_eq!(&bytes[mail_pos + 5..mail_pos + 7], &ptr);
-    }
-}
-
-impl fmt::Debug for Packet {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Packet {{ id: {}, qr: {}, opcode: {:?}, rcode: {:?}, questions: {}, answers: {}, authorities: {}, additional: {} }}",
-            self.header.id,
-            self.header.flags.query(),
-            self.header.flags.opcode(),
-            self.header.flags.response_code(),
-            self.questions.len(),
-            self.answers.len(),
-            self.nameservers.len(),
-            self.additional.len()
-        )
     }
 }

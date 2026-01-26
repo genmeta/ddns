@@ -1,12 +1,18 @@
 use std::{io, path::PathBuf, sync::Arc};
 
 use clap::Parser;
-use gm_quic::prelude::{
-    QuicClient,
-    handy::{ToCertificate, ToPrivateKey},
+use futures::stream::{self, StreamExt};
+use gm_quic::{
+    prelude::{
+        QuicClient,
+        handy::{ToCertificate, ToPrivateKey},
+        Resolve,
+    },
+    qtraversal::resolver::ResolveStream,
 };
 use gmdns::{MdnsPacket, parser::record::RData};
 use h3x::client::{BuildClientError, Client};
+use qbase::net::route::SocketEndpointAddr;
 use rustls::RootCertStore;
 use tracing::info;
 
@@ -36,6 +42,35 @@ struct Options {
     /// DNS name to lookup.
     #[arg(long, default_value = "client.genmeta.net")]
     host: String,
+}
+
+#[derive(Clone)]
+struct TestResolver {
+    addr: std::net::SocketAddr,
+}
+
+impl std::fmt::Display for TestResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TestResolver({})", self.addr)
+    }
+}
+
+impl std::fmt::Debug for TestResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TestResolver({})", self.addr)
+    }
+}
+
+impl Resolve for TestResolver {
+    fn lookup<'a>(&'a self, name: &'a str) -> ResolveStream<'a> {
+        if name == "localhost" {
+            let item = (None, SocketEndpointAddr::Direct { addr: self.addr });
+            stream::iter(vec![Ok(item)]).boxed()
+        } else {
+            let err = std::io::Error::new(std::io::ErrorKind::NotFound, "not found");
+            stream::iter(vec![Err(err)]).boxed()
+        }
+    }
 }
 
 fn load_root_store_from_pem(path: &PathBuf) -> io::Result<RootCertStore> {
@@ -96,6 +131,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cert_pem = std::fs::read(&opt.client_cert)?;
     let key_pem = std::fs::read(&opt.client_key)?;
 
+    let server_addr: std::net::SocketAddr = "127.0.0.1:4433".parse().unwrap();
+
     let client = Client::<QuicClient>::builder()
         .with_root_certificates(Arc::new(root_store))
         .with_identity(
@@ -104,6 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             key_pem.to_private_key(),
         )
         .map_err(|e: BuildClientError| io::Error::other(e.to_string()))?
+        .with_resolver(Arc::new(TestResolver { addr: server_addr }))
         .build();
 
     let url = format!("{}lookup?host={}", opt.base_url, opt.host);

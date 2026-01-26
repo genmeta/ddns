@@ -141,12 +141,12 @@ Answer, Nameserver, and Additional sections all use this format:
 
 ### 2. Custom Type Definitions (QType)
 
-| Type     | Value | Description       | RDATA Format                      |
-| :------- | :---- | :---------------- | :-------------------------------- |
-| **A**    | 1     | IPv4 address      | 4-byte IP                         |
-| **AAAA** | 28    | IPv6 address      | 16-byte IP                        |
-| **SRV**  | 33    | Service location  | Priority + Weight + Port + Target |
-| **E**    | 266   | Endpoint address  | Flags + Seq + Addr(s) + [Sig]     |
+| Type     | Value | Description      | RDATA Format                      |
+| :------- | :---- | :--------------- | :-------------------------------- |
+| **A**    | 1     | IPv4 address     | 4-byte IP                         |
+| **AAAA** | 28    | IPv6 address     | 16-byte IP                        |
+| **SRV**  | 33    | Service location | Priority + Weight + Port + Target |
+| **E**    | 266   | Endpoint address | Flags + Seq + Addr(s) + [Sig]     |
 
 ### 3. Endpoint Extensions (Type E)
 

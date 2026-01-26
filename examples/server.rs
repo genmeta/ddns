@@ -467,7 +467,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut servers = Servers::builder()
         .with_client_cert_verifier(verifier)?
-        .build();
+        .build()?;
 
     servers
         .add_server(

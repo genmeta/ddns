@@ -1,10 +1,13 @@
 use std::{io, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use clap::Parser;
+use futures::stream::{self, StreamExt};
+use gm_quic::{prelude::Resolve, qtraversal::resolver::ResolveStream};
 use gmdns::{
     parser::record::endpoint::EndpointAddr,
     resolver::{H3Resolver, Publisher},
 };
+use qbase::net::route::SocketEndpointAddr;
 use rustls::{RootCertStore, SignatureScheme, pki_types::PrivateKeyDer, sign::SigningKey};
 use tracing::info;
 
@@ -51,6 +54,35 @@ struct Options {
 
     #[arg(long, default_value_t = 1)]
     sequence: u64,
+}
+
+#[derive(Clone)]
+struct TestResolver {
+    addr: std::net::SocketAddr,
+}
+
+impl std::fmt::Display for TestResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TestResolver({})", self.addr)
+    }
+}
+
+impl std::fmt::Debug for TestResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TestResolver({})", self.addr)
+    }
+}
+
+impl Resolve for TestResolver {
+    fn lookup<'a>(&'a self, name: &'a str) -> ResolveStream<'a> {
+        if name == "localhost" {
+            let item = (None, SocketEndpointAddr::Direct { addr: self.addr });
+            stream::iter(vec![Ok(item)]).boxed()
+        } else {
+            let err = std::io::Error::new(std::io::ErrorKind::NotFound, "not found");
+            stream::iter(vec![Err(err)]).boxed()
+        }
+    }
 }
 
 fn load_root_store_from_pem(path: &PathBuf) -> io::Result<RootCertStore> {
@@ -124,14 +156,21 @@ async fn main() -> io::Result<()> {
         .transpose()?;
     let signer_scheme = signer.as_deref().map(pick_signature_scheme).transpose()?;
 
+    let server_addr: std::net::SocketAddr = "127.0.0.1:4433".parse().unwrap();
+
+    let client = h3x::client::Client::<gm_quic::prelude::QuicClient>::builder()
+        .with_root_certificates(Arc::new(root_store))
+        .with_identity(
+            opt.client_name,
+            cert_chain_pem.as_slice(),
+            private_key_pem.as_slice(),
+        )
+        .map_err(|e: h3x::client::BuildClientError| io::Error::other(e.to_string()))?
+        .with_resolver(Arc::new(TestResolver { addr: server_addr }))
+        .build();
+
     // Uses H3Resolver which uses gm-quic internally aka HTTP/3
-    let resolver = H3Resolver::new_with_identity(
-        opt.base_url,
-        root_store,
-        opt.client_name,
-        cert_chain_pem.as_slice(),
-        private_key_pem.as_slice(),
-    )?;
+    let resolver = H3Resolver::new(opt.base_url, client)?;
 
     info!(host = %opt.host, addrs = ?opt.addr, "publish.start");
     if let Some(scheme) = signer_scheme {
