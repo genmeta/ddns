@@ -1,4 +1,5 @@
 use std::{
+    convert::TryFrom,
     fmt::Display,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
 };
@@ -538,6 +539,34 @@ impl Display for EndpointAddr {
             write!(f, "{}-{agent_addr}", self.primary)
         } else {
             write!(f, "{}", self.primary)
+        }
+    }
+}
+
+#[cfg(feature = "h3x-resolver")]
+use gm_quic::qbase::net::route::SocketEndpointAddr;
+
+#[cfg(feature = "h3x-resolver")]
+impl TryFrom<SocketEndpointAddr> for EndpointAddr {
+    type Error = ();
+
+    fn try_from(value: SocketEndpointAddr) -> Result<Self, Self::Error> {
+        match value {
+            SocketEndpointAddr::Direct {
+                addr: SocketAddr::V4(addr),
+            } => Ok(Self::direct_v4(addr)),
+            SocketEndpointAddr::Direct {
+                addr: SocketAddr::V6(addr),
+            } => Ok(Self::direct_v6(addr)),
+            SocketEndpointAddr::Agent {
+                agent: SocketAddr::V4(agent),
+                outer: SocketAddr::V4(outer),
+            } => Ok(Self::relay_v4(outer, agent)),
+            SocketEndpointAddr::Agent {
+                agent: SocketAddr::V6(agent),
+                outer: SocketAddr::V6(outer),
+            } => Ok(Self::relay_v6(outer, agent)),
+            _ => Err(()),
         }
     }
 }

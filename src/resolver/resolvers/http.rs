@@ -90,7 +90,7 @@ impl From<io::Error> for Error {
     }
 }
 
-#[async_trait::async_trait(?Send)]
+#[async_trait::async_trait]
 impl Publisher for HttpResolver {
     async fn publish(&self, name: &str, endpoint: EndpointAddr) -> io::Result<()> {
         let mut hosts = HashMap::new();
@@ -116,7 +116,7 @@ impl Publisher for HttpResolver {
     }
 }
 
-#[async_trait::async_trait(?Send)]
+#[async_trait::async_trait]
 impl Resolver for HttpResolver {
     async fn lookup(&self, name: &str) -> io::Result<Vec<(Option<String>, EndpointAddr)>> {
         let lookup = async {

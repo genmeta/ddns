@@ -1,12 +1,10 @@
 use std::io;
 
-use async_trait::async_trait;
-
 use super::{Publisher, Resolver};
 pub use crate::mdns::Mdns as MdnsResolver;
 use crate::parser::record::endpoint::EndpointAddr;
 
-#[async_trait(?Send)]
+#[async_trait::async_trait]
 impl Publisher for MdnsResolver {
     async fn publish(&self, name: &str, endpoint: EndpointAddr) -> io::Result<()> {
         self.insert_host(name.to_string(), vec![endpoint.primary]);
@@ -14,7 +12,7 @@ impl Publisher for MdnsResolver {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait::async_trait]
 impl Resolver for MdnsResolver {
     async fn lookup(&self, name: &str) -> io::Result<Vec<(Option<String>, EndpointAddr)>> {
         let addr_list = self.query(name.to_string()).await?;
