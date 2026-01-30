@@ -51,6 +51,7 @@ redis = { version = "0.23", features = ["tokio-comp", "aio"] }
 tracing-appender = "0.2"
 deadpool-redis = "0.12"
 qbase = { path = "../gm-quic/qbase" }
+base64 = "0.22"
 
 [[example]]
 name = "mdns_discover"

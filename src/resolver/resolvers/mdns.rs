@@ -1,4 +1,4 @@
-use std::{io, net::SocketAddr};
+use std::io;
 
 use super::{Publisher, Resolver};
 pub use crate::mdns::Mdns as MdnsResolver;

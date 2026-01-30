@@ -52,7 +52,7 @@ struct Options {
 #[derive(Clone)]
 enum Storage {
     Redis(Pool),
-    Memory(Arc<DashMap<String, (Vec<u8>, Instant)>>),
+    Memory(Arc<DashMap<String, (Vec<u8>, Vec<u8>, Instant)>>), // (dns_packet, certificate, expire_time)
 }
 
 #[derive(Clone)]
@@ -219,7 +219,10 @@ fn validate_dns_packet(
 }
 
 // 核心查询逻辑，独立于 transport
-async fn perform_lookup(state: &AppState, host: &str) -> Result<Option<Vec<u8>>, AppError> {
+async fn perform_lookup(
+    state: &AppState,
+    host: &str,
+) -> Result<Option<(Vec<u8>, Vec<u8>)>, AppError> {
     let host = normalize_host(host)?;
 
     match &state.storage {
@@ -229,17 +232,31 @@ async fn perform_lookup(state: &AppState, host: &str) -> Result<Option<Vec<u8>>,
                 .await
                 .map_err(|e| AppError::Redis(e.to_string()))?;
 
-            match conn.get::<_, Option<Vec<u8>>>(&host).await {
-                Ok(bytes) => Ok(bytes),
-                Err(e) => Err(AppError::Redis(e.to_string())),
+            // 获取DNS记录
+            let dns_bytes: Option<Vec<u8>> = conn
+                .get(&host)
+                .await
+                .map_err(|e| AppError::Redis(e.to_string()))?;
+
+            // 获取证书
+            let cert_key = format!("{}_cert", host);
+            let cert_bytes: Option<Vec<u8>> = conn
+                .get(&cert_key)
+                .await
+                .map_err(|e| AppError::Redis(e.to_string()))?;
+
+            match (dns_bytes, cert_bytes) {
+                (Some(dns), Some(cert)) => Ok(Some((dns, cert))),
+                (Some(dns), None) => Ok(Some((dns, Vec::new()))), // 兼容没有证书的情况
+                _ => Ok(None),
             }
         }
         Storage::Memory(map) => {
             let now = Instant::now();
             if let Some(entry) = map.get(&host) {
-                let (bytes, expire) = entry.value();
+                let (dns_bytes, cert_bytes, expire) = entry.value();
                 if *expire > now {
-                    return Ok(Some(bytes.clone()));
+                    return Ok(Some((dns_bytes.clone(), cert_bytes.clone())));
                 }
             }
             map.remove(&host);
@@ -254,124 +271,6 @@ async fn write_error(resp: &mut Response, err: AppError) {
     let _ = resp.flush().await;
 }
 
-async fn publish(state: AppState, mut req: Request, resp: &mut Response) {
-    let params = parse_query_params(&req.uri());
-    let Some(host) = params.get("host") else {
-        write_error(resp, AppError::MissingHostParam).await;
-        return;
-    };
-
-    let host = match normalize_host(host) {
-        Ok(h) => h,
-        Err(e) => {
-            write_error(resp, e).await;
-            return;
-        }
-    };
-
-    let Some(agent) = req.agent().cloned() else {
-        write_error(resp, AppError::MissingClientCertificate).await;
-        return;
-    };
-
-    let allowed = match client_allowed_host(&agent) {
-        Ok(h) => h,
-        Err(e) => {
-            write_error(resp, e).await;
-            return;
-        }
-    };
-
-    if allowed != host {
-        write_error(resp, AppError::HostMismatch).await;
-        return;
-    }
-
-    let body = match req.read_to_bytes().await {
-        Ok(b) => b,
-        Err(e) => {
-            write_error(resp, AppError::InvalidDnsPacket(e.to_string())).await;
-            return;
-        }
-    };
-
-    let packet_name = match validate_dns_packet(body.as_ref(), state.require_signature, &agent) {
-        Ok(n) => n,
-        Err(e) => {
-            write_error(resp, e).await;
-            return;
-        }
-    };
-
-    let packet_host = match normalize_host(&packet_name) {
-        Ok(h) => h,
-        Err(e) => {
-            write_error(resp, e).await;
-            return;
-        }
-    };
-
-    if packet_host != host {
-        write_error(resp, AppError::HostMismatch).await;
-        return;
-    }
-
-    match &state.storage {
-        Storage::Redis(pool) => {
-            let mut conn = match pool.get().await {
-                Ok(c) => c,
-                Err(e) => {
-                    write_error(resp, AppError::Redis(e.to_string())).await;
-                    return;
-                }
-            };
-
-            let ttl_secs: usize = state.ttl_secs.try_into().unwrap_or(usize::MAX);
-            if let Err(e) = conn
-                .set_ex::<_, _, ()>(&host, body.as_ref(), ttl_secs)
-                .await
-            {
-                write_error(resp, AppError::Redis(e.to_string())).await;
-                return;
-            }
-        }
-        Storage::Memory(map) => {
-            let expire = Instant::now() + Duration::from_secs(state.ttl_secs);
-            map.insert(host.clone(), (body.to_vec(), expire));
-        }
-    }
-
-    info!(host = %host, ttl = state.ttl_secs, bytes = body.len(), "publish.ok");
-    resp.set_status(http::StatusCode::OK)
-        .set_body(bytes::Bytes::from_static(b"OK"));
-    let _ = resp.flush().await;
-}
-
-// H3 lookup handler
-async fn lookup(state: AppState, req: Request, resp: &mut Response) {
-    let params = parse_query_params(&req.uri());
-    let Some(host) = params.get("host") else {
-        write_error(resp, AppError::MissingHostParam).await;
-        return;
-    };
-
-    match perform_lookup(&state, host).await {
-        Ok(Some(bytes)) => {
-            resp.set_status(http::StatusCode::OK)
-                .set_body(bytes::Bytes::from(bytes));
-            let _ = resp.flush().await;
-        }
-        Ok(None) => {
-            resp.set_status(http::StatusCode::NOT_FOUND)
-                .set_body(bytes::Bytes::from_static(b"Not Found"));
-            let _ = resp.flush().await;
-        }
-        Err(e) => {
-            write_error(resp, e).await;
-        }
-    }
-}
-
 #[derive(Clone)]
 struct PublishSvc {
     state: AppState,
@@ -380,9 +279,121 @@ struct PublishSvc {
 impl Service for PublishSvc {
     type Future<'s> = BoxFuture<'s, ()>;
 
-    fn serve<'s>(&'s mut self, req: Request, resp: &'s mut Response) -> Self::Future<'s> {
+    fn serve<'s>(&self, request: &'s mut Request, response: &'s mut Response) -> Self::Future<'s> {
         let state = self.state.clone();
-        Box::pin(async move { publish(state, req, resp).await })
+        Box::pin(async move {
+            // 由于request现在是&mut，我们需要重新构造publish逻辑
+            let params = parse_query_params(&request.uri());
+            let Some(host) = params.get("host") else {
+                write_error(response, AppError::MissingHostParam).await;
+                return;
+            };
+
+            let host = match normalize_host(host) {
+                Ok(h) => h,
+                Err(e) => {
+                    write_error(response, e).await;
+                    return;
+                }
+            };
+
+            let Some(agent) = request.agent().cloned() else {
+                write_error(response, AppError::MissingClientCertificate).await;
+                return;
+            };
+
+            let allowed = match client_allowed_host(&agent) {
+                Ok(h) => h,
+                Err(e) => {
+                    write_error(response, e).await;
+                    return;
+                }
+            };
+
+            if allowed != host {
+                write_error(response, AppError::HostMismatch).await;
+                return;
+            }
+
+            let body = match request.read_to_bytes().await {
+                Ok(b) => b,
+                Err(e) => {
+                    write_error(response, AppError::InvalidDnsPacket(e.to_string())).await;
+                    return;
+                }
+            };
+
+            let packet_name =
+                match validate_dns_packet(body.as_ref(), state.require_signature, &agent) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        write_error(response, e).await;
+                        return;
+                    }
+                };
+
+            let packet_host = match normalize_host(&packet_name) {
+                Ok(h) => h,
+                Err(e) => {
+                    write_error(response, e).await;
+                    return;
+                }
+            };
+
+            if packet_host != host {
+                write_error(response, AppError::HostMismatch).await;
+                return;
+            }
+
+            match &state.storage {
+                Storage::Redis(pool) => {
+                    let mut conn = match pool.get().await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            write_error(response, AppError::Redis(e.to_string())).await;
+                            return;
+                        }
+                    };
+
+                    let ttl_secs: usize = state.ttl_secs.try_into().unwrap_or(usize::MAX);
+
+                    // 保存DNS记录
+                    if let Err(e) = conn
+                        .set_ex::<_, _, ()>(&host, body.as_ref(), ttl_secs)
+                        .await
+                    {
+                        write_error(response, AppError::Redis(e.to_string())).await;
+                        return;
+                    }
+
+                    // 保存客户端证书
+                    if let Some(cert_chain) = agent.cert_chain().first() {
+                        let cert_key = format!("{}_cert", host);
+                        if let Err(e) = conn
+                            .set_ex::<_, _, ()>(&cert_key, cert_chain.as_ref(), ttl_secs)
+                            .await
+                        {
+                            write_error(response, AppError::Redis(e.to_string())).await;
+                            return;
+                        }
+                    }
+                }
+                Storage::Memory(map) => {
+                    let expire = Instant::now() + Duration::from_secs(state.ttl_secs);
+                    let cert_bytes = agent
+                        .cert_chain()
+                        .first()
+                        .map(|cert| cert.as_ref().to_vec())
+                        .unwrap_or_default();
+                    map.insert(host.clone(), (body.to_vec(), cert_bytes, expire));
+                }
+            }
+
+            info!(host = %host, ttl = state.ttl_secs, bytes = body.len(), "publish.ok");
+            response.set_status(http::StatusCode::OK)
+                .set_body(bytes::Bytes::from_static(b"OK"));
+            let _ = response.flush().await;
+        })
     }
 }
 
@@ -391,12 +402,54 @@ struct LookupSvc {
     state: AppState,
 }
 
+// 在HTTP响应头中添加E-Cert证书
+async fn lookup_with_cert(state: AppState, request: &mut Request, response: &mut Response) {
+    let params = parse_query_params(&request.uri());
+    let Some(host) = params.get("host") else {
+        write_error(response, AppError::MissingHostParam).await;
+        return;
+    };
+
+    match perform_lookup(&state, host).await {
+        Ok(Some((dns_bytes, cert_bytes))) => {
+            // 设置DNS记录作为响应body
+            response.set_status(http::StatusCode::OK)
+                .set_body(bytes::Bytes::from(dns_bytes));
+            
+            // 如果有证书，添加E-Cert头部
+            if !cert_bytes.is_empty() {
+                // 将证书编码为base64放在E-Cert头部中
+                use base64::Engine;
+                let cert_b64 = base64::engine::general_purpose::STANDARD.encode(&cert_bytes);
+                if let Ok(header_value) = http::HeaderValue::from_str(&cert_b64) {
+                    response.headers_mut().insert(
+                        http::HeaderName::from_static("e-cert"),
+                        header_value
+                    );
+                }
+            }
+            
+            let _ = response.flush().await;
+        }
+        Ok(None) => {
+            response.set_status(http::StatusCode::NOT_FOUND)
+                .set_body(bytes::Bytes::from_static(b"Not Found"));
+            let _ = response.flush().await;
+        }
+        Err(e) => {
+            write_error(response, e).await;
+        }
+    }
+}
+
 impl Service for LookupSvc {
     type Future<'s> = BoxFuture<'s, ()>;
 
-    fn serve<'s>(&'s mut self, req: Request, resp: &'s mut Response) -> Self::Future<'s> {
+    fn serve<'s>(&self, request: &'s mut Request, response: &'s mut Response) -> Self::Future<'s> {
         let state = self.state.clone();
-        Box::pin(async move { lookup(state, req, resp).await })
+        Box::pin(async move {
+            lookup_with_cert(state, request, response).await;
+        })
     }
 }
 
