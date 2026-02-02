@@ -63,7 +63,7 @@ impl H3ResolverInner {
             .parse()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
-        let (_req, mut resp) = self
+        let (_, mut resp) = self
             .client
             .new_request()
             .with_body(bytes::Bytes::from(bytes))

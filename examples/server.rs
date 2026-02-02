@@ -27,16 +27,10 @@ struct Options {
     #[arg(long, default_value = "localhost")]
     server_name: String,
 
-    #[arg(
-        long,
-        default_value = "examples/keychain/localhost/localhost-ECC.crt"
-    )]
+    #[arg(long, default_value = "examples/keychain/localhost/localhost-ECC.crt")]
     cert: PathBuf,
 
-    #[arg(
-        long,
-        default_value = "examples/keychain/localhost/localhost-ECC.key"
-    )]
+    #[arg(long, default_value = "examples/keychain/localhost/localhost-ECC.key")]
     key: PathBuf,
 
     #[arg(long, default_value = "examples/keychain/root/rootCA-ECC.crt")]
@@ -283,11 +277,10 @@ impl Service for PublishSvc {
         let state = self.state.clone();
         Box::pin(async move {
             info!("Received publish request");
-            
-            // 由于request现在是&mut，我们需要重新构造publish逻辑
+
             let params = parse_query_params(&request.uri());
             info!("Query params: {:?}", params);
-            
+
             let Some(host) = params.get("host") else {
                 warn!("Missing host parameter");
                 write_error(response, AppError::MissingHostParam).await;
@@ -408,7 +401,8 @@ impl Service for PublishSvc {
             }
 
             info!(host = %host, ttl = state.ttl_secs, bytes = body.len(), "publish.ok");
-            response.set_status(http::StatusCode::OK)
+            response
+                .set_status(http::StatusCode::OK)
                 .set_body(bytes::Bytes::from_static(b"OK"));
             let _ = response.flush().await;
         })
@@ -431,26 +425,27 @@ async fn lookup_with_cert(state: AppState, request: &mut Request, response: &mut
     match perform_lookup(&state, host).await {
         Ok(Some((dns_bytes, cert_bytes))) => {
             // 设置DNS记录作为响应body
-            response.set_status(http::StatusCode::OK)
+            response
+                .set_status(http::StatusCode::OK)
                 .set_body(bytes::Bytes::from(dns_bytes));
-            
+
             // 如果有证书，添加E-Cert头部
             if !cert_bytes.is_empty() {
                 // 将证书编码为base64放在E-Cert头部中
                 use base64::Engine;
                 let cert_b64 = base64::engine::general_purpose::STANDARD.encode(&cert_bytes);
                 if let Ok(header_value) = http::HeaderValue::from_str(&cert_b64) {
-                    response.headers_mut().insert(
-                        http::HeaderName::from_static("e-cert"),
-                        header_value
-                    );
+                    response
+                        .headers_mut()
+                        .insert(http::HeaderName::from_static("e-cert"), header_value);
                 }
             }
-            
+
             let _ = response.flush().await;
         }
         Ok(None) => {
-            response.set_status(http::StatusCode::NOT_FOUND)
+            response
+                .set_status(http::StatusCode::NOT_FOUND)
                 .set_body(bytes::Bytes::from_static(b"Not Found"));
             let _ = response.flush().await;
         }
@@ -490,7 +485,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("Failed to install ring crypto provider");
 
     tracing_subscriber::fmt()
-        .with_max_level(Level::INFO) // 显示INFO级别的日志
+        .with_max_level(Level::DEBUG) // 显示INFO级别的日志
         .init();
 
     let options = Options::parse();

@@ -6,7 +6,7 @@ use gmdns::{
     resolver::{H3Resolver, Publisher},
 };
 use rustls::{RootCertStore, SignatureScheme, pki_types::PrivateKeyDer, sign::SigningKey};
-use tracing::info;
+use tracing::{Level, info};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -116,7 +116,9 @@ async fn main() -> io::Result<()> {
         .install_default()
         .expect("Failed to install ring crypto provider");
 
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_max_level(Level::DEBUG) // 显示INFO级别的日志
+        .init();
 
     let opt = Options::parse();
 
@@ -128,7 +130,10 @@ async fn main() -> io::Result<()> {
     let mut cert_reader = std::io::Cursor::new(&cert_chain_pem);
     if let Ok(certs) = rustls_pemfile::certs(&mut cert_reader).collect::<Result<Vec<_>, _>>() {
         if let Some(first_cert) = certs.first() {
-            info!(cert_len = first_cert.len(), "Client certificate loaded, will be sent to server for storage");
+            info!(
+                cert_len = first_cert.len(),
+                "Client certificate loaded, will be sent to server for storage"
+            );
         }
     }
 

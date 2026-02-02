@@ -3,7 +3,7 @@ use std::{
     fmt,
     fmt::Display,
     io::{self},
-    net::{Ipv4Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
     task::{Context, Poll},
     time::Duration,
@@ -31,7 +31,7 @@ pub struct Mdns {
 
 struct MdnsInner {
     local_device: String,
-    ip: Ipv4Addr,
+    ip: IpAddr,
     proto: Option<Arc<MdnsProtocol>>,
     tasks: Option<AbortOnDropHandle<()>>,
     closing: bool,
@@ -65,16 +65,12 @@ impl Display for Mdns {
 }
 
 impl Mdns {
-    pub fn new(service_name: &str, ip: Ipv4Addr, device: &str) -> io::Result<Self> {
+    pub fn new(service_name: &str, ip: IpAddr, device: &str) -> io::Result<Self> {
         let service_name = service_name.to_string();
         let hosts = Arc::new(Mutex::new(HashMap::<String, Vec<EndpointAddr>>::new()));
 
         let proto = MdnsProtocol::new(device, ip)?;
-        let tasks = Self::spawn_tasks(
-            proto.clone(),
-            hosts.clone(),
-            service_name.clone(),
-        );
+        let tasks = Self::spawn_tasks(proto.clone(), hosts.clone(), service_name.clone());
 
         Ok(Self {
             service_name,
@@ -244,12 +240,18 @@ impl Component for Mdns {
     }
 
     fn reinit(&self, _iface: &Interface) {
-        // Extract interface info and validate IPv4
+        // Extract interface info
         let binding = _iface.bind_uri();
-        let Some((_family, device, _port)) = binding.as_iface_bind_uri() else { return };
-        let Ok(real_addr) = _iface.real_addr() else { return };
-        let Ok(SocketAddr::V4(v4)) = real_addr.to_string().parse::<SocketAddr>() else { return };
-        let ip = *v4.ip();
+        let Some((_family, device, _port)) = binding.as_iface_bind_uri() else {
+            return;
+        };
+        let Ok(real_addr) = _iface.real_addr() else {
+            return;
+        };
+        let Ok(socket_addr) = real_addr.to_string().parse::<SocketAddr>() else {
+            return;
+        };
+        let ip = socket_addr.ip();
 
         let mut inner = self.inner.lock().expect("Mdns inner lock poisoned");
 
@@ -260,7 +262,7 @@ impl Component for Mdns {
 
         // Clean up existing tasks and create new protocol
         inner.tasks.take();
-        
+
         let Ok(proto) = MdnsProtocol::new(device, ip) else {
             tracing::debug!(target: "mdns", device, %ip, "Failed to reinit mdns protocol");
             return;

@@ -1,5 +1,5 @@
 use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     num::NonZero,
     pin::Pin,
     sync::{Arc, Weak},
@@ -23,26 +23,48 @@ use crate::parser::{
 pub struct MdnsSocket(UdpSocket);
 
 const MULTICAST_PORT: u16 = 5353;
-const MULTICAST_ADDR: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
+const MULTICAST_ADDR_V4: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
+const MULTICAST_ADDR_V6: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0xfb);
 const MAX_DEQUE_SIZE: usize = 64;
 
 impl MdnsSocket {
-    pub fn new(device: &str, ip: Ipv4Addr) -> io::Result<Self> {
+    pub fn new(device: &str, ip: IpAddr) -> io::Result<Self> {
         tracing::debug!(target: "mdns", device, %ip, "Add mdns device");
-        let socket = Socket::new(Domain::IPV4, Type::DGRAM, None)?;
-        socket.set_nonblocking(true)?;
-        socket.set_reuse_address(true)?;
-        #[cfg(not(target_os = "windows"))]
-        socket.set_reuse_port(true)?;
+        let socket = match ip {
+            IpAddr::V4(ip) => {
+                let socket = Socket::new(Domain::IPV4, Type::DGRAM, None)?;
+                socket.set_nonblocking(true)?;
+                socket.set_reuse_address(true)?;
+                #[cfg(not(target_os = "windows"))]
+                socket.set_reuse_port(true)?;
 
-        let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), MULTICAST_PORT);
-        socket.bind(&bind.into())?;
-        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
-        socket.bind_device(Some(device.as_bytes()))?;
-        socket.set_multicast_loop_v4(ip.is_loopback())?;
-        socket.join_multicast_v4(&MULTICAST_ADDR, &Ipv4Addr::UNSPECIFIED)?;
-        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
-        socket.set_multicast_if_v4(&ip)?;
+                let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), MULTICAST_PORT);
+                socket.bind(&bind.into())?;
+                #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+                socket.bind_device(Some(device.as_bytes()))?;
+                socket.set_multicast_loop_v4(ip.is_loopback())?;
+                socket.join_multicast_v4(&MULTICAST_ADDR_V4, &Ipv4Addr::UNSPECIFIED)?;
+                #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+                socket.set_multicast_if_v4(&ip)?;
+                socket
+            }
+            IpAddr::V6(ip) => {
+                let socket = Socket::new(Domain::IPV6, Type::DGRAM, None)?;
+                socket.set_nonblocking(true)?;
+                socket.set_reuse_address(true)?;
+                #[cfg(not(target_os = "windows"))]
+                socket.set_reuse_port(true)?;
+
+                let bind = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), MULTICAST_PORT);
+                socket.bind(&bind.into())?;
+                #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+                socket.bind_device(Some(device.as_bytes()))?;
+                socket.set_multicast_loop_v6(ip.is_loopback())?;
+                socket.join_multicast_v6(&MULTICAST_ADDR_V6, 0)?;
+
+                socket
+            }
+        };
 
         UdpSocket::from_std(socket.into()).map(Self)
     }
@@ -63,9 +85,11 @@ impl MdnsSocket {
 
     pub async fn broadcast_packet(&self, packet: Packet) -> io::Result<()> {
         let buf = packet.to_bytes();
-        self.0
-            .send_to(&buf, (MULTICAST_ADDR, MULTICAST_PORT))
-            .await?;
+        let target: SocketAddr = match self.0.local_addr()?.ip() {
+            IpAddr::V4(_) => (MULTICAST_ADDR_V4, MULTICAST_PORT).into(),
+            IpAddr::V6(_) => (MULTICAST_ADDR_V6, MULTICAST_PORT).into(),
+        };
+        self.0.send_to(&buf, target).await?;
 
         Ok(())
     }
@@ -194,7 +218,7 @@ impl From<Disconnected> for io::Error {
 }
 
 impl MdnsProtocol {
-    pub fn new(device: &str, ip: Ipv4Addr) -> io::Result<Arc<Self>> {
+    pub fn new(device: &str, ip: IpAddr) -> io::Result<Arc<Self>> {
         let socket = Arc::new(MdnsSocket::new(device, ip)?);
         let router = Arc::new(PacketRouter::new());
 

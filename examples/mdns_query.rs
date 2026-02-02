@@ -1,4 +1,4 @@
-use std::{io::Error, net::Ipv4Addr};
+use std::{io::Error, net::IpAddr};
 
 use clap::Parser;
 
@@ -8,7 +8,7 @@ const SERVICE_NAME: &str = "_genmeta.local";
 #[command(version, about, long_about = None)]
 struct Args {
     #[arg(long, default_value = "127.0.0.1")]
-    ip: Ipv4Addr,
+    ip: IpAddr,
     #[arg(long, default_value = "lo0")]
     device: String,
 }
