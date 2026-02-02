@@ -14,7 +14,7 @@ use tracing::info;
 #[command(version, about, long_about = None)]
 struct Options {
     /// Base URL of the HTTP DNS server (TCP/HTTPS), e.g. https://localhost:4433/
-    #[arg(long, default_value = "https://localhost:4433/")]
+    #[arg(long, default_value = "https://xforward.cloudns.ph:4433")]
     base_url: String,
 
     /// PEM file containing CA certificates that can verify the server certificate.
@@ -120,16 +120,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if resp.status().is_success() {
         let bytes = resp.read_to_bytes().await?;
-        
+
         // 检查是否有E-Cert头部
         if let Some(cert_header) = resp.headers().get("e-cert") {
             if let Ok(cert_b64) = cert_header.to_str() {
                 use base64::Engine;
                 match base64::engine::general_purpose::STANDARD.decode(cert_b64) {
                     Ok(cert_der) => {
-                        info!(cert_len = cert_der.len(), "Certificate received in E-Cert header");
+                        info!(
+                            cert_len = cert_der.len(),
+                            "Certificate received in E-Cert header"
+                        );
                         // 这里可以进一步处理证书，比如验证签名
-                        println!("Certificate (DER, {} bytes): {:02x?}...", cert_der.len(), &cert_der[..std::cmp::min(32, cert_der.len())]);
+                        println!(
+                            "Certificate (DER, {} bytes): {:02x?}...",
+                            cert_der.len(),
+                            &cert_der[..std::cmp::min(32, cert_der.len())]
+                        );
                     }
                     Err(e) => {
                         info!(?e, "Failed to decode E-Cert header");

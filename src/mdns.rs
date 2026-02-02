@@ -182,7 +182,7 @@ impl Mdns {
     pub fn insert_host(&self, host_name: String, eps: Vec<EndpointAddr>) {
         let local_name = Self::local_name(self.service_name.clone(), host_name.clone());
         let mut guard = self.hosts.lock().unwrap();
-        tracing::debug!(
+        tracing::trace!(
             target: "mdns",
             %local_name, ?eps,
             "Adding host with addresses",

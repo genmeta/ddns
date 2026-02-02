@@ -9,6 +9,7 @@ use std::{
 
 use dashmap::DashMap;
 use futures::{Stream, StreamExt};
+use nix::net::if_::if_nametoindex;
 use socket2::{Domain, Socket, Type};
 use thiserror::Error;
 use tokio::{io, net::UdpSocket, task::JoinSet, time};
@@ -60,7 +61,10 @@ impl MdnsSocket {
                 #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
                 socket.bind_device(Some(device.as_bytes()))?;
                 socket.set_multicast_loop_v6(ip.is_loopback())?;
-                socket.join_multicast_v6(&MULTICAST_ADDR_V6, 0)?;
+                // TODO: 外面传进来
+                let ifindex = if_nametoindex(device)?;
+                socket.join_multicast_v6(&MULTICAST_ADDR_V6, ifindex)?;
+                socket.set_multicast_if_v6(ifindex)?;
 
                 socket
             }
