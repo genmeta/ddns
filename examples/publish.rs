@@ -117,7 +117,7 @@ async fn main() -> io::Result<()> {
         .expect("Failed to install ring crypto provider");
 
     tracing_subscriber::fmt()
-        .with_max_level(Level::DEBUG) // 显示INFO级别的日志
+        .with_max_level(Level::DEBUG)
         .init();
 
     let opt = Options::parse();
@@ -128,13 +128,13 @@ async fn main() -> io::Result<()> {
 
     // 显示将要使用的证书信息
     let mut cert_reader = std::io::Cursor::new(&cert_chain_pem);
-    if let Ok(certs) = rustls_pemfile::certs(&mut cert_reader).collect::<Result<Vec<_>, _>>() {
-        if let Some(first_cert) = certs.first() {
-            info!(
-                cert_len = first_cert.len(),
-                "Client certificate loaded, will be sent to server for storage"
-            );
-        }
+    if let Ok(certs) = rustls_pemfile::certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()
+        && let Some(first_cert) = certs.first()
+    {
+        info!(
+            cert_len = first_cert.len(),
+            "Client certificate loaded, will be sent to server for storage"
+        );
     }
 
     let signer = opt

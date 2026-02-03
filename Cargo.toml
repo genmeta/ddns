@@ -19,6 +19,8 @@ futures = "0.3"
 flume = "0.11.1"
 thiserror = "2.0.12"
 rustls = { version = "0.23", default-features = false, features = ["logging", "ring"] }
+rustls-pemfile = "2"
+base64 = "0.22"
 snafu = "0.8"
 ring = "0.17"
 x509-parser = "0.18"
@@ -46,7 +48,7 @@ h3x-resolver = ["dep:h3x", "dep:gm-quic", "dep:http"]
 clap = { version = "4", features = ["derive"] }
 criterion = "0.5"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rustls-pemfile = "2"
+rustls-pki-types = "1"
 idna = "1"
 redis = { version = "0.23", features = ["tokio-comp", "aio"] }
 tracing-appender = "0.2"

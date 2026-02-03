@@ -2,8 +2,10 @@ use std::{
     convert::TryFrom,
     fmt::Display,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+    path::Path,
 };
 
+use base64::Engine;
 use bytes::BufMut;
 use nom::{
     IResult, Parser,
@@ -169,6 +171,52 @@ impl EndpointAddr {
         )
     }
 
+    pub fn verify_signature_from_der(&self, cert_der: &[u8]) -> Result<bool, sigin::VerifyError> {
+        let (_, cert) = x509_parser::parse_x509_certificate(cert_der).map_err(|e| {
+            sigin::VerifyError::InvalidCertificate {
+                details: e.to_string(),
+            }
+        })?;
+
+        let spki = SubjectPublicKeyInfoDer::from(cert.tbs_certificate.subject_pki.raw);
+        self.verify_signature(spki)
+    }
+
+    pub fn verify_signature_from_pem(&self, cert_pem: &[u8]) -> Result<bool, sigin::VerifyError> {
+        let mut reader = std::io::Cursor::new(cert_pem);
+        if let Some(item) = rustls_pemfile::certs(&mut reader).next() {
+            let cert_der = item.map_err(|e| sigin::VerifyError::InvalidPem { source: e })?;
+            return self.verify_signature_from_der(&cert_der);
+        }
+        Err(sigin::VerifyError::InvalidCertificate {
+            details: "No certificate found in PEM".to_string(),
+        })
+    }
+
+    pub fn verify_signature_from_base64(
+        &self,
+        cert_base64: &str,
+    ) -> Result<bool, sigin::VerifyError> {
+        let cert_base64 = cert_base64.trim();
+        let cert_der = base64::engine::general_purpose::STANDARD
+            .decode(cert_base64)
+            .map_err(|e| sigin::VerifyError::InvalidBase64 { source: e })?;
+        self.verify_signature_from_der(&cert_der)
+    }
+
+    pub fn verify_signature_from_file(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<bool, sigin::VerifyError> {
+        let contents = std::fs::read(path).map_err(|e| sigin::VerifyError::Io { source: e })?;
+        // Try PEM first
+        if let Ok(res) = self.verify_signature_from_pem(&contents) {
+            return Ok(res);
+        }
+        // If PEM failed, try DER
+        self.verify_signature_from_der(&contents)
+    }
+
     pub fn is_main(&self) -> bool {
         self.flags() & Self::FLAG_MAIN == Self::FLAG_MAIN
     }
@@ -249,6 +297,12 @@ impl EndpointAddr {
 
     pub fn signature(&self) -> Option<&EndpointSignature> {
         self.signature.as_ref()
+    }
+
+    pub fn signature_base64(&self) -> Option<String> {
+        self.signature.as_ref().map(|sig| {
+            base64::engine::general_purpose::STANDARD.encode(&sig.signature)
+        })
     }
 
     fn write_base<B: BufMut>(&self, buf: &mut B) {

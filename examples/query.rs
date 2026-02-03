@@ -8,13 +8,13 @@ use gm_quic::prelude::{
 use gmdns::{MdnsPacket, parser::record::RData};
 use h3x::client::{BuildClientError, Client};
 use rustls::RootCertStore;
-use tracing::info;
+use tracing::{Level, info};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Options {
     /// Base URL of the HTTP DNS server (TCP/HTTPS), e.g. https://localhost:4433/
-    #[arg(long, default_value = "https://xforward.cloudns.ph:4433")]
+    #[arg(long, default_value = "https://localhost:4433/")]
     base_url: String,
 
     /// PEM file containing CA certificates that can verify the server certificate.
@@ -77,7 +77,7 @@ fn format_packet(packet: &MdnsPacket) -> String {
                 RData::E(ep) => {
                     output.push_str(&format!("Name:   {}\nAddress: {}\n", rr.name(), ep.primary));
                     if ep.is_signed() {
-                        output.push_str("Signature: present (unable to verify without SPKI)\n");
+                        output.push_str("Signature: present\n");
                     }
                 }
                 _ => {
@@ -95,7 +95,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install ring crypto provider");
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_max_level(Level::DEBUG) // 显示INFO级别的日志
+        .init();
 
     let opt = Options::parse();
     let root_store = load_root_store_from_pem(&opt.server_ca)?;
@@ -121,35 +123,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if resp.status().is_success() {
         let bytes = resp.read_to_bytes().await?;
 
-        // 检查是否有E-Cert头部
-        if let Some(cert_header) = resp.headers().get("e-cert") {
-            if let Ok(cert_b64) = cert_header.to_str() {
-                use base64::Engine;
-                match base64::engine::general_purpose::STANDARD.decode(cert_b64) {
-                    Ok(cert_der) => {
-                        info!(
-                            cert_len = cert_der.len(),
-                            "Certificate received in E-Cert header"
-                        );
-                        // 这里可以进一步处理证书，比如验证签名
-                        println!(
-                            "Certificate (DER, {} bytes): {:02x?}...",
-                            cert_der.len(),
-                            &cert_der[..std::cmp::min(32, cert_der.len())]
-                        );
-                    }
-                    Err(e) => {
-                        info!(?e, "Failed to decode E-Cert header");
-                    }
+        let cert = if let Some(cert_header) = resp.headers().get("e-cert")
+            && let Ok(cert_b64) = cert_header.to_str()
+        {
+            use base64::Engine;
+            match base64::engine::general_purpose::STANDARD.decode(cert_b64) {
+                Ok(cert_der) => {
+                    info!(
+                        cert_len = cert_der.len(),
+                        "Certificate received in E-Cert header"
+                    );
+                    println!(
+                        "Certificate (DER, {} bytes): {:02x?}...",
+                        cert_der.len(),
+                        &cert_der[..std::cmp::min(32, cert_der.len())]
+                    );
+                    Some(cert_der)
+                }
+                Err(e) => {
+                    info!(?e, "Failed to decode E-Cert header");
+                    None
                 }
             }
-        }
+        } else {
+            None
+        };
 
         // Try to parse as gmdns packet for display if possible, or just raw
         match gmdns::parser::packet::be_packet(&bytes) {
             Ok((_, packet)) => {
                 info!("DNS lookup successful, parsed packet:\n{}", packet);
                 println!("{}", format_packet(&packet));
+                // 验证证书
+                if let Some(cert) = cert {
+                    if let Some(rrs) = packet
+                        .answers
+                        .iter()
+                        .filter_map(|rr| {
+                            if let RData::E(ep) = rr.data() {
+                                Some((rr.name().to_string(), ep))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .first()
+                    {
+                        let (name, ep) = rrs;
+                        match ep.verify_signature_from_der(&cert) {
+                            Ok(_) => {
+                                info!(name = %name, "Certificate verification succeeded");
+                                println!("Certificate verification succeeded for record: {}", name);
+                            }
+                            Err(e) => {
+                                info!(name = %name, ?e, "Certificate verification failed");
+                                println!(
+                                    "Certificate verification failed for record: {}: {:?}",
+                                    name, e
+                                );
+                            }
+                        }
+                    } else {
+                        info!("No E records found in DNS answer for certificate verification");
+                    }
+                }
             }
             Err(_) => {
                 info!(bytes = bytes.len(), "lookup.ok.raw");

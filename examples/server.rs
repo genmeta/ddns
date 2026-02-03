@@ -195,8 +195,9 @@ fn validate_dns_packet(
             if let RData::E(endpoint) = record.data()
                 && endpoint.is_signed()
             {
+                let cert = agent.cert_chain().first().ok_or(AppError::MissingClientCertificate)?;
                 let ok = endpoint
-                    .verify_signature(agent.public_key())
+                    .verify_signature_from_der(cert.as_ref())
                     .map_err(|_| AppError::InvalidSignature)?;
                 if !ok {
                     return Err(AppError::InvalidSignature);

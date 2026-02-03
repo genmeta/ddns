@@ -25,6 +25,14 @@ impl From<rustls::Error> for SignError {
 pub enum VerifyError {
     #[snafu(display("Unsupported signature scheme {scheme:?}"))]
     UnsupportedScheme { scheme: SignatureScheme },
+    #[snafu(display("Invalid Certificate: {details}"))]
+    InvalidCertificate { details: String },
+    #[snafu(display("Invalid PEM: {source}"))]
+    InvalidPem { source: std::io::Error },
+    #[snafu(display("Invalid Base64: {source}"))]
+    InvalidBase64 { source: base64::DecodeError },
+    #[snafu(display("IO Error: {source}"))]
+    Io { source: std::io::Error },
 }
 
 pub(crate) fn sign(

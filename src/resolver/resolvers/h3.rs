@@ -12,6 +12,7 @@ use tokio::{
     sync::{mpsc, oneshot},
     time::Instant,
 };
+use tracing::debug;
 use url::Url;
 
 use crate::{
@@ -49,6 +50,7 @@ struct H3ResolverInner {
 
 impl H3ResolverInner {
     async fn publish(&self, name: &str, endpoints: &[EndpointAddr]) -> io::Result<()> {
+        debug!("h3x Publishing {} with {} endpoints", name, endpoints.len());
         let bytes = {
             let mut hosts = std::collections::HashMap::new();
             hosts.insert(name.to_string(), endpoints.to_vec());

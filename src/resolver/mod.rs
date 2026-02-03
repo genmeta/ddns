@@ -11,7 +11,8 @@ use thiserror::Error;
 use crate::parser::record::endpoint::EndpointAddr;
 pub use crate::parser::record::*;
 
-pub const HTTP_DNS_SERVER: &str = " https://xforward.cloudns.ph:4433";
+pub const HTTP_DNS_SERVER: &str = "https://dns.genmeta.net/";
+pub const H3_DNS_SERVER: &str = "https://localhost:4433";
 pub const MDNS_SERVICE: &str = "_genmeta.local";
 
 #[async_trait::async_trait]
