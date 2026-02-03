@@ -3,7 +3,7 @@ use std::{io, net::SocketAddr, path::PathBuf, sync::Arc};
 use clap::Parser;
 use gmdns::{
     parser::record::endpoint::EndpointAddr,
-    resolver::{H3Resolver, Publisher},
+    resolver::{H3Publisher, H3Resolver, Publisher},
 };
 use rustls::{RootCertStore, SignatureScheme, pki_types::PrivateKeyDer, sign::SigningKey};
 use tracing::{Level, info};
@@ -154,7 +154,7 @@ async fn main() -> io::Result<()> {
         .build();
 
     // Uses H3Resolver which uses gm-quic internally aka HTTP/3
-    let resolver = H3Resolver::new(opt.base_url.clone(), client)?;
+    let resolver = H3Publisher::new(opt.base_url.clone(), client)?;
 
     info!(host = %opt.host, addrs = ?opt.addr, base_url = %opt.base_url, "publish.start");
     if let Some(scheme) = signer_scheme {

@@ -300,9 +300,9 @@ impl EndpointAddr {
     }
 
     pub fn signature_base64(&self) -> Option<String> {
-        self.signature.as_ref().map(|sig| {
-            base64::engine::general_purpose::STANDARD.encode(&sig.signature)
-        })
+        self.signature
+            .as_ref()
+            .map(|sig| base64::engine::general_purpose::STANDARD.encode(&sig.signature))
     }
 
     fn write_base<B: BufMut>(&self, buf: &mut B) {

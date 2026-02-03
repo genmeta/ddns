@@ -185,9 +185,22 @@ pub struct H3Resolver {
     base_url: Url,
 }
 
+pub struct H3Publisher {
+    tx: mpsc::Sender<Command>,
+    base_url: Url,
+}
+
 impl std::fmt::Debug for H3Resolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("H3Resolver")
+            .field("base_url", &self.base_url)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for H3Publisher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("H3Publisher")
             .field("base_url", &self.base_url)
             .finish_non_exhaustive()
     }
@@ -197,7 +210,17 @@ impl Display for H3Resolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "H3 DNS({})",
+            "H3 DNS Resolver({})",
+            self.base_url.host_str().expect("Checked in constructor")
+        )
+    }
+}
+
+impl Display for H3Publisher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "H3 DNS Publisher({})",
             self.base_url.host_str().expect("Checked in constructor")
         )
     }
@@ -205,36 +228,14 @@ impl Display for H3Resolver {
 
 impl H3Resolver {
     pub fn new(base_url: impl IntoUrl, client: Client<QuicClient>) -> io::Result<Self> {
-        let base_url = base_url
-            .into_url()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        base_url.host_str().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Base URL must have a valid host",
-            )
-        })?;
+        let (tx, base_url) = create_inner(base_url, client)?;
+        Ok(Self { tx, base_url })
+    }
+}
 
-        let inner = Arc::new(H3ResolverInner {
-            client,
-            base_url: base_url.clone(),
-            cached_records: DashMap::new(),
-        });
-
-        let (tx, rx) = mpsc::channel(32);
-
-        // Spawn the worker in a dedicated thread with its own LocalSet
-        let inner_clone = inner.clone();
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("Failed to create tokio runtime for H3Resolver");
-
-            let local = tokio::task::LocalSet::new();
-            local.block_on(&rt, inner_clone.run(rx));
-        });
-
+impl H3Publisher {
+    pub fn new(base_url: impl IntoUrl, client: Client<QuicClient>) -> io::Result<Self> {
+        let (tx, base_url) = create_inner(base_url, client)?;
         Ok(Self { tx, base_url })
     }
 
@@ -253,6 +254,43 @@ impl H3Resolver {
             .build();
         Self::new(base_url, client)
     }
+}
+
+fn create_inner(
+    base_url: impl IntoUrl,
+    client: Client<QuicClient>,
+) -> io::Result<(mpsc::Sender<Command>, Url)> {
+    let base_url = base_url
+        .into_url()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    base_url.host_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Base URL must have a valid host",
+        )
+    })?;
+
+    let inner = Arc::new(H3ResolverInner {
+        client,
+        base_url: base_url.clone(),
+        cached_records: DashMap::new(),
+    });
+
+    let (tx, rx) = mpsc::channel(32);
+
+    // Spawn the worker in a dedicated thread with its own LocalSet
+    let inner_clone = inner.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create tokio runtime for H3Resolver");
+
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&rt, inner_clone.run(rx));
+    });
+
+    Ok((tx, base_url))
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -282,7 +320,7 @@ use crate::resolver::{Publisher, Resolver};
 // Communication happens via channels, making the public API fully Send + Sync compatible.
 
 #[async_trait::async_trait]
-impl Publisher for H3Resolver {
+impl Publisher for H3Publisher {
     async fn publish(&self, name: &str, endpoints: &[EndpointAddr]) -> io::Result<()> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx

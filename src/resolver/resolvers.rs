@@ -13,13 +13,13 @@ mod http;
 mod mdns;
 
 #[cfg(feature = "h3x-resolver")]
-pub use h3::H3Resolver;
+pub use h3::{H3Publisher, H3Resolver};
 pub use http::HttpResolver;
 pub use mdns::MdnsResolver;
 
 type ArcResolver = Arc<dyn Resolver + Send + Sync + 'static>;
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct Resolvers {
     resolvers: Vec<ArcResolver>,
 }
@@ -64,5 +64,23 @@ impl Resolvers {
             async move { resolver.lookup(&name).await.unwrap_or_default() }
         });
         stream::FuturesUnordered::from_iter(futures).flat_map(stream::iter)
+    }
+}
+
+#[cfg(feature = "h3x-resolver")]
+impl gm_quic::qtraversal::resolver::Resolve for Resolvers {
+    fn lookup<'a>(&'a self, name: &'a str) -> gm_quic::qtraversal::resolver::ResolveStream<'a> {
+        self.lookup(name)
+            .map(|(uri, ep)| {
+                let socket_ep = match ep.agent {
+                    Some(agent) => gm_quic::qbase::net::route::SocketEndpointAddr::with_agent(
+                        agent, ep.primary,
+                    ),
+                    None => gm_quic::qbase::net::route::SocketEndpointAddr::direct(ep.primary),
+                };
+                let bind_uri = uri.and_then(|u| std::str::FromStr::from_str(&u).ok());
+                Ok((bind_uri, socket_ep))
+            })
+            .boxed()
     }
 }
