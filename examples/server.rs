@@ -4,10 +4,13 @@ use clap::Parser;
 use dashmap::DashMap;
 use deadpool_redis::Pool;
 use futures::future::BoxFuture;
-use gm_quic::prelude::handy::{ToCertificate, ToPrivateKey};
 use gmdns::parser::{packet::be_packet, record::RData};
 use h3x::{
     agent::RemoteAgent,
+    gm_quic::prelude::{
+        BindUri,
+        handy::{ToCertificate, ToPrivateKey},
+    },
     server::{Request, Response, Router, Servers, Service},
 };
 use redis::AsyncCommands;
@@ -534,7 +537,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
     let bind = {
-        let base = gm_quic::prelude::BindUri::from(format!("inet://{}", options.listen));
+        let base = BindUri::from(format!("inet://{}", options.listen));
         if options.listen.port() == 0 {
             base.alloc_port()
         } else {
@@ -544,7 +547,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut servers = Servers::builder()
         .with_client_cert_verifier(verifier)?
-        .build()?;
+        .listen()?;
 
     servers
         .add_server(

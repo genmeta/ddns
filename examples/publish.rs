@@ -5,6 +5,7 @@ use gmdns::{
     parser::record::endpoint::EndpointAddr,
     resolver::{H3Publisher, Publisher},
 };
+use h3x::gm_quic::H3Client;
 use rustls::{RootCertStore, SignatureScheme, pki_types::PrivateKeyDer, sign::SigningKey};
 use tracing::{Level, info};
 
@@ -143,14 +144,14 @@ async fn main() -> io::Result<()> {
         .transpose()?;
     let signer_scheme = signer.as_deref().map(pick_signature_scheme).transpose()?;
 
-    let client = h3x::client::Client::<gm_quic::prelude::QuicClient>::builder()
+    let client = H3Client::builder()
         .with_root_certificates(Arc::new(root_store))
         .with_identity(
             opt.client_name,
             cert_chain_pem.as_slice(),
             private_key_pem.as_slice(),
         )
-        .map_err(|e: h3x::client::BuildClientError| io::Error::other(e.to_string()))?
+        .map_err(io::Error::other)?
         .build();
 
     // Uses H3Resolver which uses gm-quic internally aka HTTP/3

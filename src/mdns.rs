@@ -11,11 +11,10 @@ use std::{
 
 use futures::{Stream, stream};
 #[cfg(feature = "h3x-resolver")]
-use gm_quic::qbase::net::addr::BoundAddr;
-#[cfg(feature = "h3x-resolver")]
-use gm_quic::qinterface::io::IO;
-#[cfg(feature = "h3x-resolver")]
-use gm_quic::qinterface::{Interface, component::Component};
+use h3x::gm_quic::{
+    qbase::net::addr::BoundAddr,
+    qinterface::{Interface, component::Component, io::IO},
+};
 use tokio::{task::JoinSet, time};
 use tokio_util::task::AbortOnDropHandle;
 
@@ -241,19 +240,19 @@ impl Component for Mdns {
         self.poll_close(_cx)
     }
 
-    fn reinit(&self, _iface: &Interface) {
+    fn reinit(&self, iface: &Interface) {
         // Extract interface info
-        let binding = _iface.bind_uri();
+        let binding = iface.bind_uri();
         let Some((_family, device, _port)) = binding.as_iface_bind_uri() else {
             return;
         };
-        let Ok(bound_addr) = _iface.bound_addr() else {
+        let Ok(bound_addr) = iface.bound_addr() else {
             return;
         };
-        let BoundAddr::Internet(socket_addr) = bound_addr else {
+        let BoundAddr::Internet(bound_addr) = bound_addr else {
             return;
         };
-        let ip = socket_addr.ip();
+        let ip = bound_addr.ip();
 
         let mut inner = self.inner.lock().expect("Mdns inner lock poisoned");
 

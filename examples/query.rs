@@ -1,12 +1,11 @@
 use std::{io, path::PathBuf, sync::Arc};
 
 use clap::Parser;
-use gm_quic::prelude::{
-    QuicClient,
-    handy::{ToCertificate, ToPrivateKey},
-};
 use gmdns::{MdnsPacket, parser::record::RData};
-use h3x::client::{BuildClientError, Client};
+use h3x::gm_quic::{
+    BuildClientError, H3Client,
+    prelude::handy::{ToCertificate, ToPrivateKey},
+};
 use rustls::RootCertStore;
 use tracing::{Level, info};
 
@@ -104,7 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cert_pem = std::fs::read(&opt.client_cert)?;
     let key_pem = std::fs::read(&opt.client_key)?;
 
-    let client = Client::<QuicClient>::builder()
+    let client = H3Client::builder()
         .with_root_certificates(Arc::new(root_store))
         .with_identity(
             opt.client_name,

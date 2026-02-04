@@ -11,14 +11,24 @@ bitfield-struct = "0.10"
 tracing = "0.1"
 socket2 = { version = "0.5.8", features = ["all"] }
 nix = { version = "0.29", features = ["net"] }
-tokio = { version = "1", features = ["time", "macros", "net", "sync", "rt", "rt-multi-thread"] }
+tokio = { version = "1", features = [
+    "time",
+    "macros",
+    "net",
+    "sync",
+    "rt",
+    "rt-multi-thread",
+] }
 tokio-util = { version = "0.7", features = ["rt"] }
 dashmap = "6"
 rand = "0.9"
 futures = "0.3"
 flume = "0.11.1"
 thiserror = "2.0.12"
-rustls = { version = "0.23", default-features = false, features = ["logging", "ring"] }
+rustls = { version = "0.23", default-features = false, features = [
+    "logging",
+    "ring",
+] }
 rustls-pemfile = "2"
 base64 = "0.22"
 snafu = "0.8"
@@ -36,13 +46,14 @@ url = "2"
 serde = "1"
 
 # Optional HTTP/3 publisher/resolver via h3x
-h3x = { path = "../h3x", default-features = false, features = ["gm-quic"], optional = true }
-gm-quic = { path = "../gm-quic/gm-quic", optional = true }
+h3x = { path = "../h3x", default-features = false, features = [
+    "gm-quic",
+], optional = true }
 http = { version = "1", optional = true }
 
 [features]
 default = ["h3x-resolver"]
-h3x-resolver = ["dep:h3x", "dep:gm-quic", "dep:http"]
+h3x-resolver = ["dep:h3x", "dep:http"]
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }

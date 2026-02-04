@@ -598,7 +598,7 @@ impl Display for EndpointAddr {
 }
 
 #[cfg(feature = "h3x-resolver")]
-use gm_quic::qbase::net::addr::SocketEndpointAddr;
+use h3x::gm_quic::qbase::net::addr::SocketEndpointAddr;
 
 #[cfg(feature = "h3x-resolver")]
 impl TryFrom<SocketEndpointAddr> for EndpointAddr {

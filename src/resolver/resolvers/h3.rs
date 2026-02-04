@@ -1,11 +1,13 @@
 use std::{fmt::Display, io, net::SocketAddr, sync::Arc};
 
 use dashmap::DashMap;
-use gm_quic::prelude::{
-    QuicClient,
-    handy::{ToCertificate, ToPrivateKey},
+use h3x::gm_quic::{
+    BuildClientError, H3Client,
+    prelude::{
+        QuicClient,
+        handy::{ToCertificate, ToPrivateKey},
+    },
 };
-use h3x::client::{BuildClientError, Client};
 use reqwest::IntoUrl;
 use rustls::RootCertStore;
 use tokio::{
@@ -43,7 +45,7 @@ enum Command {
 
 // Inner struct that holds the actual H3 client and runs on a dedicated thread
 struct H3ResolverInner {
-    client: Client<QuicClient>,
+    client: H3Client,
     base_url: Url,
     cached_records: DashMap<String, Record>,
 }
@@ -233,14 +235,14 @@ impl Display for H3Publisher {
 }
 
 impl H3Resolver {
-    pub fn new(base_url: impl IntoUrl, client: Client<QuicClient>) -> io::Result<Self> {
+    pub fn new(base_url: impl IntoUrl, client: H3Client) -> io::Result<Self> {
         let (tx, base_url) = create_inner(base_url, client)?;
         Ok(Self { tx, base_url })
     }
 }
 
 impl H3Publisher {
-    pub fn new(base_url: impl IntoUrl, client: Client<QuicClient>) -> io::Result<Self> {
+    pub fn new(base_url: impl IntoUrl, client: H3Client) -> io::Result<Self> {
         let (tx, base_url) = create_inner(base_url, client)?;
         Ok(Self { tx, base_url })
     }
@@ -264,7 +266,7 @@ impl H3Publisher {
 
 fn create_inner(
     base_url: impl IntoUrl,
-    client: Client<QuicClient>,
+    client: H3Client,
 ) -> io::Result<(mpsc::Sender<Command>, Url)> {
     let base_url = base_url
         .into_url()

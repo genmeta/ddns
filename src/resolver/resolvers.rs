@@ -2,7 +2,7 @@ use std::{error::Error, fmt::Debug, sync::Arc};
 
 use futures::{Stream, StreamExt, stream};
 #[cfg(feature = "h3x-resolver")]
-use gm_quic::qbase::net::addr::SocketEndpointAddr;
+use h3x::gm_quic::qbase::net::addr::SocketEndpointAddr;
 use snafu::Report;
 use tokio::io;
 
@@ -68,8 +68,11 @@ impl Resolvers {
 }
 
 #[cfg(feature = "h3x-resolver")]
-impl gm_quic::qtraversal::resolver::Resolve for Resolvers {
-    fn lookup<'a>(&'a self, name: &'a str) -> gm_quic::qtraversal::resolver::ResolveStream<'a> {
+impl h3x::gm_quic::qtraversal::resolver::Resolve for Resolvers {
+    fn lookup<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> h3x::gm_quic::qtraversal::resolver::ResolveStream<'a> {
         self.lookup(name)
             .map(|(uri, ep)| {
                 let socket_ep = match ep.agent {
