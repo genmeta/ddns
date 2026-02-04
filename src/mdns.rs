@@ -11,6 +11,8 @@ use std::{
 
 use futures::{Stream, stream};
 #[cfg(feature = "h3x-resolver")]
+use gm_quic::qbase::net::addr::BoundAddr;
+#[cfg(feature = "h3x-resolver")]
 use gm_quic::qinterface::io::IO;
 #[cfg(feature = "h3x-resolver")]
 use gm_quic::qinterface::{Interface, component::Component};
@@ -245,10 +247,10 @@ impl Component for Mdns {
         let Some((_family, device, _port)) = binding.as_iface_bind_uri() else {
             return;
         };
-        let Ok(real_addr) = _iface.real_addr() else {
+        let Ok(bound_addr) = _iface.bound_addr() else {
             return;
         };
-        let Ok(socket_addr) = real_addr.to_string().parse::<SocketAddr>() else {
+        let BoundAddr::Internet(socket_addr) = bound_addr else {
             return;
         };
         let ip = socket_addr.ip();

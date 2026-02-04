@@ -175,8 +175,11 @@ impl PacketRouter {
     pub fn deliver(&self, source: SocketAddr, packet: Packet) {
         match (packet.header.flags.query(), packet.header.id) {
             (true, 0) => {
-                if let Err(error) = self.responses.0.try_send((source, packet)) {
-                    tracing::debug!(target: "mdns", %error, "Failed to deliver boardcast");
+                if self.responses.0.try_send((source, packet.clone())).is_err() {
+                    // Queue is full, remove oldest message (FIFO)
+                    let _ = self.responses.1.try_recv();
+                    // Try to send again after removing oldest
+                    let _ = self.responses.0.try_send((source, packet));
                 }
             }
             (true, query_id) => match self.queries.get(&NonZero::new(query_id).unwrap()) {
@@ -196,8 +199,11 @@ impl PacketRouter {
                 ),
             },
             (false, _) => {
-                if let Err(error) = self.requests.0.try_send((source, packet)) {
-                    tracing::debug!(target: "mdns", %error, "Failed to deliver incoming request");
+                if self.requests.0.try_send((source, packet.clone())).is_err() {
+                    // Queue is full, remove oldest message (FIFO)
+                    let _ = self.requests.1.try_recv();
+                    // Try to send again after removing oldest
+                    let _ = self.requests.0.try_send((source, packet));
                 }
             }
         }

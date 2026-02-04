@@ -1,4 +1,4 @@
-use std::{fmt::Display, io, sync::Arc};
+use std::{fmt::Display, io, net::SocketAddr, sync::Arc};
 
 use dashmap::DashMap;
 use gm_quic::prelude::{
@@ -91,16 +91,18 @@ impl H3ResolverInner {
     async fn lookup(&self, name: &str) -> io::Result<Vec<(Option<String>, EndpointAddr)>> {
         use crate::parser::record;
 
-        let now = Instant::now();
-        self.cached_records
-            .retain(|_host, Record { expire, .. }| *expire < now);
-        if let Some(record) = self.cached_records.get(name) {
-            return Ok(record
+        // 1. Check cache (Lazy expiration)
+        if let Some(entry) = self.cached_records.get(name)
+            && entry.expire > Instant::now()
+        {
+            return Ok(entry
                 .addrs
                 .iter()
                 .map(|e: &EndpointAddr| (None, e.clone()))
                 .collect());
         }
+        // Expired: remove it (drop the entry lock first if needed, but DashMap handles this)
+        // We'll just fall through to fetch fresh data and overwrite it.
 
         let url = self.base_url.join("lookup").expect("Invalid URL");
         let uri: http::Uri = format!("{}?host={}", url.as_str(), name)
@@ -153,29 +155,33 @@ impl H3ResolverInner {
             name.to_string(),
             Record {
                 addrs,
-                expire: now + std::time::Duration::from_secs(300),
+                expire: Instant::now() + std::time::Duration::from_secs(300),
             },
         );
-
+        tracing::info!("h3x Resolved {} to {} endpoints", name, ret.len());
         Ok(ret)
     }
 
     async fn run(self: Arc<Self>, mut rx: mpsc::Receiver<Command>) {
         while let Some(cmd) = rx.recv().await {
-            match cmd {
-                Command::Publish {
-                    name,
-                    endpoints,
-                    reply,
-                } => {
-                    let result = self.publish(&name, &endpoints).await;
-                    let _ = reply.send(result);
+            let this = self.clone();
+            // 2. Concurrency: Spawn a task for each request to avoid blocking
+            tokio::task::spawn_local(async move {
+                match cmd {
+                    Command::Publish {
+                        name,
+                        endpoints,
+                        reply,
+                    } => {
+                        let result = this.publish(&name, &endpoints).await;
+                        let _ = reply.send(result);
+                    }
+                    Command::Lookup { name, reply } => {
+                        let result = this.lookup(&name).await;
+                        let _ = reply.send(result);
+                    }
                 }
-                Command::Lookup { name, reply } => {
-                    let result = self.lookup(&name).await;
-                    let _ = reply.send(result);
-                }
-            }
+            });
         }
     }
 }
@@ -319,6 +325,33 @@ use crate::resolver::{Publisher, Resolver};
 // H3Resolver uses a dedicated worker thread with LocalSet to handle non-Send futures.
 // Communication happens via channels, making the public API fully Send + Sync compatible.
 
+const EXCLUDED_DOMAINS: [&str; 4] = [
+    "dns.genmeta.net",
+    "stun.genmeta.net",
+    "nat.genmeta.net",
+    "download.genmeta.net",
+];
+
+async fn tokio_lookup(name: &str) -> io::Result<Vec<(Option<String>, EndpointAddr)>> {
+    tracing::debug!("h3x tokio_lookup for {}", name);
+    let host = if name.contains(':') {
+        name.to_string()
+    } else {
+        format!("{}:443", name)
+    };
+
+    let addrs = tokio::net::lookup_host(host).await?;
+    let mut endpoints = Vec::new();
+    for addr in addrs {
+        let endpoint = match addr {
+            SocketAddr::V4(v4) => EndpointAddr::direct_v4(v4),
+            SocketAddr::V6(v6) => EndpointAddr::direct_v6(v6),
+        };
+        endpoints.push((None, endpoint));
+    }
+    Ok(endpoints)
+}
+
 #[async_trait::async_trait]
 impl Publisher for H3Publisher {
     async fn publish(&self, name: &str, endpoints: &[EndpointAddr]) -> io::Result<()> {
@@ -341,6 +374,13 @@ impl Publisher for H3Publisher {
 #[async_trait::async_trait]
 impl Resolver for H3Resolver {
     async fn lookup(&self, name: &str) -> io::Result<Vec<(Option<String>, EndpointAddr)>> {
+        let domain = name.split(':').next().unwrap_or(name);
+        if (!domain.ends_with(".genmeta.net") && domain != "genmeta.net")
+            || EXCLUDED_DOMAINS.contains(&domain)
+        {
+            return tokio_lookup(name).await;
+        }
+
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::Lookup {
