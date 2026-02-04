@@ -1,14 +1,13 @@
 use std::{error::Error, fmt::Debug, sync::Arc};
 
 use futures::{Stream, StreamExt, stream};
+#[cfg(feature = "h3x-resolver")]
+use gm_quic::qbase::net::addr::SocketEndpointAddr;
 use snafu::Report;
 use tokio::io;
 
 use super::{Publisher, Resolver};
 use crate::parser::record::endpoint::EndpointAddr;
-
-#[cfg(feature = "h3x-resolver")]
-use gm_quic::qbase::net::addr::SocketEndpointAddr;
 mod h3;
 mod http;
 mod mdns;
@@ -74,9 +73,7 @@ impl gm_quic::qtraversal::resolver::Resolve for Resolvers {
         self.lookup(name)
             .map(|(uri, ep)| {
                 let socket_ep = match ep.agent {
-                    Some(agent) => SocketEndpointAddr::with_agent(
-                        agent, ep.primary,
-                    ),
+                    Some(agent) => SocketEndpointAddr::with_agent(agent, ep.primary),
                     None => SocketEndpointAddr::direct(ep.primary),
                 };
                 let bind_uri = uri.and_then(|u| std::str::FromStr::from_str(&u).ok());
