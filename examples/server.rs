@@ -16,7 +16,8 @@ use h3x::{
 use redis::AsyncCommands;
 use rustls::{RootCertStore, server::WebPkiClientVerifier};
 use tokio::time::{Duration, Instant};
-use tracing::{Level, info, warn};
+use tracing::{info, level_filters::LevelFilter, warn};
+use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser, Clone, Debug)]
 #[command(version, about, long_about = None)]
@@ -491,8 +492,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .install_default()
         .expect("Failed to install ring crypto provider");
 
-    tracing_subscriber::fmt()
-        .with_max_level(Level::DEBUG) // 显示INFO级别的日志
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::filter::filter_fn(|metadata| {
+            !metadata.target().contains("netlink_packet_route")
+        }))
+        .with(LevelFilter::DEBUG)
         .init();
 
     let options = Options::parse();

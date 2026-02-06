@@ -1,11 +1,9 @@
 use std::{io, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use clap::Parser;
-use gmdns::{
-    parser::record::endpoint::EndpointAddr,
-    resolver::{H3Publisher, Publisher},
-};
+use gmdns::{parser::record::endpoint::EndpointAddr, resolvers::H3Publisher};
 use h3x::gm_quic::H3Client;
+use qdns::{Publish, SocketEndpointAddr};
 use rustls::{RootCertStore, SignatureScheme, pki_types::PrivateKeyDer, sign::SigningKey};
 use tracing::{Level, info};
 
@@ -177,6 +175,7 @@ async fn main() -> io::Result<()> {
             endpoint.sign_with(key, scheme).map_err(io::Error::other)?;
         }
         info!("Publishing endpoint: {:?}", endpoint);
+        let endpoint = SocketEndpointAddr::try_from(endpoint).unwrap().into();
         resolver.publish(&opt.host, &[endpoint]).await?;
         info!("Successfully published endpoint for {}", addr);
     }

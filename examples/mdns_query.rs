@@ -19,10 +19,7 @@ async fn main() -> Result<(), Error> {
     let args = Args::parse();
     let mdns = gmdns::mdns::Mdns::new(SERVICE_NAME, args.ip, &args.device)?;
 
-    let ret = mdns
-        .query("mdns.test.genmeta.net".to_string())
-        .await
-        .unwrap();
+    let ret = mdns.query("mdns.test.genmeta.net").await?;
     println!("{ret:?}\n");
     Ok(())
 }

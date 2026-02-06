@@ -13,7 +13,6 @@ use nix::net::if_::if_nametoindex;
 use socket2::{Domain, Socket, Type};
 use thiserror::Error;
 use tokio::{io, net::UdpSocket, task::JoinSet, time};
-use tokio_util::task::AbortOnDropHandle;
 
 use crate::parser::{
     packet::{Packet, be_packet},
@@ -21,7 +20,11 @@ use crate::parser::{
 };
 
 #[derive(Debug)]
-pub struct MdnsSocket(UdpSocket);
+pub struct MdnsSocket {
+    udp: UdpSocket,
+    ip: IpAddr,
+    nic: String,
+}
 
 const MULTICAST_PORT: u16 = 5353;
 const MULTICAST_ADDR_V4: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
@@ -70,14 +73,18 @@ impl MdnsSocket {
             }
         };
 
-        UdpSocket::from_std(socket.into()).map(Self)
+        Ok(Self {
+            udp: UdpSocket::from_std(socket.into())?,
+            ip,
+            nic: device.to_string(),
+        })
     }
 
     pub async fn receive(&self) -> io::Result<(SocketAddr, Packet)> {
         loop {
             let mut recv_buffer = [0u8; 2048];
 
-            let (size, source) = self.0.recv_from(&mut recv_buffer).await?;
+            let (size, source) = self.udp.recv_from(&mut recv_buffer).await?;
 
             let Ok((_remain, packet)) = be_packet(&recv_buffer[..size]) else {
                 continue;
@@ -89,11 +96,11 @@ impl MdnsSocket {
 
     pub async fn broadcast_packet(&self, packet: Packet) -> io::Result<()> {
         let buf = packet.to_bytes();
-        let target: SocketAddr = match self.0.local_addr()?.ip() {
+        let target: SocketAddr = match self.udp.local_addr()?.ip() {
             IpAddr::V4(_) => (MULTICAST_ADDR_V4, MULTICAST_PORT).into(),
             IpAddr::V6(_) => (MULTICAST_ADDR_V6, MULTICAST_PORT).into(),
         };
-        self.0.send_to(&buf, target).await?;
+        self.udp.send_to(&buf, target).await?;
 
         Ok(())
     }
@@ -214,7 +221,6 @@ impl PacketRouter {
 pub struct MdnsProtocol {
     socket: Arc<MdnsSocket>,
     router: Weak<PacketRouter>,
-    _route: AbortOnDropHandle<()>,
 }
 
 #[derive(Debug, Error)]
@@ -228,11 +234,14 @@ impl From<Disconnected> for io::Error {
 }
 
 impl MdnsProtocol {
-    pub fn new(device: &str, ip: IpAddr) -> io::Result<Arc<Self>> {
+    pub fn new(
+        device: &str,
+        ip: IpAddr,
+    ) -> io::Result<(Self, impl Future<Output = ()> + Send + use<>)> {
         let socket = Arc::new(MdnsSocket::new(device, ip)?);
         let router = Arc::new(PacketRouter::new());
 
-        let route = AbortOnDropHandle::new(tokio::spawn({
+        let route = {
             let socket = socket.clone();
             let router = router.clone();
             async move {
@@ -240,16 +249,24 @@ impl MdnsProtocol {
                     router.deliver(source, packet);
                 }
             }
-        }));
-        Ok(Arc::new(Self {
+        };
+        let protocol = Self {
             socket,
             router: Arc::downgrade(&router),
-            _route: route,
-        }))
+        };
+        Ok((protocol, route))
     }
 
     pub async fn broadcast_packet(&self, packet: Packet) -> io::Result<()> {
         self.socket.broadcast_packet(packet).await
+    }
+
+    pub fn bound_ip(&self) -> IpAddr {
+        self.socket.ip
+    }
+
+    pub fn bound_nic(&self) -> &str {
+        &self.socket.nic
     }
 
     pub async fn query(

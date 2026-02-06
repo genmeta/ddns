@@ -1,13 +1,15 @@
-use std::{fmt::Display, io, net::SocketAddr, sync::Arc};
+use std::{fmt::Display, io, sync::Arc};
 
 use dashmap::DashMap;
+use futures::{StreamExt, stream};
 use h3x::gm_quic::{
-    BuildClientError, H3Client,
+    H3Client,
     prelude::{
-        QuicClient,
+        ConnectServerError, QuicClient,
         handy::{ToCertificate, ToPrivateKey},
     },
 };
+use qdns::{EndpointAddr, Publish, PublishFuture, RecordStream, Resolve, ResolveFuture, Source};
 use reqwest::IntoUrl;
 use rustls::RootCertStore;
 use tokio::{
@@ -17,10 +19,7 @@ use tokio::{
 use tracing::debug;
 use url::Url;
 
-use crate::{
-    MdnsPacket,
-    parser::{packet::be_packet, record::endpoint::EndpointAddr},
-};
+use crate::{MdnsPacket, parser::packet::be_packet};
 
 #[derive(Debug)]
 struct Record {
@@ -29,17 +28,16 @@ struct Record {
 }
 
 // Internal message types for communication with the worker thread
-type LookupResult = io::Result<Vec<(Option<String>, EndpointAddr)>>;
 
 enum Command {
     Publish {
         name: String,
         endpoints: Vec<EndpointAddr>,
-        reply: oneshot::Sender<io::Result<()>>,
+        reply: oneshot::Sender<Result<(), Error>>,
     },
     Lookup {
         name: String,
-        reply: oneshot::Sender<LookupResult>,
+        reply: oneshot::Sender<Result<RecordStream<'static>, Error>>,
     },
 }
 
@@ -51,117 +49,115 @@ struct H3ResolverInner {
 }
 
 impl H3ResolverInner {
-    async fn publish(&self, name: &str, endpoints: &[EndpointAddr]) -> io::Result<()> {
+    async fn publish(&self, name: &str, endpoints: &[EndpointAddr]) -> Result<(), Error> {
         debug!("h3x Publishing {} with {} endpoints", name, endpoints.len());
         let bytes = {
+            let endpoints = endpoints
+                .iter()
+                .filter_map(|ep| match *ep {
+                    qdns::EndpointAddr::Socket(ep) => ep.try_into().ok(),
+                    qdns::EndpointAddr::Ble(..) => None,
+                })
+                .collect();
             let mut hosts = std::collections::HashMap::new();
-            hosts.insert(name.to_string(), endpoints.to_vec());
+            hosts.insert(name.to_string(), endpoints);
             let answer = MdnsPacket::answer(0, &hosts);
             answer.to_bytes()
         };
 
         let mut url = self.base_url.join("publish").expect("Invalid base URL");
         url.set_query(Some(&format!("host={name}")));
-        let uri: http::Uri = url
-            .as_str()
-            .parse()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
 
-        let (_, mut resp) = self
+        let (_, resp) = self
             .client
             .new_request()
             .with_body(bytes::Bytes::from(bytes))
             .post(uri)
-            .await
-            .map_err(|e| io::Error::other(e.to_string()))?;
+            .await?;
 
         if resp.status() != http::StatusCode::OK {
-            return Err(io::Error::other(Error::Status {
+            return Err(Error::Status {
                 status: resp.status(),
-            }));
+            });
         }
-
-        _ = resp.read_to_bytes().await.map_err(|e| {
-            io::Error::other(Error::H3 {
-                message: e.to_string(),
-            })
-        })?;
 
         Ok(())
     }
 
-    async fn lookup(&self, name: &str) -> io::Result<Vec<(Option<String>, EndpointAddr)>> {
+    async fn lookup(&self, name: &str) -> Result<RecordStream<'static>, Error> {
         use crate::parser::record;
+        let now = Instant::now();
+        let server = Arc::from(self.base_url.host_str().unwrap_or("<unknown server>"));
+        let source = Source::Http { server };
 
         // 1. Check cache (Lazy expiration)
         if let Some(entry) = self.cached_records.get(name)
             && entry.expire > Instant::now()
         {
-            return Ok(entry
-                .addrs
-                .iter()
-                .map(|e: &EndpointAddr| (None, e.clone()))
-                .collect());
+            let endpoint_addrs: Vec<_> =
+                entry.addrs.iter().map(|ep| (source.clone(), *ep)).collect();
+            return Ok(futures::stream::iter(endpoint_addrs).boxed());
         }
         // Expired: remove it (drop the entry lock first if needed, but DashMap handles this)
         // We'll just fall through to fetch fresh data and overwrite it.
 
-        let url = self.base_url.join("lookup").expect("Invalid URL");
-        let uri: http::Uri = format!("{}?host={}", url.as_str(), name)
-            .parse()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let mut url = self.base_url.join("lookup").expect("Invalid URL");
+        url.set_query(Some(&format!("host={}", name)));
+        let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
 
         let (_req, mut resp) = self
             .client
             .new_request()
             .get(uri)
             .await
-            .map_err(|e| io::Error::other(e.to_string()))?;
+            .map_err(|source| Error::H3Request { source })?;
 
         match resp.status() {
             http::StatusCode::OK => {}
             http::StatusCode::NOT_FOUND => {
-                return Err(io::Error::other(Error::NoRecordFound {}));
+                return Err(Error::NoRecordFound {});
             }
-            status => return Err(io::Error::other(Error::Status { status })),
+            status => return Err(Error::Status { status }),
         }
 
-        let response = resp.read_to_bytes().await.map_err(|e| {
-            io::Error::other(Error::H3 {
-                message: e.to_string(),
-            })
+        let response = resp
+            .read_to_bytes()
+            .await
+            .map_err(|source| Error::H3Stream { source })?;
+
+        let (_remain, packet) = be_packet(&response).map_err(|source| Error::ParseRecords {
+            source: source.to_owned(),
         })?;
 
-        let (_remain, packet) = be_packet(&response).map_err(|error| {
-            io::Error::other(Error::ParseRecords {
-                source: io::Error::other(error.to_string()),
-            })
-        })?;
-
-        let ret = packet
+        let addrs = packet
             .answers
             .iter()
             .filter_map(|answer| match answer.data() {
-                record::RData::E(e) => Some((None, e.clone())),
-                _ => None,
+                record::RData::E(ep) => {
+                    let socket_ep = ep.clone().try_into().ok()?;
+                    Some(qdns::EndpointAddr::Socket(socket_ep))
+                }
+                _ => {
+                    tracing::debug!(?answer, "Ignored record");
+                    None
+                }
             })
             .collect::<Vec<_>>();
-
-        if ret.is_empty() {
-            return Err(io::Error::other(Error::NoRecordFound {}));
+        if addrs.is_empty() {
+            return Err(Error::NoRecordFound {});
         }
 
         // cache the addrs
-        let addrs = ret.iter().map(|(_, e)| e.clone()).collect();
         self.cached_records.insert(
             name.to_string(),
             Record {
-                addrs,
-                expire: Instant::now() + std::time::Duration::from_secs(300),
+                addrs: addrs.clone(),
+                expire: now + std::time::Duration::from_secs(300),
             },
         );
-        tracing::info!("h3x Resolved {} to {} endpoints", name, ret.len());
-        Ok(ret)
+
+        Ok(stream::iter(addrs.into_iter().map(move |ep| (source.clone(), ep))).boxed())
     }
 
     async fn run(self: Arc<Self>, mut rx: mpsc::Receiver<Command>) {
@@ -258,7 +254,7 @@ impl H3Publisher {
         let client = h3x::client::Client::<QuicClient>::builder()
             .with_root_certificates(std::sync::Arc::new(root_store))
             .with_identity(client_name, cert_chain, private_key)
-            .map_err(|e: BuildClientError| io::Error::other(e.to_string()))?
+            .map_err(io::Error::other)?
             .build();
         Self::new(base_url, client)
     }
@@ -286,16 +282,9 @@ fn create_inner(
 
     let (tx, rx) = mpsc::channel(32);
 
-    // Spawn the worker in a dedicated thread with its own LocalSet
     let inner_clone = inner.clone();
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("Failed to create tokio runtime for H3Resolver");
-
-        let local = tokio::task::LocalSet::new();
-        local.block_on(&rt, inner_clone.run(rx));
+    tokio::spawn(async move {
+        inner_clone.run(rx).await;
     });
 
     Ok((tx, base_url))
@@ -303,6 +292,17 @@ fn create_inner(
 
 #[derive(thiserror::Error, Debug)]
 enum Error {
+    #[error("H3 request error")]
+    H3Stream {
+        #[from]
+        source: h3x::client::StreamError,
+    },
+    #[error("H3 request error")]
+    H3Request {
+        #[from]
+        source: h3x::client::RequestError<ConnectServerError>,
+    },
+
     #[error("{status}")]
     Status { status: http::StatusCode },
 
@@ -310,19 +310,11 @@ enum Error {
     NoRecordFound {},
 
     #[error("Failed to parse dns records from response")]
-    ParseRecords { source: io::Error },
-
-    #[error("H3 request error: {message}")]
-    H3 { message: String },
+    ParseRecords {
+        #[from]
+        source: nom::Err<nom::error::Error<Vec<u8>>>,
+    },
 }
-
-impl From<io::Error> for Error {
-    fn from(source: io::Error) -> Self {
-        Error::ParseRecords { source }
-    }
-}
-
-use crate::resolver::{Publisher, Resolver};
 
 // H3Resolver uses a dedicated worker thread with LocalSet to handle non-Send futures.
 // Communication happens via channels, making the public API fully Send + Sync compatible.
@@ -334,66 +326,59 @@ const EXCLUDED_DOMAINS: [&str; 4] = [
     "download.genmeta.net",
 ];
 
-async fn tokio_lookup(name: &str) -> io::Result<Vec<(Option<String>, EndpointAddr)>> {
-    tracing::debug!("h3x tokio_lookup for {}", name);
-    let host = if name.contains(':') {
-        name.to_string()
-    } else {
-        format!("{}:443", name)
-    };
+impl Publish for H3Publisher {
+    fn publish<'a>(&'a self, name: &'a str, endpoints: &'a [EndpointAddr]) -> PublishFuture<'a> {
+        let publish = async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            self.tx
+                .send(Command::Publish {
+                    name: name.to_string(),
+                    endpoints: endpoints.to_vec(),
+                    reply: reply_tx,
+                })
+                .await
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::BrokenPipe, "H3Resolver worker stopped")
+                })?;
 
-    let addrs = tokio::net::lookup_host(host).await?;
-    let mut endpoints = Vec::new();
-    for addr in addrs {
-        let endpoint = match addr {
-            SocketAddr::V4(v4) => EndpointAddr::direct_v4(v4),
-            SocketAddr::V6(v6) => EndpointAddr::direct_v6(v6),
+            reply_rx
+                .await
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::BrokenPipe, "H3Resolver worker stopped")
+                })?
+                .map_err(io::Error::other)
         };
-        endpoints.push((None, endpoint));
-    }
-    Ok(endpoints)
-}
-
-#[async_trait::async_trait]
-impl Publisher for H3Publisher {
-    async fn publish(&self, name: &str, endpoints: &[EndpointAddr]) -> io::Result<()> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::Publish {
-                name: name.to_string(),
-                endpoints: endpoints.to_vec(),
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "H3Resolver worker stopped"))?;
-
-        reply_rx
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "H3Resolver worker stopped"))?
+        Box::pin(publish)
     }
 }
 
-#[async_trait::async_trait]
-impl Resolver for H3Resolver {
-    async fn lookup(&self, name: &str) -> io::Result<Vec<(Option<String>, EndpointAddr)>> {
-        let domain = name.split(':').next().unwrap_or(name);
-        if (!domain.ends_with(".genmeta.net") && domain != "genmeta.net")
-            || EXCLUDED_DOMAINS.contains(&domain)
-        {
-            return tokio_lookup(name).await;
-        }
+impl Resolve for H3Resolver {
+    fn lookup<'r, 'n: 'r>(&'r self, name: &'n str) -> ResolveFuture<'r, 'n> {
+        Box::pin(async move {
+            let domain = name.split(':').next().unwrap_or(name);
+            if (!domain.ends_with(".genmeta.net") && domain != "genmeta.net")
+                || EXCLUDED_DOMAINS.contains(&domain)
+            {
+                return Err(io::Error::other(Error::NoRecordFound {}));
+            }
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::Lookup {
-                name: name.to_string(),
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "H3Resolver worker stopped"))?;
+            let (reply_tx, reply_rx) = oneshot::channel();
+            self.tx
+                .send(Command::Lookup {
+                    name: name.to_string(),
+                    reply: reply_tx,
+                })
+                .await
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::BrokenPipe, "H3Resolver worker stopped")
+                })?;
 
-        reply_rx
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "H3Resolver worker stopped"))?
+            reply_rx
+                .await
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::BrokenPipe, "H3Resolver worker stopped")
+                })?
+                .map_err(io::Error::other)
+        })
     }
 }

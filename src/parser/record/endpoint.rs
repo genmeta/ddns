@@ -14,6 +14,7 @@ use nom::{
     error::{ErrorKind, make_error},
     number::streaming::{be_u8, be_u16, be_u32, be_u128},
 };
+use qdns::SocketEndpointAddr;
 use rustls::{SignatureScheme, pki_types::SubjectPublicKeyInfoDer, sign::SigningKey};
 
 use crate::parser::{
@@ -597,10 +598,6 @@ impl Display for EndpointAddr {
     }
 }
 
-#[cfg(feature = "h3x-resolver")]
-use h3x::gm_quic::qbase::net::addr::SocketEndpointAddr;
-
-#[cfg(feature = "h3x-resolver")]
 impl TryFrom<SocketEndpointAddr> for EndpointAddr {
     type Error = ();
 
@@ -621,6 +618,31 @@ impl TryFrom<SocketEndpointAddr> for EndpointAddr {
                 outer: SocketAddr::V6(outer),
             } => Ok(Self::relay_v6(outer, agent)),
             _ => Err(()),
+        }
+    }
+}
+
+impl TryFrom<EndpointAddr> for SocketEndpointAddr {
+    type Error = ();
+
+    fn try_from(value: EndpointAddr) -> Result<Self, Self::Error> {
+        if let Some(agent_addr) = value.agent {
+            match (value.primary, agent_addr) {
+                (SocketAddr::V4(outer), SocketAddr::V4(agent)) => Ok(SocketEndpointAddr::Agent {
+                    outer: outer.into(),
+                    agent: agent.into(),
+                }),
+                (SocketAddr::V6(outer), SocketAddr::V6(agent)) => Ok(SocketEndpointAddr::Agent {
+                    outer: outer.into(),
+                    agent: agent.into(),
+                }),
+                _ => Err(()),
+            }
+        } else {
+            match value.primary {
+                SocketAddr::V4(addr) => Ok(SocketEndpointAddr::Direct { addr: addr.into() }),
+                SocketAddr::V6(addr) => Ok(SocketEndpointAddr::Direct { addr: addr.into() }),
+            }
         }
     }
 }
