@@ -1,4 +1,9 @@
-use std::{collections::HashMap, fmt::Display, io, sync::Arc};
+use std::{
+    collections::HashMap,
+    fmt::Display,
+    io,
+    sync::{Arc, LazyLock},
+};
 
 use dashmap::DashMap;
 use futures::{StreamExt, TryFutureExt, stream};
@@ -43,12 +48,15 @@ impl HttpResolver {
             )
         })?;
 
-        let http_client = Client::builder()
-            .build()
-            // with certs?
-            .expect("Failed to build HTTP client");
+        static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
+            Client::builder()
+                .build()
+                // with certs?
+                .expect("Failed to build HTTP client")
+        });
+
         Ok(Self {
-            http_client,
+            http_client: HTTP_CLIENT.clone(),
             base_url,
             cached_records: DashMap::new(),
         })
