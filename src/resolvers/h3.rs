@@ -88,7 +88,6 @@ impl H3Resolver {
         })
     }
 
-    #[tracing::instrument(level = "debug", skip(self), err)]
     pub async fn publish(&self, name: &str, endpoints: &[EndpointAddr]) -> Result<(), Error> {
         debug!("h3x Publishing {} with {} endpoints", name, endpoints.len());
         let bytes = {
@@ -132,7 +131,6 @@ impl H3Resolver {
         "download.genmeta.net",
     ];
 
-    #[tracing::instrument(level = "debug", skip(self), err)]
     pub async fn lookup(&self, name: &str) -> Result<RecordStream, Error> {
         use crate::parser::record;
         let now = Instant::now();

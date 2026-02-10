@@ -9,10 +9,8 @@ use std::{
 
 use futures::{Stream, stream};
 #[cfg(feature = "h3x-resolver")]
-use h3x::gm_quic::{
-    qbase::net::addr::BoundAddr,
-    qinterface::{Interface, component::Component, io::IO},
-};
+use h3x::gm_quic::qbase::net::addr::BoundAddr;
+use qinterface::{Interface, component::Component, io::IO};
 use tokio::{task::JoinSet, time};
 use tracing::Instrument;
 
@@ -69,8 +67,7 @@ impl Mdns {
         })
     }
 
-    #[cfg(feature = "h3x-resolver")]
-    pub fn init(service_name: &str, iface: &(impl IO + ?Sized)) -> io::Result<Self> {
+    pub fn from_iface(service_name: &str, iface: &(impl IO + ?Sized)) -> io::Result<Self> {
         let binding = iface.bind_uri();
         let Some((_family, device, _port)) = binding.as_iface_bind_uri() else {
             return Err(io::Error::new(
@@ -86,6 +83,46 @@ impl Mdns {
         };
 
         Self::new(service_name, bound_addr.ip(), device)
+    }
+
+    pub fn reinit(&self, iface: &(impl IO + ?Sized)) {
+        // Extract interface info
+
+        let binding = iface.bind_uri();
+        let Some((_family, device, _port)) = binding.as_iface_bind_uri() else {
+            return;
+        };
+        let Ok(BoundAddr::Internet(bound_addr)) = iface.bound_addr() else {
+            return;
+        };
+        let ip = bound_addr.ip();
+
+        let mut inner = self.inner.lock().expect("Mdns inner lock poisoned");
+
+        // Skip if already using same device/IP with active protocol
+
+        if inner.proto.bound_nic() == device && inner.proto.bound_ip() == ip {
+            return;
+        }
+
+        let Ok((proto, route)) = MdnsProtocol::new(device, ip) else {
+            tracing::debug!(target: "mdns", device, %ip, "Failed to reinit mdns protocol");
+            return;
+        };
+        inner.proto = Arc::new(proto);
+
+        inner.tasks.abort_all();
+        while inner.tasks.try_join_next().is_some() {}
+
+        inner.tasks.spawn(route);
+        let proto = inner.proto.clone();
+        Self::spawn_tasks(
+            &mut inner.tasks,
+            proto,
+            self.hosts.clone(),
+            self.service_name.clone(),
+        );
+        // Update state with new protocol and tasks
     }
 
     fn spawn_tasks(
@@ -202,17 +239,22 @@ impl Mdns {
     }
 
     #[inline]
-    pub async fn query(&self, domain: &str) -> io::Result<Vec<EndpointAddr>> {
+    pub fn query(
+        &self,
+        domain: String,
+    ) -> impl Future<Output = io::Result<Vec<EndpointAddr>>> + use<> {
         let proto = self.protocol();
-        let local_name = Self::local_name(self.service_name.clone(), domain.to_owned());
-        let (src, mut endpoints) = proto.query(local_name).await?;
-        if let Some(pos) = endpoints.iter().position(|ep| ep.addr().ip() == src.ip()) {
-            endpoints.swap(0, pos);
+        let local_name = Self::local_name(self.service_name.clone(), domain);
+        async move {
+            let (src, mut endpoints) = proto.query(local_name).await?;
+            if let Some(pos) = endpoints.iter().position(|ep| ep.addr().ip() == src.ip()) {
+                endpoints.swap(0, pos);
+            }
+            if endpoints.is_empty() {
+                return Err(io::Error::other("empty dns result"));
+            }
+            Ok(endpoints)
         }
-        if endpoints.is_empty() {
-            return Err(io::Error::other("empty dns result"));
-        }
-        Ok(endpoints)
     }
 
     #[inline]
@@ -228,53 +270,16 @@ impl Mdns {
     fn local_name(service_name: String, name: String) -> String {
         name.split_once("genmeta.net")
             .map(|(prefix, _)| format!("{prefix}{service_name}"))
-            .unwrap_or(name)
+            .unwrap_or_else(|| name)
     }
 }
 
-#[cfg(feature = "h3x-resolver")]
 impl Component for Mdns {
-    fn poll_shutdown(&self, _cx: &mut Context<'_>) -> Poll<()> {
-        self.poll_close(_cx)
+    fn poll_shutdown(&self, cx: &mut Context<'_>) -> Poll<()> {
+        self.poll_close(cx)
     }
 
     fn reinit(&self, iface: &Interface) {
-        // Extract interface info
-
-        let binding = iface.bind_uri();
-        let Some((_family, device, _port)) = binding.as_iface_bind_uri() else {
-            return;
-        };
-        let Ok(BoundAddr::Internet(bound_addr)) = iface.bound_addr() else {
-            return;
-        };
-        let ip = bound_addr.ip();
-
-        let mut inner = self.inner.lock().expect("Mdns inner lock poisoned");
-
-        // Skip if already using same device/IP with active protocol
-
-        if inner.proto.bound_nic() == device && inner.proto.bound_ip() == ip {
-            return;
-        }
-
-        let Ok((proto, route)) = MdnsProtocol::new(device, ip) else {
-            tracing::debug!(target: "mdns", device, %ip, "Failed to reinit mdns protocol");
-            return;
-        };
-        inner.proto = Arc::new(proto);
-
-        inner.tasks.abort_all();
-        while inner.tasks.try_join_next().is_some() {}
-
-        inner.tasks.spawn(route);
-        let proto = inner.proto.clone();
-        Self::spawn_tasks(
-            &mut inner.tasks,
-            proto,
-            self.hosts.clone(),
-            self.service_name.clone(),
-        );
-        // Update state with new protocol and tasks
+        self.reinit(iface);
     }
 }
