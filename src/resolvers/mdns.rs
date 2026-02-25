@@ -33,18 +33,21 @@ impl Publish for MdnsResolver {
     fn publish<'a>(
         &'a self,
         name: &'a str,
-        endpoints: &'a [EndpointAddr],
+        packet: &'a [u8],
     ) -> qdns::PublishFuture<'a> {
-        self.insert_host(
-            name.to_string(),
-            endpoints
-                .iter()
-                .filter_map(|ep| match ep {
-                    EndpointAddr::Socket(ep) => (*ep).try_into().ok(),
-                    EndpointAddr::Ble(..) => None,
-                })
-                .collect(),
-        );
+        use crate::parser::{packet::be_packet, record::RData};
+        let endpoints = be_packet(packet)
+            .map(|(_, pkt)| {
+                pkt.answers
+                    .iter()
+                    .filter_map(|rr| match rr.data() {
+                        RData::E(ep) => Some(ep.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        self.insert_host(name.to_string(), endpoints);
         Box::pin(future::ready(Ok(())))
     }
 }

@@ -116,6 +116,12 @@ fn normalize_host(host: &str) -> Result<String, AppError> {
         return Err(AppError::ForbiddenHost);
     }
 
+    // 剥离端口号（如 "example.com:443" -> "example.com"）
+    let host = match host.rsplit_once(':') {
+        Some((h, port)) if port.chars().all(|c| c.is_ascii_digit()) => h,
+        _ => host,
+    };
+
     // 允许末尾 '.'（FQDN 写法）
     let host = host.strip_suffix('.').unwrap_or(host);
 

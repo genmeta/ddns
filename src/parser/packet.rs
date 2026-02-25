@@ -49,7 +49,7 @@ impl fmt::Display for Packet {
                     RData::AAAA(ip) => writeln!(f, " AAAA {}", ip)?,
                     RData::CName(name) => writeln!(f, " CNAME {}", name)?,
                     RData::E(ep) => {
-                        writeln!(f, " E {}", ep.primary)?;
+                        writeln!(f, " E {}", ep)?;
                     }
                     _ => writeln!(f, " {:?}", rr.data)?,
                 }

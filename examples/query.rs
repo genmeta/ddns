@@ -74,7 +74,7 @@ fn format_packet(packet: &MdnsPacket) -> String {
                     output.push_str(&format!("Name:   {}\nCNAME:  {}\n", rr.name(), cname));
                 }
                 RData::E(ep) => {
-                    output.push_str(&format!("Name:   {}\nAddress: {}\n", rr.name(), ep.primary));
+                    output.push_str(&format!("Name:   {}\nAddress: {}\n", rr.name(), ep));
                     if ep.is_signed() {
                         output.push_str("Signature: present\n");
                     }

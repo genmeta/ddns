@@ -1,9 +1,11 @@
-use std::{fmt, io, sync::Arc};
+use std::{fmt, io, sync::Arc, time::Duration};
 
+use dashmap::DashMap;
 use futures::{FutureExt, StreamExt, TryFutureExt, stream};
 use h3x::gm_quic::{H3Client, prelude::ConnectServerError};
 use qdns::{EndpointAddr, Publish, PublishFuture, RecordStream, Resolve, ResolveFuture, Source};
 use reqwest::IntoUrl;
+use tokio::time::Instant;
 use tracing::debug;
 use url::Url;
 
@@ -13,6 +15,14 @@ use crate::{MdnsPacket, parser::packet::be_packet};
 pub struct H3Resolver {
     client: H3Client,
     base_url: Url,
+    cached_records: DashMap<String, Record>,
+    negative_cache: DashMap<String, Instant>,
+}
+
+#[derive(Debug)]
+struct Record {
+    addrs: Vec<qdns::EndpointAddr>,
+    expire: Instant,
 }
 
 impl fmt::Debug for H3Resolver {
@@ -71,10 +81,19 @@ impl H3Resolver {
             )
         })?;
 
-        Ok(Self { client, base_url })
+        Ok(Self {
+            client,
+            base_url,
+            cached_records: DashMap::new(),
+            negative_cache: DashMap::new(),
+        })
     }
 
-    pub async fn publish(&self, name: &str, endpoints: &[EndpointAddr]) -> Result<(), Error> {
+    pub async fn publish_endpoints(
+        &self,
+        name: &str,
+        endpoints: &[EndpointAddr],
+    ) -> Result<(), Error> {
         debug!("h3x Publishing {} with {} endpoints", name, endpoints.len());
         let bytes = {
             let endpoints = endpoints
@@ -86,10 +105,14 @@ impl H3Resolver {
                 .collect();
             let mut hosts = std::collections::HashMap::new();
             hosts.insert(name.to_string(), endpoints);
-            let answer = MdnsPacket::answer(0, &hosts);
-            answer.to_bytes()
+            MdnsPacket::answer(0, &hosts).to_bytes()
         };
 
+        self.publish_packet(name, &bytes).await
+    }
+
+    /// Publish a pre-built DNS packet (with signatures already included).
+    pub async fn publish_packet(&self, name: &str, packet: &[u8]) -> Result<(), Error> {
         let mut url = self.base_url.join("publish").expect("Invalid base URL");
         url.set_query(Some(&format!("host={name}")));
         let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
@@ -97,7 +120,7 @@ impl H3Resolver {
         let (_, resp) = self
             .client
             .new_request()
-            .with_body(bytes::Bytes::from(bytes))
+            .with_body(bytes::Bytes::copy_from_slice(packet))
             .post(uri)
             .await?;
 
@@ -122,13 +145,37 @@ impl H3Resolver {
         let server = Arc::from(self.base_url.host_str().unwrap_or("<unknown server>"));
         let source = Source::Http { server };
 
+        // 剥离端口号，只取域名部分
+        let domain = match name.rsplit_once(':') {
+            Some((h, port)) if port.chars().all(|c| c.is_ascii_digit()) => h,
+            _ => name,
+        };
+
         // 0. Exclude certain domains from lookup
-        if Self::EXCLUDED_DOMAINS.contains(&name) {
+        if Self::EXCLUDED_DOMAINS.contains(&domain) {
             return Err(Error::NoRecordFound {});
         }
 
+        let now = Instant::now();
+        let positive_ttl = Duration::from_secs(10);
+        let negative_ttl = Duration::from_secs(2);
+
+        self.cached_records
+            .retain(|_host, record| record.expire > now);
+        self.negative_cache.retain(|_host, expire| *expire > now);
+
+        if self.negative_cache.get(domain).is_some() {
+            return Err(Error::NoRecordFound {});
+        }
+
+        if let Some(record) = self.cached_records.get(name) {
+            let addrs = record.addrs.clone();
+            let stream = stream::iter(addrs.into_iter().map(move |ep| (source.clone(), ep)));
+            return Ok(stream.boxed());
+        }
+
         let mut url = self.base_url.join("lookup").expect("Invalid URL");
-        url.set_query(Some(&format!("host={}", name)));
+        url.set_query(Some(&format!("host={}", domain)));
         let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
 
         tracing::debug!("Sending lookup request to {}", self.base_url);
@@ -142,7 +189,11 @@ impl H3Resolver {
         tracing::debug!("Received response with status {}", resp.status());
         match resp.status() {
             http::StatusCode::OK => {}
-            http::StatusCode::NOT_FOUND => return Err(Error::NoRecordFound {}),
+            http::StatusCode::NOT_FOUND => {
+                self.negative_cache
+                    .insert(domain.to_string(), now + negative_ttl);
+                return Err(Error::NoRecordFound {});
+            }
             status => return Err(Error::Status { status }),
         }
 
@@ -171,8 +222,20 @@ impl H3Resolver {
             .collect::<Vec<_>>();
 
         if addrs.is_empty() {
+            self.negative_cache
+                .insert(domain.to_string(), now + negative_ttl);
             return Err(Error::NoRecordFound {});
         }
+
+        self.cached_records.insert(
+            name.to_string(),
+            Record {
+                addrs: addrs.clone(),
+                expire: now + positive_ttl,
+            },
+        );
+
+        self.negative_cache.remove(domain);
 
         Ok(stream::iter(addrs.into_iter().map(move |ep| (source.clone(), ep))).boxed())
     }
@@ -181,8 +244,8 @@ impl H3Resolver {
 pub type H3Publisher = H3Resolver;
 
 impl Publish for H3Publisher {
-    fn publish<'a>(&'a self, name: &'a str, endpoints: &'a [EndpointAddr]) -> PublishFuture<'a> {
-        self.publish(name, endpoints)
+    fn publish<'a>(&'a self, name: &'a str, packet: &'a [u8]) -> PublishFuture<'a> {
+        self.publish_packet(name, packet)
             .map_err(io::Error::other)
             .boxed()
     }

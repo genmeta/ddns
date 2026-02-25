@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     fmt::Display,
     io,
     sync::{Arc, LazyLock},
@@ -11,7 +10,7 @@ use qdns::{Publish, PublishFuture, Resolve, ResolveFuture, Source};
 use reqwest::{Client, IntoUrl, StatusCode, Url};
 use tokio::time::Instant;
 
-use crate::{MdnsPacket, parser::packet::be_packet};
+use crate::parser::packet::be_packet;
 
 #[derive(Debug)]
 struct Record {
@@ -93,31 +92,15 @@ impl From<reqwest::Error> for Error {
 }
 
 impl Publish for HttpResolver {
-    fn publish<'a>(
-        &'a self,
-        name: &'a str,
-        endpoints: &'a [qdns::EndpointAddr],
-    ) -> PublishFuture<'a> {
+    fn publish<'a>(&'a self, name: &'a str, packet: &'a [u8]) -> PublishFuture<'a> {
         Box::pin(async move {
-            let mut hosts = HashMap::new();
-            let endpoints = endpoints
-                .iter()
-                .filter_map(|ep| match *ep {
-                    qdns::EndpointAddr::Socket(ep) => ep.try_into().ok(),
-                    qdns::EndpointAddr::Ble(..) => None,
-                })
-                .collect();
-            hosts.insert(name.to_string(), endpoints);
-            let answer = MdnsPacket::answer(0, &hosts);
-            let bytes = answer.to_bytes();
-
             let mut url = self.base_url.join("publish").expect("Invalid base URL");
             url.set_query(Some(&format!("host={name}")));
             let client = reqwest::Client::new();
             let response = client
                 .post(url)
                 .header("Content-Type", "application/octet-stream")
-                .body(bytes)
+                .body(packet.to_vec())
                 .send()
                 .await
                 .map_err(|e| io::Error::other(e.to_string()))?;

@@ -54,6 +54,7 @@ use crate::parser::{
 ///
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EndpointSignature {
+    // TODO: 固定为 Ed25519（签名 64 字节）,但是要求私钥生成算法也是这个
     scheme: u16,
     signature: Vec<u8>,
 }
