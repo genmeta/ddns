@@ -88,7 +88,7 @@ impl Resolvers {
                     Option::into_iter(
                         (!iface.ipv4.is_empty()).then_some((device.as_str(), Family::V4)),
                     )
-                    .chain((!iface.ipv4.is_empty()).then_some((device.as_str(), Family::V6)))
+                    .chain((!iface.ipv6.is_empty()).then_some((device.as_str(), Family::V6)))
                 })
                 .filter(|(device, family)| filter(device, *family))
                 .filter_map(|(device, family)| Some((device, devices.resolve(device, family)?)))
