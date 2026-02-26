@@ -51,7 +51,7 @@ impl HttpResolver {
             Client::builder()
                 .build()
                 // with certs?
-                .expect("Failed to build HTTP client")
+                .expect("Failed to build HTTP client for HttpResolver")
         });
 
         Ok(Self {
