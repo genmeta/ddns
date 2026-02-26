@@ -18,7 +18,7 @@ mod mdns;
 #[cfg(feature = "h3x-resolver")]
 pub use h3::{H3Publisher, H3Resolver};
 pub use http::HttpResolver;
-pub use mdns::{MdnsInterfaces, MdnsResolver};
+pub use mdns::{MdnsResolver, MdnsResolvers};
 
 type ArcResolver = Arc<dyn Resolve + Send + Sync + 'static>;
 

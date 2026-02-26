@@ -1,4 +1,4 @@
-use std::{fmt, io, net::IpAddr, sync::Arc};
+use std::{fmt, io, net::IpAddr};
 
 use dashmap::DashMap;
 use futures::{
@@ -68,22 +68,22 @@ impl Resolve for MdnsResolver {
 }
 
 #[derive(Default, Clone, Debug)]
-pub struct MdnsInterfaces {
+pub struct MdnsResolvers {
     ifaces: DashMap<BindUri, WeakInterface>,
 }
 
-impl fmt::Display for MdnsInterfaces {
+impl fmt::Display for MdnsResolvers {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "MDNS Resolvers")
     }
 }
 
-impl MdnsInterfaces {
+impl MdnsResolvers {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn insert(self: &Arc<Self>, iface: BindInterface) {
+    pub fn insert_iface(&self, iface: BindInterface) {
         let Some(iface) = iface.with_components(|component, iface| {
             component.exist::<MdnsResolver>().then(|| iface.downgrade())
         }) else {
@@ -132,9 +132,17 @@ impl MdnsInterfaces {
             .chain(lookup_futures.flat_map(stream::iter).flatten())
             .boxed())
     }
+
+    pub fn merge(&self, other: &Self) {
+        other.ifaces.iter().for_each(|entry| {
+            self.ifaces
+                .entry(entry.key().clone())
+                .or_insert_with(|| entry.value().clone());
+        });
+    }
 }
 
-impl Resolve for MdnsInterfaces {
+impl Resolve for MdnsResolvers {
     fn lookup<'l>(&'l self, name: &'l str) -> ResolveFuture<'l> {
         self.query(name).boxed()
     }
