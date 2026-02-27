@@ -4,8 +4,7 @@ use redis::AsyncCommands;
 
 use crate::{
     error::{AppError, normalize_host, parse_query_params},
-    policy::DomainPolicy,
-    storage::{AppState, Storage, decode_redis_multi_member, encode_multi_response, unix_now_secs},
+    storage::{AppState, MultiResponse, Storage, StoredRecord, unix_now_secs},
 };
 
 // ---------------------------------------------------------------------------
@@ -14,10 +13,8 @@ use crate::{
 
 pub enum LookupResult {
     NotFound,
-    /// Single record — legacy Standard-domain response.
-    Single(Vec<u8>, Vec<u8>),
-    /// Multiple records (OpenMulti) — newest first.
-    Multi(Vec<(Vec<u8>, Vec<u8>)>),
+    /// Multiple records, newest-first.
+    Multi(MultiResponse),
 }
 
 // ---------------------------------------------------------------------------
@@ -30,51 +27,7 @@ pub async fn perform_lookup(
     limit: Option<usize>,
 ) -> Result<LookupResult, AppError> {
     let host = normalize_host(host)?;
-    let policy = state.policies.policy_for(&host).clone();
-
-    match policy {
-        DomainPolicy::Standard => perform_lookup_standard(state, &host).await,
-        DomainPolicy::OpenMulti => perform_lookup_multi(state, &host, limit).await,
-    }
-}
-
-async fn perform_lookup_standard(state: &AppState, host: &str) -> Result<LookupResult, AppError> {
-    match &state.storage {
-        Storage::Redis(pool) => {
-            let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| AppError::Redis(e.to_string()))?;
-
-            let dns_bytes: Option<Vec<u8>> = conn
-                .get(host)
-                .await
-                .map_err(|e| AppError::Redis(e.to_string()))?;
-
-            let cert_key = format!("{host}_cert");
-            let cert_bytes: Option<Vec<u8>> = conn
-                .get(&cert_key)
-                .await
-                .map_err(|e| AppError::Redis(e.to_string()))?;
-
-            match (dns_bytes, cert_bytes) {
-                (Some(dns), Some(cert)) => Ok(LookupResult::Single(dns, cert)),
-                (Some(dns), None) => Ok(LookupResult::Single(dns, Vec::new())),
-                _ => Ok(LookupResult::NotFound),
-            }
-        }
-        Storage::Memory(mem) => {
-            let now = tokio::time::Instant::now();
-            if let Some(entry) = mem.standard.get(host) {
-                let (dns_bytes, cert_bytes, expire) = entry.value();
-                if *expire > now {
-                    return Ok(LookupResult::Single(dns_bytes.clone(), cert_bytes.clone()));
-                }
-            }
-            mem.standard.remove(host);
-            Ok(LookupResult::NotFound)
-        }
-    }
+    perform_lookup_multi(state, &host, limit).await
 }
 
 async fn perform_lookup_multi(
@@ -113,9 +66,9 @@ async fn perform_lookup_multi(
             let records: Vec<(Vec<u8>, Vec<u8>)> = members
                 .into_iter()
                 .filter_map(|m| {
-                    let (dns, cert, expire_secs) = decode_redis_multi_member(&m)?;
-                    if expire_secs > now_secs {
-                        Some((dns, cert))
+                    let r = StoredRecord::decode(&m)?;
+                    if r.expire_unix_secs > now_secs {
+                        Some((r.dns, r.cert))
                     } else {
                         None
                     }
@@ -125,16 +78,19 @@ async fn perform_lookup_multi(
             if records.is_empty() {
                 Ok(LookupResult::NotFound)
             } else {
-                Ok(LookupResult::Multi(records))
+                Ok(LookupResult::Multi(MultiResponse::new(records)))
             }
         }
         Storage::Memory(mem) => {
             let now = tokio::time::Instant::now();
-            let result = if let Some(mut entry) = mem.multi.get_mut(host) {
-                // Evict expired entries in-place
-                entry.retain(|r| r.expire > now);
+            let result = if let Some(mut entry) = mem.records.get_mut(host) {
+                // Evict expired entries in-place.
+                entry.retain(|_, r| r.expire > now);
+                // Sort newest-first by published_at.
                 let take = limit.unwrap_or(entry.len()).min(entry.len());
-                entry[..take]
+                let mut records: Vec<_> = entry.values().collect();
+                records.sort_by(|a, b| b.published_at.cmp(&a.published_at));
+                records[..take]
                     .iter()
                     .map(|r| (r.dns_bytes.clone(), r.cert_bytes.clone()))
                     .collect::<Vec<_>>()
@@ -145,7 +101,7 @@ async fn perform_lookup_multi(
             if result.is_empty() {
                 Ok(LookupResult::NotFound)
             } else {
-                Ok(LookupResult::Multi(result))
+                Ok(LookupResult::Multi(MultiResponse::new(result)))
             }
         }
     }
@@ -172,11 +128,11 @@ pub struct LookupSvc {
 
 /// Handle a lookup request.
 ///
-/// - Standard domain, no `limit`: returns raw DNS bytes + `e-cert` header (legacy format).
-/// - OpenMulti domain, OR `limit` param present: returns multi-record binary body
-///   `[u32 count BE]([u32 dns_len][dns][u32 cert_len][cert])*` with header
-///   `x-record-format: multi`.
+/// Always returns multi-record binary body:
+/// `[u32 count BE]([u32 dns_len BE][dns][u32 cert_len BE][cert])*`
+/// with header `x-record-format: multi`.
 ///
+/// Optional query param `limit=N` caps the number of records returned.
 /// Sort order: newest published first.
 pub async fn lookup_with_cert(state: AppState, request: &mut Request, response: &mut Response) {
     let params = parse_query_params(&request.uri());
@@ -198,37 +154,8 @@ pub async fn lookup_with_cert(state: AppState, request: &mut Request, response: 
             let _ = response.flush().await;
         }
 
-        Ok(LookupResult::Single(dns_bytes, cert_bytes)) => {
-            if limit.is_some() {
-                // Caller explicitly requested the multi format.
-                let body = encode_multi_response(&[(dns_bytes, cert_bytes)]);
-                response
-                    .set_status(http::StatusCode::OK)
-                    .set_body(bytes::Bytes::from(body));
-                response.headers_mut().insert(
-                    http::HeaderName::from_static("x-record-format"),
-                    http::HeaderValue::from_static("multi"),
-                );
-            } else {
-                // Legacy single-record format.
-                response
-                    .set_status(http::StatusCode::OK)
-                    .set_body(bytes::Bytes::from(dns_bytes));
-                if !cert_bytes.is_empty() {
-                    use base64::Engine;
-                    let cert_b64 = base64::engine::general_purpose::STANDARD.encode(&cert_bytes);
-                    if let Ok(hv) = http::HeaderValue::from_str(&cert_b64) {
-                        response
-                            .headers_mut()
-                            .insert(http::HeaderName::from_static("e-cert"), hv);
-                    }
-                }
-            }
-            let _ = response.flush().await;
-        }
-
-        Ok(LookupResult::Multi(records)) => {
-            let body = encode_multi_response(&records);
+        Ok(LookupResult::Multi(resp)) => {
+            let body = resp.encode();
             response
                 .set_status(http::StatusCode::OK)
                 .set_body(bytes::Bytes::from(body));

@@ -1,7 +1,12 @@
 use std::{io, net::IpAddr, path::PathBuf, sync::Arc};
 
 use clap::Parser;
-use gmdns::{MdnsPacket, mdns::Mdns, parser::record::RData};
+use gmdns::{
+    MdnsPacket,
+    mdns::Mdns,
+    parser::record::RData,
+    wire::be_multi_response,
+};
 use h3x::gm_quic::{
     BuildClientError, H3Client,
     prelude::handy::{ToCertificate, ToPrivateKey},
@@ -182,74 +187,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if resp.status().is_success() {
         let bytes = resp.read_to_bytes().await?;
 
-        let cert = if let Some(cert_header) = resp.headers().get("e-cert")
-            && let Ok(cert_b64) = cert_header.to_str()
-        {
-            use base64::Engine;
-            match base64::engine::general_purpose::STANDARD.decode(cert_b64) {
-                Ok(cert_der) => {
-                    info!(
-                        cert_len = cert_der.len(),
-                        "Certificate received in E-Cert header"
-                    );
-                    println!(
-                        "Certificate (DER, {} bytes): {:02x?}...",
-                        cert_der.len(),
-                        &cert_der[..std::cmp::min(32, cert_der.len())]
-                    );
-                    Some(cert_der)
-                }
-                Err(e) => {
-                    info!(?e, "Failed to decode E-Cert header");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        let (_remain, multi) = be_multi_response(bytes.as_ref()).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Invalid multi-record payload: {e}"),
+            )
+        })?;
 
-        // Try to parse as gmdns packet for display if possible, or just raw
-        match gmdns::parser::packet::be_packet(&bytes) {
-            Ok((_, packet)) => {
-                info!("DNS lookup successful, parsed packet:\n{}", packet);
-                println!("{}", format_packet(&packet));
-                // 验证证书
-                if let Some(cert) = cert {
-                    if let Some(rrs) = packet
-                        .answers
-                        .iter()
-                        .filter_map(|rr| {
-                            if let RData::E(ep) = rr.data() {
-                                Some((rr.name().to_string(), ep))
-                            } else {
-                                None
+        info!(count = multi.records.len(), "lookup.ok");
+        println!("Lookup Result: {} record(s)", multi.records.len());
+
+        for (index, record) in multi.records.iter().enumerate() {
+            println!("\n-- Record #{} --", index + 1);
+
+            // Source: abbreviated fingerprint of the publisher's certificate.
+            match record.cert_fingerprint_hex() {
+                Some(fp) => println!("Source fingerprint: {}…{}", &fp[..16], &fp[fp.len() - 8..]),
+                None => println!("Source fingerprint: (no certificate)"),
+            }
+
+            match gmdns::parser::packet::be_packet(&record.dns) {
+                Ok((_, packet)) => {
+                    print!("{}", format_packet(&packet));
+
+                    // Signature verification per endpoint record.
+                    for rr in &packet.answers {
+                        if let RData::E(ep) = rr.data() {
+                            if !ep.is_signed() {
+                                println!("Signature: none");
+                                continue;
                             }
-                        })
-                        .collect::<Vec<_>>()
-                        .first()
-                    {
-                        let (name, ep) = rrs;
-                        match ep.verify_signature_from_der(&cert) {
-                            Ok(_) => {
-                                info!(name = %name, "Certificate verification succeeded");
-                                println!("Certificate verification succeeded for record: {}", name);
+                            if record.cert.is_empty() {
+                                println!("Signature: present but no certificate to verify against");
+                                continue;
                             }
-                            Err(e) => {
-                                info!(name = %name, ?e, "Certificate verification failed");
-                                println!(
-                                    "Certificate verification failed for record: {}: {:?}",
-                                    name, e
-                                );
+                            match ep.verify_signature_from_der(&record.cert) {
+                                Ok(true) => println!("Signature: ✓ verified"),
+                                Ok(false) => println!("Signature: ✗ invalid"),
+                                Err(e) => println!("Signature: ✗ error ({e:?})"),
                             }
                         }
-                    } else {
-                        info!("No E records found in DNS answer for certificate verification");
                     }
                 }
-            }
-            Err(_) => {
-                info!(bytes = bytes.len(), "lookup.ok.raw");
-                println!("Lookup Result (Raw): {:?}", bytes);
+                Err(_) => {
+                    println!("DNS payload: invalid ({} bytes)", record.dns.len());
+                }
             }
         }
     } else {

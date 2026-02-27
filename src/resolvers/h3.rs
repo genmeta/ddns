@@ -9,7 +9,11 @@ use tokio::time::Instant;
 use tracing::debug;
 use url::Url;
 
-use crate::{MdnsPacket, parser::packet::be_packet};
+use crate::{
+    MdnsPacket,
+    parser::packet::be_packet,
+    wire::be_multi_response,
+};
 
 // Inner struct that holds the actual H3 client and runs on a dedicated thread
 pub struct H3Resolver {
@@ -67,6 +71,9 @@ pub enum Error {
         #[from]
         source: nom::Err<nom::error::Error<Vec<u8>>>,
     },
+
+    #[error("Failed to decode multi-record response")]
+    ParseMultiResponse,
 }
 
 impl H3Resolver {
@@ -116,7 +123,7 @@ impl H3Resolver {
         let mut url = self.base_url.join("publish").expect("Invalid base URL");
         url.set_query(Some(&format!("host={name}")));
         let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
-
+        tracing::debug!("h3x Publishing packet for {} to {}", name, self.base_url);
         let (_, resp) = self
             .client
             .new_request()
@@ -202,24 +209,32 @@ impl H3Resolver {
             .await
             .map_err(|source| Error::H3Stream { source })?;
 
-        let (_remain, packet) = be_packet(&response).map_err(|source| Error::ParseRecords {
-            source: source.to_owned(),
-        })?;
+        // Server always returns multi-record format.
+        let (_remain, multi) =
+            be_multi_response(response.as_ref()).map_err(|_| Error::ParseMultiResponse)?;
 
-        let addrs = packet
-            .answers
-            .iter()
-            .filter_map(|answer| match answer.data() {
-                record::RData::E(ep) => {
-                    let socket_ep = ep.clone().try_into().ok()?;
-                    Some(qdns::EndpointAddr::Socket(socket_ep))
-                }
-                _ => {
-                    tracing::debug!(?answer, "Ignored record");
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
+        let mut addrs = Vec::new();
+        for r in multi.records {
+            let (_remain, packet) = be_packet(&r.dns).map_err(|source| Error::ParseRecords {
+                source: source.to_owned(),
+            })?;
+
+            addrs.extend(
+                packet
+                    .answers
+                    .iter()
+                    .filter_map(|answer| match answer.data() {
+                        record::RData::E(ep) => {
+                            let socket_ep = ep.clone().try_into().ok()?;
+                            Some(qdns::EndpointAddr::Socket(socket_ep))
+                        }
+                        _ => {
+                            tracing::debug!(?answer, "Ignored record");
+                            None
+                        }
+                    }),
+            );
+        }
 
         if addrs.is_empty() {
             self.negative_cache

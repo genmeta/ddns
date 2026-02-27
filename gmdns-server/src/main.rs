@@ -63,7 +63,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let options = Options::parse();
 
-    let config_str = std::fs::read_to_string(&options.config).unwrap_or_else(|_| String::new());
+    let config_str = std::fs::read_to_string(&options.config).unwrap_or_else(|e| {
+        eprintln!("Failed to read config {:?}: {e}", options.config);
+        std::process::exit(1);
+    });
     let config: Config = toml::from_str(&config_str).unwrap_or_else(|e| {
         eprintln!("Failed to parse config {:?}: {e}", options.config);
         std::process::exit(1);
