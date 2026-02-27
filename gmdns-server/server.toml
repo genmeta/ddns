@@ -1,0 +1,51 @@
+# gmdns DNS-over-HTTP/3 Server configuration
+# All fields are optional; the values shown below are the built-in defaults.
+
+# Socket address to listen on.
+listen = "0.0.0.0:4433"
+
+# TLS server name (SNI).
+server_name = "localhost"
+
+# Paths to the server TLS certificate and private key (PEM format).
+cert = "examples/keychain/localhost/localhost-ECC.crt"
+key = "examples/keychain/localhost/localhost-ECC.key"
+
+# Root CA that signed the client certificates (PEM format).
+root_cert = "examples/keychain/root/rootCA-ECC.crt"
+
+# Whether to require a valid DNS record signature on Standard domains.
+require_signature = true
+
+# Default TTL (seconds) for published records.
+ttl_secs = 30
+
+# Redis URL for persistent storage.
+# If omitted, records are kept in memory only (lost on restart).
+# redis = "redis://127.0.0.1/"
+
+# ---------------------------------------------------------------------------
+# Domain policy rules
+#
+# Policies are matched in order; the first matching rule wins.
+# Domains not listed here use the built-in "standard" policy.
+#
+# Policies:
+#   standard   — one record per host; client cert SAN must match the target
+#                host; signature check controlled by require_signature above;
+#                each publish overwrites the previous record.
+#
+#   open_multi — any authenticated node may publish; no signature check;
+#                records are appended (not overwritten), each with its own
+#                individual TTL; lookup returns newest-first, use ?limit=N
+#                to cap the number of returned records.
+# ---------------------------------------------------------------------------
+
+[[domain_policies]]
+host = "stun.genmeta.net"
+policy = "open_multi"
+
+# Add more rules as needed, e.g.:
+# [[domain_policies]]
+# host   = "relay.genmeta.net"
+# policy = "open_multi"

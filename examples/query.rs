@@ -1,7 +1,7 @@
 use std::{io, net::IpAddr, path::PathBuf, sync::Arc};
 
 use clap::Parser;
-use gmdns::{MDNS_SERVICE, MdnsPacket, mdns::Mdns, parser::record::RData};
+use gmdns::{MdnsPacket, mdns::Mdns, parser::record::RData};
 use h3x::gm_quic::{
     BuildClientError, H3Client,
     prelude::handy::{ToCertificate, ToPrivateKey},
@@ -12,6 +12,8 @@ use nix::{
 };
 use rustls::RootCertStore;
 use tracing::{Level, info};
+
+const MDNS_SERVICE: &str = "_genmeta.local";
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]

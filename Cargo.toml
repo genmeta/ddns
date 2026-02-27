@@ -1,3 +1,7 @@
+[workspace]
+members = ["gmdns-server"]
+resolver = "2"
+
 [package]
 name = "gmdns"
 version = "0.1.0"
@@ -57,16 +61,15 @@ default = ["h3x-resolver"]
 h3x-resolver = ["dep:h3x", "dep:http"]
 
 [dev-dependencies]
-clap = { version = "4", features = ["derive"] }
 criterion = "0.5"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rustls-pki-types = "1"
-idna = "1"
-redis = { version = "0.23", features = ["tokio-comp", "aio"] }
 tracing-appender = "0.2"
-deadpool-redis = "0.12"
 qbase = { path = "../gm-quic/qbase" }
-base64 = "0.22"
+# examples: publish / query
+clap = { version = "4", features = ["derive"] }
+idna = "1"
+serde = { version = "1", features = ["derive"] }
 
 [[example]]
 name = "mdns_discover"
@@ -75,11 +78,6 @@ path = "examples/mdns_discover.rs"
 [[example]]
 name = "mdns_query"
 path = "examples/mdns_query.rs"
-
-[[example]]
-name = "server"
-path = "examples/server.rs"
-required-features = ["h3x-resolver"]
 
 [[example]]
 name = "publish"
