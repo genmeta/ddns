@@ -35,7 +35,7 @@ impl MdnsSocket {
     pub fn new(device: &str, ip: IpAddr) -> io::Result<Self> {
         tracing::debug!(target: "mdns", device, %ip, "Add mdns device");
         let socket = match ip {
-            IpAddr::V4(_ip) => {
+            IpAddr::V4(ip) => {
                 let socket = Socket::new(Domain::IPV4, Type::DGRAM, None)?;
                 socket.set_nonblocking(true)?;
                 socket.set_reuse_address(true)?;
@@ -49,8 +49,10 @@ impl MdnsSocket {
                 // Always enable multicast loopback so that mDNS services on the
                 // same host (but in different processes) can communicate.
                 socket.set_multicast_loop_v4(true)?;
-                socket.join_multicast_v4(&MULTICAST_ADDR_V4, &Ipv4Addr::UNSPECIFIED)?;
-                #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+                // 使用接口自身的 IP 加入多播组，确保该 socket 只在对应接口上收发 mDNS 报文，
+                // 避免以 UNSPECIFIED(0.0.0.0) 加入导致 lo0 等 socket 响应其他接口的查询。
+                // FIXME：这个改动在树莓派上可能有问题，树莓派上只能 join 0.0.0.0
+                socket.join_multicast_v4(&MULTICAST_ADDR_V4, &ip)?;
                 socket.set_multicast_if_v4(&ip)?;
                 socket
             }

@@ -9,11 +9,7 @@ use tokio::time::Instant;
 use tracing::debug;
 use url::Url;
 
-use crate::{
-    MdnsPacket,
-    parser::packet::be_packet,
-    wire::be_multi_response,
-};
+use crate::{MdnsPacket, parser::packet::be_packet, wire::be_multi_response};
 
 // Inner struct that holds the actual H3 client and runs on a dedicated thread
 pub struct H3Resolver {
