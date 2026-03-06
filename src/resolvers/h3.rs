@@ -48,7 +48,7 @@ pub enum Error {
     #[error("H3 request error")]
     H3Stream {
         #[from]
-        source: h3x::client::StreamError,
+        source: h3x::client::MessageStreamError,
     },
     #[error("H3 request error")]
     H3Request {
