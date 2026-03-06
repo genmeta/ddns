@@ -1,5 +1,8 @@
 use futures::future::BoxFuture;
-use h3x::server::{Request, Response, Service};
+use h3x::{
+    quic::agent::RemoteAgent,
+    server::{Request, Response, Service},
+};
 use redis::AsyncCommands;
 use tokio::time::{Duration, Instant};
 use tracing::{info, warn};
@@ -61,7 +64,7 @@ impl Service for PublishSvc {
             // Standard policy: cert SAN must match the target host.
             // OpenMulti policy: any authenticated node may publish — skip SAN check.
             if policy == DomainPolicy::Standard {
-                let allowed = match client_allowed_host(&agent) {
+                let allowed = match client_allowed_host(agent.as_ref()) {
                     Ok(h) => h,
                     Err(e) => {
                         warn!("Client certificate domain not allowed: {:?}", e);
@@ -87,7 +90,8 @@ impl Service for PublishSvc {
 
             // Validate DNS packet; signature check only for Standard hosts.
             let require_sig = policy == DomainPolicy::Standard && state.require_signature;
-            let packet_name = match validate_dns_packet(body.as_ref(), require_sig, &agent) {
+            let packet_name = match validate_dns_packet(body.as_ref(), require_sig, agent.as_ref())
+            {
                 Ok(n) => n,
                 Err(e) => {
                     write_error(response, e).await;
@@ -108,7 +112,7 @@ impl Service for PublishSvc {
                 return;
             }
 
-            publish_record(&state, &host, &body, &agent, response).await
+            publish_record(&state, &host, &body, agent.as_ref(), response).await
         })
     }
 }
@@ -120,7 +124,7 @@ pub async fn publish_record(
     state: &AppState,
     host: &str,
     body: &bytes::Bytes,
-    agent: &h3x::agent::RemoteAgent,
+    agent: &(impl RemoteAgent + ?Sized),
     response: &mut Response,
 ) {
     let cert_bytes = agent

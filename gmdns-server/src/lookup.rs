@@ -89,7 +89,7 @@ async fn perform_lookup_multi(
                 // Sort newest-first by published_at.
                 let take = limit.unwrap_or(entry.len()).min(entry.len());
                 let mut records: Vec<_> = entry.values().collect();
-                records.sort_by(|a, b| b.published_at.cmp(&a.published_at));
+                records.sort_by_key(|b| std::cmp::Reverse(b.published_at));
                 records[..take]
                     .iter()
                     .map(|r| (r.dns_bytes.clone(), r.cert_bytes.clone()))
