@@ -52,11 +52,16 @@ pub struct DnsErrors {
 impl fmt::Display for DnsErrors {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.errors.is_empty() {
-            return writeln!(f, "No DNS resolvers available");
+            return write!(f, "No DNS resolvers available");
         }
         writeln!(f, "All DNS resolvers failed")?;
-        for (resolver, error) in &self.errors {
-            writeln!(f, "`{resolver}` failed: {}", Report::from_error(error))?;
+        let mut iter = self.errors.iter().peekable();
+        while let Some((resolver, error)) = iter.next() {
+            if iter.peek().is_some() {
+                writeln!(f, "`{resolver}` failed: {}", Report::from_error(error))?;
+            } else {
+                write!(f, "`{resolver}` failed: {}", Report::from_error(error))?;
+            }
         }
         Ok(())
     }
@@ -91,7 +96,7 @@ impl Resolvers {
                     .chain((!iface.ipv6.is_empty()).then_some((device.as_str(), Family::V6)))
                 })
                 .filter(|(device, family)| filter(device, *family))
-                .filter_map(|(device, family)| Some((device, devices.resolve(device, family)?)))
+                .filter_map(|(device, ip)| Some((device, devices.resolve(device, ip)?)))
                 .filter_map(|(device, ip)| MdnsResolver::new(service_name, ip, device).ok())
                 .map(|resolver| Arc::new(resolver) as ArcResolver),
         );
