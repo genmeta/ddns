@@ -11,6 +11,7 @@ use nix::{
     sys::socket::{AddressFamily, SockaddrLike},
 };
 use rustls::RootCertStore;
+use shellexpand;
 use tracing::{Level, info};
 
 const MDNS_SERVICE: &str = "_genmeta.local";
@@ -19,33 +20,33 @@ const MDNS_SERVICE: &str = "_genmeta.local";
 #[command(version, about, long_about = None)]
 struct Options {
     /// Base URL of the HTTP DNS server (TCP/HTTPS), e.g. https://localhost:4433/
-    #[arg(long, default_value = "https://localhost:4433/")]
+    #[arg(long, default_value = "http://dns.genmeta.net:4433/")]
     base_url: String,
 
     /// PEM file containing CA certificates that can verify the server certificate.
-    #[arg(long, default_value = "examples/keychain/root/rootCA-ECC.crt")]
+    #[arg(long, default_value = "~/Downloads/ssl/root.crt")]
     server_ca: PathBuf,
 
     /// Client identity name (passed into h3x/gm-quic identity builder).
-    #[arg(long, default_value = "query.test.genmeta.net")]
+    #[arg(long, default_value = "stun.genmeta.net")]
     client_name: String,
 
     /// Client certificate chain in PEM.
     #[arg(
         long,
-        default_value = "examples/keychain/query.test.genmeta.net/query.test.genmeta.net-ECC.crt"
+        default_value = "~/Downloads/ssl/stun.genmeta.net/stun.genmeta.net.pem"
     )]
     client_cert: PathBuf,
 
     /// Client private key in PEM (PKCS#8 or RSA).
     #[arg(
         long,
-        default_value = "examples/keychain/query.test.genmeta.net/query.test.genmeta.net-ECC.key"
+        default_value = "~/Downloads/ssl/stun.genmeta.net/stun.genmeta.net.key"
     )]
     client_key: PathBuf,
 
     /// DNS name to lookup.
-    #[arg(long, default_value = "publish.test.genmeta.net")]
+    #[arg(long, default_value = "stun.genmeta.net")]
     host: String,
 
     /// Local device name for mDNS query (e.g. en1). When set, perform mDNS lookup before HTTP DNS.
@@ -159,9 +160,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    let root_store = load_root_store_from_pem(&opt.server_ca)?;
-    let cert_pem = std::fs::read(&opt.client_cert)?;
-    let key_pem = std::fs::read(&opt.client_key)?;
+    let server_ca = PathBuf::from(shellexpand::tilde(opt.server_ca.to_str().unwrap()).into_owned());
+    let client_cert =
+        PathBuf::from(shellexpand::tilde(opt.client_cert.to_str().unwrap()).into_owned());
+    let client_key =
+        PathBuf::from(shellexpand::tilde(opt.client_key.to_str().unwrap()).into_owned());
+    let root_store = load_root_store_from_pem(&server_ca)?;
+    let cert_pem = std::fs::read(&client_cert)?;
+    let key_pem = std::fs::read(&client_key)?;
 
     let client = H3Client::builder()
         .with_root_certificates(Arc::new(root_store))

@@ -25,53 +25,46 @@ use crate::parser::{
 
 /// EndpointAddress record (Type E = 266)
 ///
-/// Unified endpoint format that encodes IPv4/IPv6 and direct/relay information in flags.
+/// Unified endpoint format that encodes address family, routing, clustering and NAT information
+/// in a single flags byte, followed by optional fields.
 ///
-/// ## RDATA 线协议格式
-///
-/// ### 包格式
+/// ## Wire format
 ///
 /// ```text
-/// +--------+-----------------+--------------------+-------------------+----------------+----------------------------+
-/// | flags  | sequence(varint)| addr               | isp(optional)     | geo(optional)   | load(optional) | signature (optional)       |
-/// +--------+-----------------+--------------------+-------------------+----------------+----------------------------+
-/// | u8     | QUIC varint     | see addr layout    | VarInt            | lat(f32)+lon(f32) | f32          | scheme(u16)+len(varint)+N  |
-/// +--------+-----------------+--------------------+-------------------+----------------+----------------------------+
+/// +-------+-----------------+--------------------+----------------+----------------------------+
+/// | flags | sequence(varint)| addr               | load(optional) | signature (optional)       |
+/// +-------+-----------------+--------------------+----------------+----------------------------+
+/// | u8    | QUIC varint     | see addr layout    | f32            | scheme(u16)+len(varint)+N  |
+/// +-------+-----------------+--------------------+----------------+----------------------------+
 ///
 /// addr layout:
-/// +--------+-----------------------------------------+
-/// | kind   | addr fields                              |
-/// +--------+-----------------------------------------+
-/// | direct | port(u16) + IP(u32/u128)                 |
-/// +--------+-----------------------------------------+
-/// | relay  | outer_port(u16) + outer_IP(u32/u128)     |
-/// |        | + agent_port(u16) + agent_IP(u32/u128)   |
-/// +--------+-----------------------------------------+
+/// +---------+-----------------------------------------+
+/// | kind    | addr fields                             |
+/// +---------+-----------------------------------------+
+/// | direct  | port(u16) + IP(u32/u128)                |
+/// +---------+-----------------------------------------+
+/// | nat     | outer_port(u16) + outer_IP(u32/u128)    |
+/// |         | + agent_port(u16) + agent_IP(u32/u128)  |
+/// +---------+-----------------------------------------+
 /// ```
 ///
-/// ### flags (u8) 字段定义:
-/// - bit 7 (0x80): FAMILY - 0=IPv4, 1=IPv6
-/// - bit 6 (0x40): MAIN - 主地址标志
-/// - bit 5 (0x20): SEQUENCED - 是否有序号
-/// - bit 4 (0x10): FORWARD - 0=直连, 1=中转
-/// - bit 3 (0x08): ISP - 是否包含 ISP 编码
-/// - bit 2 (0x04): GEO - 是否包含 GEO 经纬度
-/// - bit 1 (0x02): LOAD - 是否包含 1 分钟负载
-/// - bit 0 (0x01): SIGNED - 是否有签名标志
+/// ## flags (u8) bit layout (bit 1 = MSB)
 ///
-/// ### 地址格式:
-/// - 直连: `port(u16)` + `IP(u32/u128)`
-/// - 中转: `outer_port(u16)` + `outer_IP(u32/u128)` + `agent_port(u16)` + `agent_IP(u32/u128)`
-/// - `sequence`: DNS 记录编号，同一编号的记录视为一个机器，可以使用多路径连接
-/// - 字段顺序: `addr` -> `isp` -> `geo` -> `load` -> `signature`
-/// - `isp`: ISP 运营商编码（VarInt）
-/// - `geo`: GEO 经纬度（lat, lon，f32）
-/// - `load`: 1 分钟负载（f32）
-/// - `signature`: 当 `SIGNED` 置位时，允许附加签名字段
+/// - bit 1 (0x80): FAMILY    — address family: 0=IPv4, 1=IPv6
+/// - bit 2 (0x40): MAIN      — primary/backup: 1=primary, 0=backup
+/// - bit 3 (0x20): CLUSTERED — multiple hosts share this name; record includes a device sequence number
+/// - bit 4 (0x10): NAT       — endpoint is behind NAT; record includes the agent endpoint address
+/// - bit 5 (0x08): LOAD      — record carries 1-minute load average (f32)
+/// - bit 6 (0x04): reserved
+/// - bit 7 (0x02): reserved
+/// - bit 8 (0x01): SIGNED    — record carries a publisher key signature to prevent DNS poisoning
+///
+/// ## Field order
+///
+/// `flags` → `sequence` (if CLUSTERED) → `addr` → `agent addr` (if NAT) → `load` (if LOAD) → `signature` (if SIGNED)
 ///
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EndpointSignature {
-    // TODO: 固定为 Ed25519（签名 64 字节）,但是要求私钥生成算法也是这个
     scheme: u16,
     signature: Vec<u8>,
 }
@@ -79,18 +72,15 @@ pub struct EndpointSignature {
 #[derive(Debug, Clone)]
 pub struct EndpointAddr {
     flags: u8,
-    /// 序号，用于多路径连接，None 表示无序号
+    /// Device sequence number used when multiple hosts share a domain (CLUSTERED).
+    /// None means no sequence number.
     sequence: Option<VarInt>,
-    /// ISP 运营商编码
-    isp: Option<VarInt>,
-    /// GEO 经纬度 (lat, lon)
-    geo: Option<(f32, f32)>,
-    /// 1 分钟负载
+    /// 1-minute load average (present when LOAD flag is set)
     load: Option<f32>,
     signature: Option<EndpointSignature>,
-    /// 主地址 (直连时为唯一地址，中转时为外部地址)
+    /// Primary address (the direct address, or the outer/public address for NAT)
     pub primary: SocketAddr,
-    /// 代理地址 (仅中转时使用)
+    /// Agent address used for NAT traversal (present when NAT flag is set)
     pub agent: Option<SocketAddr>,
 }
 
@@ -98,9 +88,6 @@ impl PartialEq for EndpointAddr {
     fn eq(&self, other: &Self) -> bool {
         self.flags == other.flags
             && self.sequence == other.sequence
-            && self.isp == other.isp
-            && self.geo.map(|(lat, lon)| (lat.to_bits(), lon.to_bits()))
-                == other.geo.map(|(lat, lon)| (lat.to_bits(), lon.to_bits()))
             && self.load.map(f32::to_bits) == other.load.map(f32::to_bits)
             && self.signature == other.signature
             && self.primary == other.primary
@@ -114,10 +101,6 @@ impl Hash for EndpointAddr {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.flags.hash(state);
         self.sequence.hash(state);
-        self.isp.hash(state);
-        self.geo
-            .map(|(lat, lon)| (lat.to_bits(), lon.to_bits()))
-            .hash(state);
         self.load.map(f32::to_bits).hash(state);
         self.signature.hash(state);
         self.primary.hash(state);
@@ -126,21 +109,19 @@ impl Hash for EndpointAddr {
 }
 
 impl EndpointAddr {
-    const FLAG_FAMILY: u8 = 0b1000_0000; // 0=IPv4, 1=IPv6
-    const FLAG_MAIN: u8 = 0b0100_0000;
-    const FLAG_SEQUENCED: u8 = 0b0010_0000;
-    const FLAG_FORWARD: u8 = 0b0001_0000; // 0=直连, 1=中转
-    const FLAG_ISP: u8 = 0b0000_1000;
-    const FLAG_GEO: u8 = 0b0000_0100;
-    const FLAG_LOAD: u8 = 0b0000_0010;
-    const FLAG_SIGNED: u8 = 0b0000_0001;
+    const FLAG_FAMILY: u8 = 0b1000_0000; // bit 1: 0=IPv4, 1=IPv6
+    const FLAG_MAIN: u8 = 0b0100_0000; // bit 2: 1=primary, 0=backup
+    const FLAG_CLUSTERED: u8 = 0b0010_0000; // bit 3: multiple hosts share this domain
+    const FLAG_NAT: u8 = 0b0001_0000; // bit 4: endpoint is behind NAT, agent address present
+    const FLAG_LOAD: u8 = 0b0000_1000; // bit 5: record carries load average
+    // bit 6 (0x04): reserved
+    // bit 7 (0x02): reserved
+    const FLAG_SIGNED: u8 = 0b0000_0001; // bit 8: record carries publisher signature
 
     pub fn direct_v4(addr: SocketAddrV4) -> Self {
         Self {
-            flags: 0, // IPv4 直连: family=0, forward=0
+            flags: 0, // IPv4 direct: FAMILY=0, NAT=0
             sequence: None,
-            isp: None,
-            geo: None,
             load: None,
             signature: None,
             primary: addr.into(),
@@ -150,10 +131,8 @@ impl EndpointAddr {
 
     pub fn direct_v6(addr: SocketAddrV6) -> Self {
         Self {
-            flags: Self::FLAG_FAMILY, // IPv6 直连: family=1, forward=0
+            flags: Self::FLAG_FAMILY, // IPv6 direct: FAMILY=1, NAT=0
             sequence: None,
-            isp: None,
-            geo: None,
             load: None,
             signature: None,
             primary: addr.into(),
@@ -161,12 +140,12 @@ impl EndpointAddr {
         }
     }
 
-    pub fn relay_v4(outer: SocketAddrV4, agent: SocketAddrV4) -> Self {
+    /// Create an IPv4 endpoint that requires NAT traversal.
+    /// `outer` is the public address; `agent` is the NAT helper address.
+    pub fn nat_v4(outer: SocketAddrV4, agent: SocketAddrV4) -> Self {
         Self {
-            flags: Self::FLAG_FORWARD, // IPv4 中转: family=0, forward=1
+            flags: Self::FLAG_NAT, // IPv4 NAT: FAMILY=0, NAT=1
             sequence: None,
-            isp: None,
-            geo: None,
             load: None,
             signature: None,
             primary: outer.into(),
@@ -174,12 +153,12 @@ impl EndpointAddr {
         }
     }
 
-    pub fn relay_v6(outer: SocketAddrV6, agent: SocketAddrV6) -> Self {
+    /// Create an IPv6 endpoint that requires NAT traversal.
+    /// `outer` is the public address; `agent` is the NAT helper address.
+    pub fn nat_v6(outer: SocketAddrV6, agent: SocketAddrV6) -> Self {
         Self {
-            flags: Self::FLAG_FAMILY | Self::FLAG_FORWARD, // IPv6 中转: family=1, forward=1
+            flags: Self::FLAG_FAMILY | Self::FLAG_NAT, // IPv6 NAT: FAMILY=1, NAT=1
             sequence: None,
-            isp: None,
-            geo: None,
             load: None,
             signature: None,
             primary: outer.into(),
@@ -187,57 +166,32 @@ impl EndpointAddr {
         }
     }
 
-    /// 是否为 IPv6 地址
+    /// Returns true if the address family is IPv6.
     pub fn is_ipv6(&self) -> bool {
         self.flags & Self::FLAG_FAMILY != 0
     }
 
-    /// 是否为中转地址
-    pub fn is_relay(&self) -> bool {
-        self.flags & Self::FLAG_FORWARD != 0
+    /// Returns true if NAT traversal is required (agent address is present).
+    pub fn is_nat(&self) -> bool {
+        self.flags & Self::FLAG_NAT != 0
     }
 
-    /// 是否有序号
-    pub fn is_sequenced(&self) -> bool {
-        self.flags & Self::FLAG_SEQUENCED != 0
+    /// Returns true if this domain maps to a cluster of hosts (sequence number is present).
+    pub fn is_clustered(&self) -> bool {
+        self.flags & Self::FLAG_CLUSTERED != 0
     }
 
-    pub fn is_isp(&self) -> bool {
-        self.flags & Self::FLAG_ISP != 0
-    }
-
-    pub fn is_geo(&self) -> bool {
-        self.flags & Self::FLAG_GEO != 0
-    }
-
+    /// Returns true if the record carries a load average value.
     pub fn is_load(&self) -> bool {
         self.flags & Self::FLAG_LOAD != 0
     }
 
-    pub fn set_sequenced(&mut self, sequenced: bool) {
-        if sequenced {
-            self.flags |= Self::FLAG_SEQUENCED;
+    pub fn set_clustered(&mut self, clustered: bool) {
+        if clustered {
+            self.flags |= Self::FLAG_CLUSTERED;
         } else {
-            self.flags &= !Self::FLAG_SEQUENCED;
-            self.sequence = None; // 清除序号
-        }
-    }
-
-    pub fn set_isp(&mut self, isp: Option<VarInt>) {
-        self.isp = isp;
-        if self.isp.is_some() {
-            self.flags |= Self::FLAG_ISP;
-        } else {
-            self.flags &= !Self::FLAG_ISP;
-        }
-    }
-
-    pub fn set_geo(&mut self, geo: Option<(f32, f32)>) {
-        self.geo = geo;
-        if self.geo.is_some() {
-            self.flags |= Self::FLAG_GEO;
-        } else {
-            self.flags &= !Self::FLAG_GEO;
+            self.flags &= !Self::FLAG_CLUSTERED;
+            self.sequence = None; // clear sequence number
         }
     }
 
@@ -356,17 +310,9 @@ impl EndpointAddr {
     pub fn encpding_size(&self) -> usize {
         let mut meta_len = 1; // flags
 
-        // sequence 只有在存在时才编码
+        // sequence is only encoded when CLUSTERED flag is set
         if let Some(seq) = &self.sequence {
             meta_len += seq.encoding_size();
-        }
-
-        if let Some(isp) = &self.isp {
-            meta_len += isp.encoding_size();
-        }
-
-        if self.geo.is_some() {
-            meta_len += 8; // lat(f32) + lon(f32)
         }
 
         if self.load.is_some() {
@@ -381,11 +327,11 @@ impl EndpointAddr {
             meta_len += 2 + sig_len.encoding_size() + sig.signature.len();
         }
 
-        let addr_len = match (self.is_ipv6(), self.is_relay()) {
-            (false, false) => 2 + 4,      // IPv4 直连: port + ipv4
-            (false, true) => (2 + 4) * 2, // IPv4 中转: (port + ipv4) * 2
-            (true, false) => 2 + 16,      // IPv6 直连: port + ipv6
-            (true, true) => (2 + 16) * 2, // IPv6 中转: (port + ipv6) * 2
+        let addr_len = match (self.is_ipv6(), self.is_nat()) {
+            (false, false) => 2 + 4,      // IPv4 direct: port + ipv4
+            (false, true) => (2 + 4) * 2, // IPv4 NAT: (port + ipv4) * 2
+            (true, false) => 2 + 16,      // IPv6 direct: port + ipv6
+            (true, true) => (2 + 16) * 2, // IPv6 NAT: (port + ipv6) * 2
         };
 
         meta_len + addr_len
@@ -402,19 +348,11 @@ impl EndpointAddr {
     pub fn set_sequence(&mut self, sequence: u64) {
         if sequence > 0 {
             self.sequence = Some(VarInt::from_u64(sequence).expect("Sequence too large"));
-            self.set_sequenced(true);
+            self.set_clustered(true);
         } else {
             self.sequence = None;
-            self.set_sequenced(false);
+            self.set_clustered(false);
         }
-    }
-
-    pub fn isp(&self) -> Option<VarInt> {
-        self.isp
-    }
-
-    pub fn geo(&self) -> Option<(f32, f32)> {
-        self.geo
     }
 
     pub fn load(&self) -> Option<f32> {
@@ -442,32 +380,23 @@ impl EndpointAddr {
     fn write_base<B: BufMut>(&self, buf: &mut B) {
         buf.put_u8(self.flags);
 
-        // 只有在存在 sequence 时才写入
+        // Sequence is only written when CLUSTERED is set
         if let Some(seq) = &self.sequence {
             buf.put_varint(*seq);
         }
 
-        // 写入主地址
+        // Write primary address
         match self.primary {
             SocketAddr::V4(addr) => buf.put_socket_addr_v4(&addr),
             SocketAddr::V6(addr) => buf.put_socket_addr_v6(&addr),
         }
 
-        // 如果是中转，写入代理地址
+        // Write agent address when NAT traversal is required
         if let Some(agent_addr) = &self.agent {
             match agent_addr {
                 SocketAddr::V4(addr) => buf.put_socket_addr_v4(addr),
                 SocketAddr::V6(addr) => buf.put_socket_addr_v6(addr),
             }
-        }
-
-        if let Some(isp) = &self.isp {
-            buf.put_varint(*isp);
-        }
-
-        if let Some((lat, lon)) = self.geo {
-            buf.put_u32(lat.to_bits());
-            buf.put_u32(lon.to_bits());
         }
 
         if let Some(load) = self.load {
@@ -506,15 +435,13 @@ impl<B: BufMut> WriteEndpointAddr for B {
 pub fn be_endpoint_addr(input: &[u8]) -> nom::IResult<&[u8], EndpointAddr> {
     let (remain, flags) = be_u8(input)?;
 
-    let is_sequenced = flags & EndpointAddr::FLAG_SEQUENCED != 0;
+    let is_clustered = flags & EndpointAddr::FLAG_CLUSTERED != 0;
     let is_ipv6 = flags & EndpointAddr::FLAG_FAMILY != 0;
-    let is_relay = flags & EndpointAddr::FLAG_FORWARD != 0;
-    let has_isp = flags & EndpointAddr::FLAG_ISP != 0;
-    let has_geo = flags & EndpointAddr::FLAG_GEO != 0;
+    let is_nat = flags & EndpointAddr::FLAG_NAT != 0;
     let has_load = flags & EndpointAddr::FLAG_LOAD != 0;
 
-    // 只有在 SEQUENCED 标志位设置时才解析 sequence
-    let (remain, sequence) = if is_sequenced {
+    // Sequence number is only present when CLUSTERED is set
+    let (remain, sequence) = if is_clustered {
         let (remain, seq) = be_varint(remain)?;
         (remain, Some(seq))
     } else {
@@ -529,7 +456,7 @@ pub fn be_endpoint_addr(input: &[u8]) -> nom::IResult<&[u8], EndpointAddr> {
         (remain, SocketAddr::V4(addr))
     };
 
-    let (remain, agent) = if is_relay {
+    let (remain, agent) = if is_nat {
         let agent_addr = if is_ipv6 {
             let (remain, addr) = be_socket_addr_v6(remain)?;
             (remain, SocketAddr::V6(addr))
@@ -539,21 +466,6 @@ pub fn be_endpoint_addr(input: &[u8]) -> nom::IResult<&[u8], EndpointAddr> {
         };
         let (remain, addr) = agent_addr;
         (remain, Some(addr))
-    } else {
-        (remain, None)
-    };
-
-    let (remain, isp) = if has_isp {
-        let (remain, isp) = be_varint(remain)?;
-        (remain, Some(isp))
-    } else {
-        (remain, None)
-    };
-
-    let (remain, geo) = if has_geo {
-        let (remain, lat) = be_u32(remain)?;
-        let (remain, lon) = be_u32(remain)?;
-        (remain, Some((f32::from_bits(lat), f32::from_bits(lon))))
     } else {
         (remain, None)
     };
@@ -572,8 +484,6 @@ pub fn be_endpoint_addr(input: &[u8]) -> nom::IResult<&[u8], EndpointAddr> {
         EndpointAddr {
             flags,
             sequence,
-            isp,
-            geo,
             load,
             signature,
             primary,
@@ -582,51 +492,47 @@ pub fn be_endpoint_addr(input: &[u8]) -> nom::IResult<&[u8], EndpointAddr> {
     ))
 }
 
-/// 兼容解析 EndpointAddr：
+/// Parse an EndpointAddr with backward compatibility.
 ///
-/// - 当 `rdlen` 匹配 Legacy 的固定长度时，按地址-only 解析，并补全默认 `EndpointMeta`
-/// - 否则按 Modern v0（带 `flags` + `sequence`）解析
+/// - If `rdlen` matches a legacy fixed length, parse as address-only and fill in default flags.
+/// - Otherwise parse as the modern format (with `flags` + optional fields).
 ///
-/// 注意：
-/// - Legacy 与 Modern 的开头字节序列不同，不能通过窥探 `flags` 来可靠区分
-/// - 这里依赖 `RDLENGTH` 的长度判别，避免把端口高字节误当成 `flags`
+/// Note: Legacy and modern records differ in their leading bytes.
+/// Disambiguation is done via `RDLENGTH` to avoid misinterpreting the port's high byte as `flags`.
 pub(crate) fn be_endpoint_addr_compat(
     input: &[u8],
     rdlen: u16,
 ) -> nom::IResult<&[u8], EndpointAddr> {
-    // 检查是否为 legacy 格式的固定长度
+    // Check for legacy fixed lengths
     let legacy_lengths = [
-        6,  // IPv4 直连: port(2) + ip(4)
-        12, // IPv4 中转: (port(2) + ip(4)) * 2
-        18, // IPv6 直连: port(2) + ip(16)
-        36, // IPv6 中转: (port(2) + ip(16)) * 2
+        6,  // IPv4 direct: port(2) + ip(4)
+        12, // IPv4 NAT:    (port(2) + ip(4)) * 2
+        18, // IPv6 direct: port(2) + ip(16)
+        36, // IPv6 NAT:    (port(2) + ip(16)) * 2
     ];
 
     if legacy_lengths.contains(&(rdlen as usize)) {
-        // 尝试 legacy 解析
         return be_legacy_endpoint_addr_by_length(input, rdlen);
     }
 
-    // 现代格式解析
+    // Modern format
     be_endpoint_addr(input)
 }
 
-/// 根据长度解析 Legacy 格式的端点地址
+/// Parse a legacy EndpointAddr record, identified by its fixed RDLENGTH.
 fn be_legacy_endpoint_addr_by_length(
     input: &[u8],
     rdlen: u16,
 ) -> nom::IResult<&[u8], EndpointAddr> {
     match rdlen {
         6 => {
-            // IPv4 直连
+            // IPv4 direct
             let (remain, addr) = be_socket_addr_v4(input)?;
             Ok((
                 remain,
                 EndpointAddr {
-                    flags: 0, // IPv4 直连
+                    flags: 0,
                     sequence: None,
-                    isp: None,
-                    geo: None,
                     load: None,
                     signature: None,
                     primary: addr.into(),
@@ -635,16 +541,14 @@ fn be_legacy_endpoint_addr_by_length(
             ))
         }
         12 => {
-            // IPv4 中转
+            // IPv4 NAT
             let (remain, primary) = be_socket_addr_v4(input)?;
             let (remain, agent) = be_socket_addr_v4(remain)?;
             Ok((
                 remain,
                 EndpointAddr {
-                    flags: EndpointAddr::FLAG_FORWARD, // IPv4 中转
+                    flags: EndpointAddr::FLAG_NAT,
                     sequence: None,
-                    isp: None,
-                    geo: None,
                     load: None,
                     signature: None,
                     primary: primary.into(),
@@ -653,15 +557,13 @@ fn be_legacy_endpoint_addr_by_length(
             ))
         }
         18 => {
-            // IPv6 直连
+            // IPv6 direct
             let (remain, addr) = be_socket_addr_v6(input)?;
             Ok((
                 remain,
                 EndpointAddr {
-                    flags: EndpointAddr::FLAG_FAMILY, // IPv6 直连
+                    flags: EndpointAddr::FLAG_FAMILY,
                     sequence: None,
-                    isp: None,
-                    geo: None,
                     load: None,
                     signature: None,
                     primary: addr.into(),
@@ -670,16 +572,14 @@ fn be_legacy_endpoint_addr_by_length(
             ))
         }
         36 => {
-            // IPv6 中转
+            // IPv6 NAT
             let (remain, primary) = be_socket_addr_v6(input)?;
             let (remain, agent) = be_socket_addr_v6(remain)?;
             Ok((
                 remain,
                 EndpointAddr {
-                    flags: EndpointAddr::FLAG_FAMILY | EndpointAddr::FLAG_FORWARD, // IPv6 中转
+                    flags: EndpointAddr::FLAG_FAMILY | EndpointAddr::FLAG_NAT,
                     sequence: None,
-                    isp: None,
-                    geo: None,
                     load: None,
                     signature: None,
                     primary: primary.into(),
@@ -794,11 +694,11 @@ impl TryFrom<SocketEndpointAddr> for EndpointAddr {
             SocketEndpointAddr::Agent {
                 agent: SocketAddr::V4(agent),
                 outer: SocketAddr::V4(outer),
-            } => Ok(Self::relay_v4(outer, agent)),
+            } => Ok(Self::nat_v4(outer, agent)),
             SocketEndpointAddr::Agent {
                 agent: SocketAddr::V6(agent),
                 outer: SocketAddr::V6(outer),
-            } => Ok(Self::relay_v6(outer, agent)),
+            } => Ok(Self::nat_v6(outer, agent)),
             _ => Err(()),
         }
     }
@@ -876,7 +776,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_endpoint_v4_relay_without_meta() {
+    fn legacy_endpoint_v4_nat_without_meta() {
         let outer = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 1000);
         let agent = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 2000);
         let mut buf = BytesMut::new();
@@ -886,7 +786,7 @@ mod tests {
         buf.extend_from_slice(&u32::from(*agent.ip()).to_be_bytes());
         let (remain, decoded) = be_endpoint_addr_compat(&buf, 12).unwrap();
         assert!(remain.is_empty());
-        assert_eq!(decoded, EndpointAddr::relay_v4(outer, agent));
+        assert_eq!(decoded, EndpointAddr::nat_v4(outer, agent));
     }
 
     #[test]
@@ -895,8 +795,6 @@ mod tests {
         let mut ep = EndpointAddr {
             flags: 0b0011_0000,
             sequence: None,
-            isp: None,
-            geo: None,
             load: None,
             signature: None,
             primary: addr.into(),
@@ -969,62 +867,52 @@ mod tests {
         let v6_outer = SocketAddrV6::new(Ipv6Addr::LOCALHOST, 3000, 0, 0);
         let v6_agent = SocketAddrV6::new(Ipv6Addr::LOCALHOST, 4000, 0, 0);
 
-        let mut with_meta = EndpointAddr::direct_v4(v4_outer);
-        with_meta.set_isp(Some(VarInt::from_u32(46011)));
-        with_meta.set_geo(Some((31.2304_f32, 121.4737_f32)));
-        with_meta.set_load(Some(0.42_f32));
+        let mut with_load = EndpointAddr::direct_v4(v4_outer);
+        with_load.set_load(Some(0.42_f32));
 
         let cases = vec![
-            // IPv4 直连，带 MAIN 和 SEQUENCED 标志
+            // IPv4 direct, MAIN + CLUSTERED flags
             EndpointAddr {
-                flags: EndpointAddr::FLAG_MAIN | EndpointAddr::FLAG_SEQUENCED,
+                flags: EndpointAddr::FLAG_MAIN | EndpointAddr::FLAG_CLUSTERED,
                 sequence: Some(VarInt::from_u32(0)),
-                isp: None,
-                geo: None,
                 load: None,
                 signature: None,
                 primary: v4_outer.into(),
                 agent: None,
             },
-            // IPv4 中转，带 SEQUENCED 标志
+            // IPv4 NAT, CLUSTERED flag
             EndpointAddr {
-                flags: EndpointAddr::FLAG_FORWARD | EndpointAddr::FLAG_SEQUENCED,
+                flags: EndpointAddr::FLAG_NAT | EndpointAddr::FLAG_CLUSTERED,
                 sequence: Some(VarInt::from_u32(127)),
-                isp: None,
-                geo: None,
                 load: None,
                 signature: None,
                 primary: v4_outer.into(),
                 agent: Some(v4_agent.into()),
             },
-            // IPv6 直连，带 MAIN 和 SEQUENCED 标志
+            // IPv6 direct, MAIN + CLUSTERED flags
             EndpointAddr {
                 flags: EndpointAddr::FLAG_FAMILY
                     | EndpointAddr::FLAG_MAIN
-                    | EndpointAddr::FLAG_SEQUENCED,
+                    | EndpointAddr::FLAG_CLUSTERED,
                 sequence: Some(VarInt::from_u32(128)),
-                isp: None,
-                geo: None,
                 load: None,
                 signature: None,
                 primary: v6_outer.into(),
                 agent: None,
             },
-            // IPv6 中转，带 SEQUENCED 标志
+            // IPv6 NAT, CLUSTERED flag
             EndpointAddr {
                 flags: EndpointAddr::FLAG_FAMILY
-                    | EndpointAddr::FLAG_FORWARD
-                    | EndpointAddr::FLAG_SEQUENCED,
+                    | EndpointAddr::FLAG_NAT
+                    | EndpointAddr::FLAG_CLUSTERED,
                 sequence: Some(VarInt::from_u64((1 << 62) - 1).unwrap()),
-                isp: None,
-                geo: None,
                 load: None,
                 signature: None,
                 primary: v6_outer.into(),
                 agent: Some(v6_agent.into()),
             },
-            // IPv4 直连，带 ISP/GEO/LOAD
-            with_meta,
+            // IPv4 direct with LOAD
+            with_load,
         ];
 
         for ep in cases {
@@ -1113,30 +1001,16 @@ mod tests {
         let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 5353);
         let mut ep = EndpointAddr::direct_v4(addr);
 
-        assert!(!ep.is_isp());
-        assert!(!ep.is_geo());
         assert!(!ep.is_load());
 
-        ep.set_isp(Some(VarInt::from_u32(1)));
-        ep.set_geo(Some((1.0_f32, 2.0_f32)));
         ep.set_load(Some(0.5_f32));
 
-        assert!(ep.is_isp());
-        assert!(ep.is_geo());
         assert!(ep.is_load());
-        assert_eq!(ep.isp(), Some(VarInt::from_u32(1)));
-        assert_eq!(ep.geo(), Some((1.0_f32, 2.0_f32)));
         assert_eq!(ep.load(), Some(0.5_f32));
 
-        ep.set_isp(None);
-        ep.set_geo(None);
         ep.set_load(None);
 
-        assert!(!ep.is_isp());
-        assert!(!ep.is_geo());
         assert!(!ep.is_load());
-        assert_eq!(ep.isp(), None);
-        assert_eq!(ep.geo(), None);
         assert_eq!(ep.load(), None);
     }
 }

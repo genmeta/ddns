@@ -34,6 +34,7 @@ rustls = { version = "0.23", default-features = false, features = [
 ] }
 rustls-pemfile = "2"
 serde = "1"
+shellexpand = "3"
 snafu = "0.8"
 socket2 = { version = "0.5.8", features = ["all"] }
 thiserror = "2"

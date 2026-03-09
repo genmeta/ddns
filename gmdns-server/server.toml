@@ -5,14 +5,14 @@
 listen = "0.0.0.0:4433"
 
 # TLS server name (SNI).
-server_name = "localhost"
+server_name = "dns.genmeta.net"
 
 # Paths to the server TLS certificate and private key (PEM format).
-cert = "examples/keychain/localhost/localhost-ECC.crt"
-key = "examples/keychain/localhost/localhost-ECC.key"
+cert = "~/Downloads/ssl/dns.genmeta.net/dns.genmeta.net.crt"
+key = "~/Downloads/ssl/dns.genmeta.net/dns.genmeta.net.key"
 
 # Root CA that signed the client certificates (PEM format).
-root_cert = "examples/keychain/root/rootCA-ECC.crt"
+root_cert = "~/Downloads/ssl/root.crt"
 
 # Whether to require a valid DNS record signature on Standard domains.
 require_signature = true
