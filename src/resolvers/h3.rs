@@ -6,7 +6,7 @@ use h3x::gm_quic::{H3Client, prelude::ConnectServerError};
 use qdns::{EndpointAddr, Publish, PublishFuture, RecordStream, Resolve, ResolveFuture, Source};
 use reqwest::IntoUrl;
 use tokio::time::Instant;
-use tracing::debug;
+use tracing::{debug, info};
 use url::Url;
 
 use crate::{MdnsPacket, parser::packet::be_packet, wire::be_multi_response};
@@ -136,12 +136,8 @@ impl H3Resolver {
         Ok(())
     }
 
-    pub const EXCLUDED_DOMAINS: [&str; 4] = [
-        "dns.genmeta.net",
-        "stun.genmeta.net",
-        "nat.genmeta.net",
-        "download.genmeta.net",
-    ];
+    pub const EXCLUDED_DOMAINS: [&str; 3] =
+        ["dns.genmeta.net", "nat.genmeta.net", "download.genmeta.net"];
 
     pub async fn lookup(&self, name: &str) -> Result<RecordStream, Error> {
         use crate::parser::record;
@@ -222,6 +218,7 @@ impl H3Resolver {
                     .filter_map(|answer| match answer.data() {
                         record::RData::E(ep) => {
                             let socket_ep = ep.clone().try_into().ok()?;
+                            info!(?socket_ep, "Parsed endpoint from record");
                             Some(qdns::EndpointAddr::Socket(socket_ep))
                         }
                         _ => {

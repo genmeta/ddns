@@ -1,6 +1,7 @@
 use futures::future::BoxFuture;
 use h3x::server::{Request, Response, Service};
 use redis::AsyncCommands;
+use tracing::{debug, info};
 
 use crate::{
     error::{AppError, normalize_host, parse_query_params},
@@ -146,8 +147,11 @@ pub async fn lookup_with_cert(state: AppState, request: &mut Request, response: 
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&n| n > 0);
 
+    info!(host = %host, limit, "lookup.request");
+
     match perform_lookup(&state, host, limit).await {
         Ok(LookupResult::NotFound) => {
+            info!(host = %host, "lookup.not_found");
             response
                 .set_status(http::StatusCode::NOT_FOUND)
                 .set_body(bytes::Bytes::from_static(b"Not Found"));
@@ -156,6 +160,7 @@ pub async fn lookup_with_cert(state: AppState, request: &mut Request, response: 
 
         Ok(LookupResult::Multi(resp)) => {
             let body = resp.encode();
+            debug!(host = %host, records = resp.records.len(), "lookup.found");
             response
                 .set_status(http::StatusCode::OK)
                 .set_body(bytes::Bytes::from(body));
