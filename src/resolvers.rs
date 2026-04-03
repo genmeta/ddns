@@ -1,6 +1,7 @@
 use std::{
     error::Error,
     fmt::{self, Debug, Display},
+    net::IpAddr,
     sync::Arc,
 };
 
@@ -14,6 +15,23 @@ use tokio::io;
 mod h3;
 mod http;
 mod mdns;
+
+/// Check whether `name` is a resolvable domain name suitable for remote DNS
+/// lookup. Returns `false` for raw IP addresses (with or without port),
+/// preventing unnecessary network round-trips to DNS servers that can only
+/// resolve domain names.
+pub(crate) fn is_resolvable_name(name: &str) -> bool {
+    let host = match name.rsplit_once(':') {
+        Some((h, port)) if port.chars().all(|c| c.is_ascii_digit()) => h,
+        _ => name,
+    };
+    // Strip IPv6 brackets: [::1] → ::1
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    host.parse::<IpAddr>().is_err()
+}
 
 #[cfg(feature = "h3x-resolver")]
 pub use h3::{H3Publisher, H3Resolver};

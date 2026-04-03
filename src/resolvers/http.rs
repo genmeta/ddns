@@ -116,6 +116,11 @@ impl Publish for HttpResolver {
 impl Resolve for HttpResolver {
     fn lookup<'l>(&'l self, name: &'l str) -> ResolveFuture<'l> {
         let lookup = async move {
+            // Skip raw IP addresses — they cannot be resolved by a DNS server
+            if !super::is_resolvable_name(name) {
+                return Err(Error::NoRecordFound {});
+            }
+
             let now = Instant::now();
             let server = Arc::from(self.base_url.host_str().unwrap_or("<unknown server>"));
             let soource = Source::Http { server };

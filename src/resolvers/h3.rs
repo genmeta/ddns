@@ -150,7 +150,12 @@ impl H3Resolver {
             _ => name,
         };
 
-        // 0. Exclude certain domains from lookup
+        // 0. Skip raw IP addresses — they cannot be resolved by a DNS server
+        if !super::is_resolvable_name(name) {
+            return Err(Error::NoRecordFound {});
+        }
+
+        // 1. Exclude certain domains from lookup
         if Self::EXCLUDED_DOMAINS.contains(&domain) {
             return Err(Error::NoRecordFound {});
         }
