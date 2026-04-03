@@ -3,7 +3,9 @@ use std::{fmt, io, sync::Arc, time::Duration};
 use dashmap::DashMap;
 use futures::{FutureExt, StreamExt, TryFutureExt, stream};
 use h3x::gm_quic::{H3Client, prelude::ConnectServerError};
-use qresolve::{EndpointAddr, Publish, PublishFuture, RecordStream, Resolve, ResolveFuture, Source};
+use qresolve::{
+    EndpointAddr, Publish, PublishFuture, RecordStream, Resolve, ResolveFuture, Source,
+};
 use reqwest::IntoUrl;
 use tokio::time::Instant;
 use tracing::{debug, info};
@@ -136,8 +138,7 @@ impl H3Resolver {
         Ok(())
     }
 
-    pub const EXCLUDED_DOMAINS: [&str; 3] =
-        ["dns.genmeta.net", "nat.genmeta.net", "download.genmeta.net"];
+    pub const EXCLUDED_DOMAINS: [&str; 2] = ["dns.genmeta.net", "download.genmeta.net"];
 
     pub async fn lookup(&self, name: &str) -> Result<RecordStream, Error> {
         use crate::parser::record;

@@ -5,8 +5,8 @@ use std::{
 };
 
 use futures::{FutureExt, Stream, StreamExt, TryFutureExt, stream};
-use qresolve::{EndpointAddr, Family, Publish, Resolve, ResolveFuture, Source};
 use qinterface::device::Devices;
+use qresolve::{EndpointAddr, Family, Publish, Resolve, ResolveFuture, Source};
 use snafu::Report;
 use tokio::io;
 

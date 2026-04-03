@@ -9,8 +9,8 @@ use futures::{
     FutureExt, Stream, StreamExt, TryFutureExt, future,
     stream::{self, FuturesUnordered},
 };
-use qresolve::{EndpointAddr, Family, RecordStream, ResolveFuture, SocketEndpointAddr, Source};
 use qinterface::{BindInterface, WeakInterface, bind_uri::BindUri, io::IO};
+use qresolve::{EndpointAddr, Family, RecordStream, ResolveFuture, SocketEndpointAddr, Source};
 
 use super::{Publish, Resolve};
 pub use crate::mdns::Mdns as MdnsResolver;
