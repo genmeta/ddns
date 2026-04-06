@@ -2,7 +2,7 @@ use std::{fmt, io, sync::Arc, time::Duration};
 
 use dashmap::DashMap;
 use futures::{FutureExt, StreamExt, TryFutureExt, stream};
-use h3x::gm_quic::{H3Client, prelude::ConnectServerError};
+use h3x::dquic::{H3Client, prelude::ConnectServerError};
 use qresolve::{
     EndpointAddr, Publish, PublishFuture, RecordStream, Resolve, ResolveFuture, Source,
 };

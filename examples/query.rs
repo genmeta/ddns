@@ -2,7 +2,7 @@ use std::{io, net::IpAddr, path::PathBuf, sync::Arc};
 
 use clap::Parser;
 use gmdns::{MdnsPacket, mdns::Mdns, parser::record::RData, wire::be_multi_response};
-use h3x::gm_quic::{
+use h3x::dquic::{
     BuildClientError, H3Client,
     prelude::handy::{ToCertificate, ToPrivateKey},
 };
@@ -27,7 +27,7 @@ struct Options {
     #[arg(long, default_value = "~/Downloads/ssl/root.crt")]
     server_ca: PathBuf,
 
-    /// Client identity name (passed into h3x/gm-quic identity builder).
+    /// Client identity name (passed into h3x/dquic identity builder).
     #[arg(long, default_value = "stun.genmeta.net")]
     client_name: String,
 

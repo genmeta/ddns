@@ -2,7 +2,7 @@ use std::{io, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use clap::Parser;
 use gmdns::{parser::record::endpoint::EndpointAddr, resolvers::H3Publisher};
-use h3x::gm_quic::H3Client;
+use h3x::dquic::H3Client;
 use qresolve::Publish;
 use rustls::{RootCertStore, SignatureScheme, pki_types::PrivateKeyDer, sign::SigningKey};
 use tracing::{Level, info};
@@ -18,7 +18,7 @@ struct Options {
     #[arg(long, default_value = "examples/keychain/root/rootCA-ECC.crt")]
     server_ca: PathBuf,
 
-    /// Client identity name (passed into h3x/gm-quic identity builder).
+    /// Client identity name (passed into h3x/dquic identity builder).
     #[arg(long, default_value = "publish.test.genmeta.net")]
     client_name: String,
 
@@ -152,7 +152,7 @@ async fn main() -> io::Result<()> {
         .map_err(io::Error::other)?
         .build();
 
-    // Uses H3Resolver which uses gm-quic internally aka HTTP/3
+    // Uses H3Resolver which uses dquic internally aka HTTP/3
     let resolver = H3Publisher::new(opt.base_url.clone(), client)?;
 
     info!(host = %opt.host, addrs = ?opt.addr, base_url = %opt.base_url, "publish.start");

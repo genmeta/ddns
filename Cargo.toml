@@ -53,7 +53,7 @@ x509-parser = "0.18"
 
 # Optional HTTP/3 publisher/resolver via h3x
 h3x = { git = "ssh://git@github.com/genmeta/h3x.git", branch = "feat/v0.5", default-features = false, features = [
-    "gm-quic",
+    "dquic",
 ], optional = true }
 http = { version = "1", optional = true }
 
@@ -89,6 +89,3 @@ required-features = ["h3x-resolver"]
 name = "query"
 path = "examples/query.rs"
 required-features = ["h3x-resolver"]
-
-# [patch.'ssh://git@github.com/genmeta/h3x.git']
-# h3x = { path = "../h3x" }

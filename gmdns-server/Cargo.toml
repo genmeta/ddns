@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 gmdns = { path = "..", features = ["h3x-resolver"] }
-h3x = { path = "../../h3x", features = ["gm-quic"] }
+h3x = { git = "ssh://git@github.com/genmeta/h3x.git", branch = "feat/v0.5", features = ["dquic"] }
 
 # server-specific deps（不再污染核心库）
 deadpool-redis = "0.12"

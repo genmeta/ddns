@@ -9,7 +9,7 @@ use std::{io, sync::Arc};
 
 use clap::Parser;
 use h3x::{
-    gm_quic::prelude::{
+    dquic::prelude::{
         BindUri,
         handy::{ToCertificate, ToPrivateKey},
     },
