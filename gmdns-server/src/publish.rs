@@ -83,7 +83,13 @@ impl Service for PublishSvc {
                 Ok(b) => b,
                 Err(e) => {
                     warn!("failed to read request body: {:?}", e);
-                    write_error(response, AppError::InvalidDnsPacket(e.to_string())).await;
+                    write_error(
+                        response,
+                        AppError::InvalidDnsPacket {
+                            message: e.to_string(),
+                        },
+                    )
+                    .await;
                     return;
                 }
             };
@@ -149,7 +155,13 @@ pub async fn publish_record(
             let mut conn = match pool.get().await {
                 Ok(c) => c,
                 Err(e) => {
-                    write_error(response, AppError::Redis(e.to_string())).await;
+                    write_error(
+                        response,
+                        AppError::Redis {
+                            message: e.to_string(),
+                        },
+                    )
+                    .await;
                     return;
                 }
             };
@@ -179,7 +191,13 @@ pub async fn publish_record(
                 .set_ex::<_, _, ()>(&fp_key, &new_member, ttl_secs)
                 .await
             {
-                write_error(response, AppError::Redis(e.to_string())).await;
+                write_error(
+                    response,
+                    AppError::Redis {
+                        message: e.to_string(),
+                    },
+                )
+                .await;
                 return;
             }
 
@@ -187,7 +205,13 @@ pub async fn publish_record(
                 .zadd::<_, _, _, ()>(&set_key, &new_member, now_secs as f64)
                 .await
             {
-                write_error(response, AppError::Redis(e.to_string())).await;
+                write_error(
+                    response,
+                    AppError::Redis {
+                        message: e.to_string(),
+                    },
+                )
+                .await;
                 return;
             }
 

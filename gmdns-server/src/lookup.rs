@@ -38,10 +38,9 @@ async fn perform_lookup_multi(
 ) -> Result<LookupResult, AppError> {
     match &state.storage {
         Storage::Redis(pool) => {
-            let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| AppError::Redis(e.to_string()))?;
+            let mut conn = pool.get().await.map_err(|e| AppError::Redis {
+                message: e.to_string(),
+            })?;
 
             let set_key = format!("{host}:multi");
             let now_secs = unix_now_secs();
@@ -61,7 +60,9 @@ async fn perform_lookup_multi(
             let members: Vec<Vec<u8>> = conn
                 .zrevrange(&set_key, 0isize, if count < 0 { -1 } else { count - 1 })
                 .await
-                .map_err(|e| AppError::Redis(e.to_string()))?;
+                .map_err(|e| AppError::Redis {
+                    message: e.to_string(),
+                })?;
 
             let now_secs = unix_now_secs();
             let records: Vec<(Vec<u8>, Vec<u8>)> = members

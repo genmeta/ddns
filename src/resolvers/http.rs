@@ -62,18 +62,18 @@ impl HttpResolver {
     }
 }
 
-#[derive(thiserror::Error, Debug)]
+#[derive(Debug, snafu::Snafu)]
 enum Error {
-    #[error(transparent)]
+    #[snafu(display("{source}"))]
     Reqwest { source: reqwest::Error },
 
-    #[error("{status}")]
+    #[snafu(display("{status}"))]
     Status { status: StatusCode },
 
-    #[error("No dns record found")]
-    NoRecordFound {},
+    #[snafu(display("no DNS record found"))]
+    NoRecordFound,
 
-    #[error("Failed to parse dns records from response")]
+    #[snafu(display("failed to parse DNS records from response"))]
     ParseRecords {
         source: nom::Err<nom::error::Error<Vec<u8>>>,
     },
@@ -82,7 +82,7 @@ enum Error {
 impl From<reqwest::Error> for Error {
     fn from(source: reqwest::Error) -> Self {
         match source.status() {
-            Some(stateus) if stateus == StatusCode::NOT_FOUND => Error::NoRecordFound {},
+            Some(stateus) if stateus == StatusCode::NOT_FOUND => Error::NoRecordFound,
             Some(status) => Error::Status { status },
             None => Error::Reqwest {
                 source: source.without_url(),
@@ -117,7 +117,7 @@ impl Resolve for HttpResolver {
     fn lookup<'l>(&'l self, name: &'l str) -> ResolveFuture<'l> {
         let lookup = async move {
             let Some(domain) = super::resolvable_name(name) else {
-                return Err(Error::NoRecordFound {});
+                return Err(Error::NoRecordFound);
             };
 
             let now = Instant::now();
@@ -163,7 +163,7 @@ impl Resolve for HttpResolver {
                 })
                 .collect::<Vec<_>>();
             if addrs.is_empty() {
-                return Err(Error::NoRecordFound {});
+                return Err(Error::NoRecordFound);
             }
 
             // cache the addrs

@@ -10,8 +10,8 @@ use std::{
 use dashmap::DashMap;
 use futures::{Stream, StreamExt};
 use nix::net::if_::if_nametoindex;
+use snafu::Snafu;
 use socket2::{Domain, Socket, Type};
-use thiserror::Error;
 use tokio::{io, net::UdpSocket, task::JoinSet, time};
 
 use crate::parser::{
@@ -233,8 +233,8 @@ pub struct MdnsProtocol {
     router: Weak<PacketRouter>,
 }
 
-#[derive(Debug, Error)]
-#[error("MDns socket is not listening")]
+#[derive(Debug, Snafu)]
+#[snafu(display("mDNS socket is not listening"))]
 pub struct Disconnected;
 
 impl From<Disconnected> for io::Error {

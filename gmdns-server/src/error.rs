@@ -1,31 +1,31 @@
 use std::collections::HashMap;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, snafu::Snafu)]
 pub enum AppError {
-    #[error("Missing host parameter")]
+    #[snafu(display("missing host parameter"))]
     MissingHostParam,
-    #[error("Invalid host")]
+    #[snafu(display("invalid host"))]
     InvalidHost,
-    #[error("Forbidden host")]
+    #[snafu(display("forbidden host"))]
     ForbiddenHost,
-    #[error("Domain not allowed")]
+    #[snafu(display("domain not allowed"))]
     DomainNotAllowed,
-    #[error("Host mismatch")]
+    #[snafu(display("host mismatch"))]
     HostMismatch,
-    #[error("Missing client certificate")]
+    #[snafu(display("missing client certificate"))]
     MissingClientCertificate,
-    #[error("Client certificate domain not allowed")]
+    #[snafu(display("client certificate domain not allowed"))]
     ClientCertDomainNotAllowed,
-    #[error("Invalid DNS packet: {0}")]
-    InvalidDnsPacket(String),
-    #[error("No answers in packet")]
+    #[snafu(display("invalid DNS packet: {message}"))]
+    InvalidDnsPacket { message: String },
+    #[snafu(display("no answers in packet"))]
     NoAnswersInPacket,
-    #[error("Signature required")]
+    #[snafu(display("signature required"))]
     SignatureRequired,
-    #[error("Invalid signature")]
+    #[snafu(display("invalid signature"))]
     InvalidSignature,
-    #[error("Redis error: {0}")]
-    Redis(String),
+    #[snafu(display("redis error: {message}"))]
+    Redis { message: String },
 }
 
 impl AppError {
@@ -38,11 +38,11 @@ impl AppError {
             AppError::HostMismatch => http::StatusCode::BAD_REQUEST,
             AppError::MissingClientCertificate => http::StatusCode::UNAUTHORIZED,
             AppError::ClientCertDomainNotAllowed => http::StatusCode::FORBIDDEN,
-            AppError::InvalidDnsPacket(_) => http::StatusCode::BAD_REQUEST,
+            AppError::InvalidDnsPacket { .. } => http::StatusCode::BAD_REQUEST,
             AppError::NoAnswersInPacket => http::StatusCode::UNPROCESSABLE_ENTITY,
             AppError::SignatureRequired => http::StatusCode::BAD_REQUEST,
             AppError::InvalidSignature => http::StatusCode::BAD_REQUEST,
-            AppError::Redis(_) => http::StatusCode::SERVICE_UNAVAILABLE,
+            AppError::Redis { .. } => http::StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 }

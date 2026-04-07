@@ -45,32 +45,29 @@ impl fmt::Display for H3Resolver {
     }
 }
 
-#[derive(thiserror::Error, Debug)]
+#[derive(Debug, snafu::Snafu)]
 pub enum Error {
-    #[error("H3 request error")]
+    #[snafu(display("h3 stream error"))]
     H3Stream {
-        #[from]
         source: h3x::client::MessageStreamError,
     },
-    #[error("H3 request error")]
+    #[snafu(display("h3 request error"))]
     H3Request {
-        #[from]
         source: h3x::client::RequestError<ConnectServerError>,
     },
 
-    #[error("{status}")]
+    #[snafu(display("{status}"))]
     Status { status: http::StatusCode },
 
-    #[error("No dns record found")]
-    NoRecordFound {},
+    #[snafu(display("no DNS record found"))]
+    NoRecordFound,
 
-    #[error("Failed to parse dns records from response")]
+    #[snafu(display("failed to parse DNS records from response"))]
     ParseRecords {
-        #[from]
         source: nom::Err<nom::error::Error<Vec<u8>>>,
     },
 
-    #[error("Failed to decode multi-record response")]
+    #[snafu(display("failed to decode multi-record response"))]
     ParseMultiResponse,
 }
 
@@ -127,7 +124,8 @@ impl H3Resolver {
             .new_request()
             .with_body(bytes::Bytes::copy_from_slice(packet))
             .post(uri)
-            .await?;
+            .await
+            .map_err(|source| Error::H3Request { source })?;
 
         if resp.status() != http::StatusCode::OK {
             return Err(Error::Status {
@@ -146,12 +144,12 @@ impl H3Resolver {
         let source = Source::Http { server };
 
         let Some(domain) = super::resolvable_name(name) else {
-            return Err(Error::NoRecordFound {});
+            return Err(Error::NoRecordFound);
         };
 
         // 1. Exclude certain domains from lookup
         if Self::EXCLUDED_DOMAINS.contains(&domain) {
-            return Err(Error::NoRecordFound {});
+            return Err(Error::NoRecordFound);
         }
 
         let now = Instant::now();
@@ -163,7 +161,7 @@ impl H3Resolver {
         self.negative_cache.retain(|_host, expire| *expire > now);
 
         if self.negative_cache.get(domain).is_some() {
-            return Err(Error::NoRecordFound {});
+            return Err(Error::NoRecordFound);
         }
 
         if let Some(record) = self.cached_records.get(domain) {
@@ -190,7 +188,7 @@ impl H3Resolver {
             http::StatusCode::NOT_FOUND => {
                 self.negative_cache
                     .insert(domain.to_string(), now + negative_ttl);
-                return Err(Error::NoRecordFound {});
+                return Err(Error::NoRecordFound);
             }
             status => return Err(Error::Status { status }),
         }
@@ -231,7 +229,7 @@ impl H3Resolver {
         if addrs.is_empty() {
             self.negative_cache
                 .insert(domain.to_string(), now + negative_ttl);
-            return Err(Error::NoRecordFound {});
+            return Err(Error::NoRecordFound);
         }
 
         self.cached_records.insert(

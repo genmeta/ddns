@@ -101,8 +101,9 @@ pub fn validate_dns_packet(
     require_signature: bool,
     agent: &(impl RemoteAgent + ?Sized),
 ) -> Result<String, AppError> {
-    let (remaining, dns_packet) =
-        be_packet(packet).map_err(|e| AppError::InvalidDnsPacket(e.to_string()))?;
+    let (remaining, dns_packet) = be_packet(packet).map_err(|e| AppError::InvalidDnsPacket {
+        message: e.to_string(),
+    })?;
     if !remaining.is_empty() {
         warn!(remain = remaining.len(), "dns.parse.extra_bytes");
     }
