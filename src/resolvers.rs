@@ -58,7 +58,7 @@ impl Display for Resolvers {
 
 #[derive(Debug)]
 pub struct DnsErrors {
-    errors: Vec<(ArcResolver, io::Error)>,
+    errors: Vec<(String, io::Error)>,
 }
 
 impl fmt::Display for DnsErrors {
@@ -67,13 +67,8 @@ impl fmt::Display for DnsErrors {
             return write!(f, "No DNS resolvers available");
         }
         writeln!(f, "All DNS resolvers failed")?;
-        let mut iter = self.errors.iter().peekable();
-        while let Some((resolver, error)) = iter.next() {
-            if iter.peek().is_some() {
-                writeln!(f, "`{resolver}` failed: {}", Report::from_error(error))?;
-            } else {
-                write!(f, "`{resolver}` failed: {}", Report::from_error(error))?;
-            }
+        for (resolver, error) in self.errors.iter() {
+            write!(f, "`{resolver}` failed: {}", Report::from_error(error))?;
         }
         Ok(())
     }
@@ -132,7 +127,7 @@ impl Resolvers {
         let endpoints = loop {
             match lookups.next().await {
                 Some((Ok(endpoints), _)) => break endpoints,
-                Some((Err(error), resolver)) => errors.push((resolver, error)),
+                Some((Err(error), resolver)) => errors.push((resolver.to_string(), error)),
                 None => return Err(DnsErrors { errors }),
             }
         };
