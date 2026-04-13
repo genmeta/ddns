@@ -1,4 +1,7 @@
-use std::{net::SocketAddr, path::PathBuf};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 use clap::Parser;
 use serde::Deserialize;
@@ -60,6 +63,13 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn expand_paths(mut self) -> Self {
+        self.cert = expand_home_dir(&self.cert);
+        self.key = expand_home_dir(&self.key);
+        self.root_cert = expand_home_dir(&self.root_cert);
+        self
+    }
+
     pub fn default_listen() -> SocketAddr {
         "0.0.0.0:4433".parse().unwrap()
     }
@@ -81,6 +91,26 @@ impl Config {
     pub fn default_ttl_secs() -> u64 {
         30
     }
+}
+
+fn expand_home_dir(path: &Path) -> PathBuf {
+    let Some(path_str) = path.to_str() else {
+        return path.to_path_buf();
+    };
+
+    if path_str == "~" {
+        return std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| path.to_path_buf());
+    }
+
+    if let Some(stripped) = path_str.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(stripped);
+    }
+
+    path.to_path_buf()
 }
 
 /// One domain-policy rule in the configuration file.

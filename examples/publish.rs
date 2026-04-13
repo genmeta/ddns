@@ -1,4 +1,9 @@
-use std::{io, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{
+    io,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use clap::Parser;
 use gmdns::{parser::record::endpoint::EndpointAddr, resolvers::H3Publisher};
@@ -10,30 +15,24 @@ use tracing::{Level, info};
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Options {
-    /// Base URL of the H3 DNS server, e.g. https://localhost:4433/
-    #[arg(long, default_value = "https://localhost:4433/")]
+    /// Base URL of the线上 H3 DNS server.
+    #[arg(long, default_value = "https://dns.genmeta.net:4433/")]
     base_url: String,
 
-    /// PEM file containing CA certificates that can verify the server certificate.
-    #[arg(long, default_value = "examples/keychain/root/rootCA-ECC.crt")]
+    /// 用于校验线上服务端证书的 CA PEM 文件。
+    #[arg(long)]
     server_ca: PathBuf,
 
-    /// Client identity name (passed into h3x/dquic identity builder).
-    #[arg(long, default_value = "publish.test.genmeta.net")]
+    /// 发布所使用的客户端身份名称。
+    #[arg(long)]
     client_name: String,
 
-    /// Client certificate chain in PEM.
-    #[arg(
-        long,
-        default_value = "examples/keychain/publish.test.genmeta.net/publish.test.genmeta.net-ECC.crt"
-    )]
+    /// 客户端证书链 PEM。
+    #[arg(long)]
     client_cert: PathBuf,
 
-    /// Client private key in PEM (PKCS#8 or RSA).
-    #[arg(
-        long,
-        default_value = "examples/keychain/publish.test.genmeta.net/publish.test.genmeta.net-ECC.key"
-    )]
+    /// 客户端私钥 PEM。
+    #[arg(long)]
     client_key: PathBuf,
 
     /// Sign Endpoint records using the client private key.
@@ -43,12 +42,12 @@ struct Options {
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     sign: bool,
 
-    /// DNS name to publish. Must match the single DNS SAN in the client cert.
-    #[arg(long, default_value = "publish.test.genmeta.net")]
+    /// 要发布的线上域名，必须与客户端证书 SAN 匹配。
+    #[arg(long)]
     host: String,
 
-    /// Socket addresses to publish.
-    #[arg(long, value_delimiter = ',', num_args = 1.., default_value = "127.0.0.1:5555")]
+    /// 要发布的地址列表。
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
     addr: Vec<SocketAddr>,
 
     #[arg(long, default_value_t = true)]
@@ -58,7 +57,7 @@ struct Options {
     sequence: u64,
 }
 
-fn load_root_store_from_pem(path: &PathBuf) -> io::Result<RootCertStore> {
+fn load_root_store_from_pem(path: &Path) -> io::Result<RootCertStore> {
     let pem = std::fs::read(path)?;
 
     let mut store = RootCertStore::empty();
@@ -72,6 +71,17 @@ fn load_root_store_from_pem(path: &PathBuf) -> io::Result<RootCertStore> {
     }
 
     Ok(store)
+}
+
+fn expand_tilde(path: &Path) -> io::Result<PathBuf> {
+    let path = path.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Path is not valid UTF-8: {}", path.display()),
+        )
+    })?;
+
+    Ok(PathBuf::from(shellexpand::tilde(path).into_owned()))
 }
 
 fn load_private_key_from_pem(pem: &[u8]) -> io::Result<PrivateKeyDer<'static>> {
@@ -121,20 +131,12 @@ async fn main() -> io::Result<()> {
 
     let opt = Options::parse();
 
-    let root_store = load_root_store_from_pem(&opt.server_ca)?;
-    let cert_chain_pem = std::fs::read(&opt.client_cert)?;
-    let private_key_pem = std::fs::read(&opt.client_key)?;
-
-    // 显示将要使用的证书信息
-    let mut cert_reader = std::io::Cursor::new(&cert_chain_pem);
-    if let Ok(certs) = rustls_pemfile::certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()
-        && let Some(first_cert) = certs.first()
-    {
-        info!(
-            cert_len = first_cert.len(),
-            "Client certificate loaded, will be sent to server for storage"
-        );
-    }
+    let server_ca = expand_tilde(&opt.server_ca)?;
+    let client_cert = expand_tilde(&opt.client_cert)?;
+    let client_key = expand_tilde(&opt.client_key)?;
+    let root_store = load_root_store_from_pem(&server_ca)?;
+    let cert_chain_pem = std::fs::read(&client_cert)?;
+    let private_key_pem = std::fs::read(&client_key)?;
 
     let signer = opt
         .sign

@@ -82,8 +82,11 @@ Publish DNS service records to an HTTP/3 DNS server:
 
 ```bash
 cargo run --example publish --features="h3x-resolver" \
-  --base-url https://localhost:4433/ \
-  --host client.genmeta.net \
+  --server-ca /path/to/root.crt \
+  --client-name demo.example.genmeta.net \
+  --client-cert /path/to/demo.example.genmeta.net.pem \
+  --client-key /path/to/demo.example.genmeta.net.key \
+  --host demo.example.genmeta.net \
   --addr 192.168.1.100:8080
 ```
 
@@ -93,8 +96,8 @@ Query DNS service records from an HTTP/3 DNS server:
 
 ```bash
 cargo run --example query --features="h3x-resolver" \
-  --base-url https://localhost:4433/ \
-  --host client.genmeta.net
+  --server-ca /path/to/root.crt \
+  --host stun.genmeta.net
 ```
 
 ### Running the DNS Server

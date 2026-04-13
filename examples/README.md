@@ -43,21 +43,24 @@ Note: The example programs require the `h3x-resolver` feature to enable HTTP/3 s
 Use the `publish` example to publish a DNS service record to the HTTP/3 DNS server.
 
 #### Program Parameters
-- `--base-url <URL>`: Base URL of the DNS server (default: `https://localhost:4433/`).
-- `--server-ca <PATH>`: CA certificate PEM file path for verifying server certificate (default: `examples/keychain/localhost/ca.cert`).
-- `--client-name <NAME>`: Client identity name (default: `client`).
-- `--client-cert <PATH>`: Client certificate chain PEM file (default: `examples/keychain/localhost/client.cert`).
-- `--client-key <PATH>`: Client private key PEM file (default: `examples/keychain/localhost/client.key`).
+- `--base-url <URL>`: Base URL of the DNS server (default: `https://dns.genmeta.net:4433/`).
+- `--server-ca <PATH>`: CA certificate PEM file path for verifying the online server certificate.
+- `--client-name <NAME>`: Client identity name used for mTLS.
+- `--client-cert <PATH>`: Client certificate chain PEM file.
+- `--client-key <PATH>`: Client private key PEM file.
 - `--sign`: Whether to sign the Endpoint record with the client private key (default: true).
-- `--host <NAME>`: DNS name to publish, must match the SAN in the client certificate (default: `client.genmeta.net`).
-- `--addr <ADDR>`: List of socket addresses to publish, separated by commas (default: `127.0.0.1:5555`).
+- `--host <NAME>`: DNS name to publish, must match the SAN in the client certificate.
+- `--addr <ADDR>`: List of socket addresses to publish, separated by commas.
 - `--is-main`: Whether it is the main record (default: true).
 
 #### Example Run Command
 ```bash
 cargo run --example publish --features="h3x-resolver" \
-  --base-url https://localhost:4433/ \
-  --host client.genmeta.net \
+  --server-ca /path/to/root.crt \
+  --client-name demo.example.genmeta.net \
+  --client-cert /path/to/demo.example.genmeta.net.pem \
+  --client-key /path/to/demo.example.genmeta.net.key \
+  --host demo.example.genmeta.net \
   --addr 192.168.1.100:8080,192.168.1.101:8080
 ```
 
@@ -68,18 +71,15 @@ This command establishes an HTTP/3 connection to the server, sends a POST reques
 Use the `query` example to query DNS service records from the HTTP/3 DNS server.
 
 #### Program Parameters
-- `--base-url <URL>`: Base URL of the DNS server (default: `https://localhost:4433/`).
-- `--server-ca <PATH>`: CA certificate PEM file path (default: `examples/keychain/localhost/ca.cert`).
-- `--client-name <NAME>`: Client identity name (default: `client`).
-- `--client-cert <PATH>`: Client certificate chain PEM file (default: `examples/keychain/localhost/client.cert`).
-- `--client-key <PATH>`: Client private key PEM file (default: `examples/keychain/localhost/client.key`).
-- `--host <NAME>`: DNS name to query (default: `client.genmeta.net`).
+- `--base-url <URL>`: Base URL of the DNS server (default: `https://dns.genmeta.net:4433/`).
+- `--server-ca <PATH>`: CA certificate PEM file path for verifying the online server certificate.
+- `--host <NAME>`: DNS name to query (default: `stun.genmeta.net`).
 
 #### Example Run Command
 ```bash
 cargo run --example query --features="h3x-resolver" \
-  --base-url https://localhost:4433/ \
-  --host client.genmeta.net
+  --server-ca /path/to/root.crt \
+  --host stun.genmeta.net
 ```
 
 This command sends a GET or POST request to the server, the request body contains the DNS query message, the server returns matching records.

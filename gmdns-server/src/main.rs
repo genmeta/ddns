@@ -71,6 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Failed to parse config {:?}: {e}", options.config);
         std::process::exit(1);
     });
+    let config = config.expand_paths();
 
     // Build storage backend.
     let storage = match config.redis.clone() {
@@ -103,10 +104,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let policies = Arc::new(DomainPolicies(policy_rules));
     info!(?policies, "domain_policies.loaded");
 
-    // Load the root CA that signed the client certificates.
+    // Load the root CA used to validate client certificates when they are provided.
     let root_ca_pem = std::fs::read(&config.root_cert)?;
     let roots = load_root_store_from_pem(&root_ca_pem)?;
     let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+        .allow_unauthenticated()
         .build()
         .unwrap();
 

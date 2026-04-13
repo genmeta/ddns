@@ -8,7 +8,7 @@ listen = "0.0.0.0:4433"
 server_name = "dns.genmeta.net"
 
 # Paths to the server TLS certificate and private key (PEM format).
-cert = "~/Downloads/ssl/dns.genmeta.net/dns.genmeta.net.crt"
+cert = "~/Downloads/ssl/dns.genmeta.net/dns.genmeta.net.pem"
 key = "~/Downloads/ssl/dns.genmeta.net/dns.genmeta.net.key"
 
 # Root CA that signed the client certificates (PEM format).
