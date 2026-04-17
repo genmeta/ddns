@@ -8,7 +8,7 @@ use qresolve::{
 };
 use reqwest::IntoUrl;
 use tokio::time::Instant;
-use tracing::debug;
+use tracing::{debug, trace};
 use url::Url;
 
 use crate::{MdnsPacket, parser::packet::be_packet, wire::be_multi_response};
