@@ -96,7 +96,7 @@ impl H3Resolver {
         name: &str,
         endpoints: &[EndpointAddr],
     ) -> Result<(), Error> {
-        debug!("h3x publishing {} with {} endpoints", name, endpoints.len());
+        trace!("h3x publishing {} with {} endpoints", name, endpoints.len());
         let bytes = {
             let endpoints = endpoints
                 .iter()
@@ -118,7 +118,7 @@ impl H3Resolver {
         let mut url = self.base_url.join("publish").expect("Invalid base URL");
         url.set_query(Some(&format!("host={name}")));
         let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
-        tracing::debug!("h3x publishing packet for {} to {}", name, self.base_url);
+        tracing::trace!("h3x publishing packet for {} to {}", name, self.base_url);
         let (_, resp) = self
             .client
             .new_request()
@@ -174,7 +174,7 @@ impl H3Resolver {
         url.set_query(Some(&format!("host={}", domain)));
         let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
 
-        tracing::debug!("sending lookup request to {}", self.base_url);
+        tracing::trace!("sending lookup request to {}", self.base_url);
         let (_req, mut resp) = self
             .client
             .new_request()
@@ -182,7 +182,7 @@ impl H3Resolver {
             .await
             .map_err(|source| Error::H3Request { source })?;
 
-        tracing::debug!("received response with status {}", resp.status());
+        tracing::trace!("received response with status {}", resp.status());
         match resp.status() {
             http::StatusCode::OK => {}
             http::StatusCode::NOT_FOUND => {
@@ -215,7 +215,7 @@ impl H3Resolver {
                     .filter_map(|answer| match answer.data() {
                         record::RData::E(ep) => {
                             let socket_ep = ep.clone().try_into().ok()?;
-                            debug!(?socket_ep, "parsed endpoint from record");
+                            trace!(?socket_ep, "parsed endpoint from record");
                             Some(qresolve::EndpointAddr::Socket(socket_ep))
                         }
                         _ => {

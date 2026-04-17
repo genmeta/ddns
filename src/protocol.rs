@@ -33,7 +33,7 @@ const MAX_DEQUE_SIZE: usize = 64;
 
 impl MdnsSocket {
     pub fn new(device: &str, ip: IpAddr) -> io::Result<Self> {
-        tracing::debug!(target: "mdns", device, %ip, "add mdns device");
+        tracing::trace!(target: "mdns", device, %ip, "add mdns device");
         let socket = match ip {
             #[cfg_attr(
                 not(any(target_os = "android", target_os = "fuchsia", target_os = "linux")),
