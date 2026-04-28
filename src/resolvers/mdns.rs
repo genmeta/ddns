@@ -11,12 +11,19 @@ use futures::{
 };
 use h3x::dquic::{
     qinterface::{BindInterface, WeakInterface, bind_uri::BindUri, io::IO},
-    qresolve::{EndpointAddr, Family, RecordStream, ResolveFuture, SocketEndpointAddr, Source},
+    qresolve::{EndpointAddr, Family, RecordStream, ResolveFuture, Source},
 };
 
 use super::{Publish, Resolve};
 pub use crate::mdns::Mdns as MdnsResolver;
 use crate::{parser::packet::Packet, protocol::MdnsProtocol};
+
+fn into_resolve_endpoint(ep: crate::parser::record::endpoint::EndpointAddr) -> EndpointAddr {
+    match ep.agent {
+        Some(agent) => EndpointAddr::with_agent(agent, ep.primary),
+        None => EndpointAddr::direct(ep.primary),
+    }
+}
 
 impl MdnsResolver {
     pub fn source(&self) -> Source {
@@ -64,10 +71,10 @@ impl Resolve for MdnsResolver {
         let source = self.source();
         self.query(name.to_owned())
             .map_ok(move |list| {
-                stream::iter(list.into_iter().filter_map(move |ep| {
-                    let ep = EndpointAddr::Socket(SocketEndpointAddr::try_from(ep).ok()?);
-                    Some((source.clone(), ep))
-                }))
+                stream::iter(
+                    list.into_iter()
+                        .map(move |ep| (source.clone(), into_resolve_endpoint(ep))),
+                )
                 .boxed()
             })
             .boxed()
@@ -118,10 +125,10 @@ impl MdnsResolvers {
         self.for_each_resolver(|resolver| {
             let source = resolver.source();
             lookup_futures.push(resolver.query(name.to_owned()).map_ok(move |eps| {
-                stream::iter(eps.into_iter().filter_map(move |ep| {
-                    let ep = EndpointAddr::Socket(SocketEndpointAddr::try_from(ep).ok()?);
-                    Some((source.clone(), ep))
-                }))
+                stream::iter(
+                    eps.into_iter()
+                        .map(move |ep| (source.clone(), into_resolve_endpoint(ep))),
+                )
             }));
         });
 

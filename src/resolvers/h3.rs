@@ -109,10 +109,7 @@ where
         let bytes = {
             let endpoints = endpoints
                 .iter()
-                .filter_map(|ep| match *ep {
-                    h3x::dquic::qresolve::EndpointAddr::Socket(ep) => ep.try_into().ok(),
-                    h3x::dquic::qresolve::EndpointAddr::Ble(..) => None,
-                })
+                .filter_map(|ep| (*ep).try_into().ok())
                 .collect();
             let mut hosts = std::collections::HashMap::new();
             hosts.insert(name.to_string(), endpoints);
@@ -223,9 +220,9 @@ where
                     .iter()
                     .filter_map(|answer| match answer.data() {
                         record::RData::E(ep) => {
-                            let socket_ep = ep.clone().try_into().ok()?;
-                            trace!(?socket_ep, "parsed endpoint from record");
-                            Some(h3x::dquic::qresolve::EndpointAddr::Socket(socket_ep))
+                            let endpoint: EndpointAddr = ep.clone().try_into().ok()?;
+                            trace!(?endpoint, "parsed endpoint from record");
+                            Some(endpoint)
                         }
                         _ => {
                             tracing::debug!(?answer, "ignored record");

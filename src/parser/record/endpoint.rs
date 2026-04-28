@@ -8,7 +8,7 @@ use std::{
 
 use base64::Engine;
 use bytes::BufMut;
-use h3x::dquic::qresolve::SocketEndpointAddr;
+use h3x::dquic::qresolve::EndpointAddr as ResolveEndpointAddr;
 use nom::{
     IResult, Parser,
     bytes::streaming::take,
@@ -680,51 +680,45 @@ impl Display for EndpointAddr {
     }
 }
 
-impl TryFrom<SocketEndpointAddr> for EndpointAddr {
+impl TryFrom<ResolveEndpointAddr> for EndpointAddr {
     type Error = ();
 
-    fn try_from(value: SocketEndpointAddr) -> Result<Self, Self::Error> {
+    fn try_from(value: ResolveEndpointAddr) -> Result<Self, Self::Error> {
         match value {
-            SocketEndpointAddr::Direct {
+            ResolveEndpointAddr::Direct {
                 addr: SocketAddr::V4(addr),
             } => Ok(Self::direct_v4(addr)),
-            SocketEndpointAddr::Direct {
+            ResolveEndpointAddr::Direct {
                 addr: SocketAddr::V6(addr),
             } => Ok(Self::direct_v6(addr)),
-            SocketEndpointAddr::Agent {
+            ResolveEndpointAddr::Agent {
                 agent: SocketAddr::V4(agent),
                 outer: SocketAddr::V4(outer),
             } => Ok(Self::nat_v4(outer, agent)),
-            SocketEndpointAddr::Agent {
+            ResolveEndpointAddr::Agent {
                 agent: SocketAddr::V6(agent),
                 outer: SocketAddr::V6(outer),
             } => Ok(Self::nat_v6(outer, agent)),
-            _ => Err(()),
+            ResolveEndpointAddr::Agent { outer, agent } => Ok(Self {
+                flags: Self::FLAG_NAT,
+                sequence: None,
+                load: None,
+                signature: None,
+                primary: outer,
+                agent: Some(agent),
+            }),
         }
     }
 }
 
-impl TryFrom<EndpointAddr> for SocketEndpointAddr {
+impl TryFrom<EndpointAddr> for ResolveEndpointAddr {
     type Error = ();
 
     fn try_from(value: EndpointAddr) -> Result<Self, Self::Error> {
         if let Some(agent_addr) = value.agent {
-            match (value.primary, agent_addr) {
-                (SocketAddr::V4(outer), SocketAddr::V4(agent)) => Ok(SocketEndpointAddr::Agent {
-                    outer: outer.into(),
-                    agent: agent.into(),
-                }),
-                (SocketAddr::V6(outer), SocketAddr::V6(agent)) => Ok(SocketEndpointAddr::Agent {
-                    outer: outer.into(),
-                    agent: agent.into(),
-                }),
-                _ => Err(()),
-            }
+            Ok(ResolveEndpointAddr::with_agent(agent_addr, value.primary))
         } else {
-            match value.primary {
-                SocketAddr::V4(addr) => Ok(SocketEndpointAddr::Direct { addr: addr.into() }),
-                SocketAddr::V6(addr) => Ok(SocketEndpointAddr::Direct { addr: addr.into() }),
-            }
+            Ok(ResolveEndpointAddr::direct(value.primary))
         }
     }
 }
@@ -733,7 +727,7 @@ impl TryFrom<EndpointAddr> for SocketEndpointAddr {
 pub fn sign_endponit_address(
     server_id: u8,
     key: Option<(&(impl SigningKey + ?Sized), SignatureScheme)>,
-    endpoint: SocketEndpointAddr,
+    endpoint: ResolveEndpointAddr,
 ) -> Option<EndpointAddr> {
     let mut ep: EndpointAddr = endpoint.try_into().ok()?;
 
