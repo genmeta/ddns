@@ -7,8 +7,19 @@ use std::{
 
 use clap::Parser;
 use gmdns::{parser::record::endpoint::EndpointAddr, resolvers::H3Publisher};
-use h3x::dquic::{H3Client, qresolve::Publish};
-use rustls::{RootCertStore, SignatureScheme, pki_types::PrivateKeyDer, sign::SigningKey};
+use h3x::dquic::{
+    Identity, Network, QuicEndpoint, ServerName,
+    cert::handy::{ToCertificate, ToPrivateKey},
+    client::{ClientQuicConfig, ServerCertVerifierChoice},
+    resolver::{Publish, handy::SystemResolver},
+};
+use rustls::{
+    RootCertStore,
+    SignatureScheme,
+    client::WebPkiServerVerifier,
+    pki_types::PrivateKeyDer,
+    sign::SigningKey,
+};
 use tracing::{Level, info};
 
 #[derive(Parser, Debug)]
@@ -143,18 +154,35 @@ async fn main() -> io::Result<()> {
         .transpose()?;
     let signer_scheme = signer.as_deref().map(pick_signature_scheme).transpose()?;
 
-    let client = H3Client::builder()
-        .with_root_certificates(Arc::new(root_store))
-        .with_identity(
-            opt.client_name,
-            cert_chain_pem.as_slice(),
-            private_key_pem.as_slice(),
-        )
-        .map_err(io::Error::other)?
-        .build();
+    // Build WebPki server cert verifier from CA root store
+    let verifier = WebPkiServerVerifier::builder(Arc::new(root_store))
+        .build()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+    // Build TLS identity from cert chain and private key PEM
+    let identity = Identity {
+        name: ServerName::new(&opt.client_name),
+        certs: Arc::new(cert_chain_pem.to_certificate()),
+        key: Arc::new(private_key_pem.to_private_key()),
+        ocsp: Arc::new(None),
+    };
+
+    // Build network and QuicEndpoint with client mTLS config
+    let network = Network::builder().build();
+    let quic = QuicEndpoint::builder()
+        .network(network)
+        .identity(Arc::new(identity))
+        .resolver(Arc::new(SystemResolver))
+        .client(ClientQuicConfig {
+            verifier: ServerCertVerifierChoice::WebPki(verifier),
+            ..Default::default()
+        })
+        .build()
+        .await;
+    let h3_endpoint = h3x::dquic::H3Endpoint::new(quic);
 
     // Uses H3Resolver which uses dquic internally aka HTTP/3
-    let resolver = H3Publisher::new(opt.base_url.clone(), client)?;
+    let resolver = H3Publisher::new(opt.base_url.clone(), h3_endpoint)?;
 
     info!(host = %opt.host, addrs = ?opt.addr, base_url = %opt.base_url, "publish.start");
     if let Some(scheme) = signer_scheme {
@@ -173,7 +201,9 @@ async fn main() -> io::Result<()> {
         endpoint.set_sequence(opt.sequence);
         if let Some((key, scheme)) = signer.as_deref().zip(signer_scheme) {
             info!("Signing endpoint with scheme: {:?}", scheme);
-            endpoint.sign_with(key, scheme).map_err(io::Error::other)?;
+            endpoint
+                .sign_with(key, scheme)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         }
         info!("Publishing endpoint: {:?}", endpoint);
         let mut hosts = std::collections::HashMap::new();
@@ -182,7 +212,7 @@ async fn main() -> io::Result<()> {
         resolver
             .publish(&opt.host, &packet)
             .await
-            .map_err(io::Error::other)?;
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         info!("Successfully published endpoint for {}", addr);
     }
     info!("publish.ok");
