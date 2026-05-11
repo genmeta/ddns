@@ -55,7 +55,7 @@ fn build_seed_records(seed_records: &[SeedRecordConfig]) -> io::Result<SeedRecor
         }
 
         let host = error::normalize_host(&seed_record.host)
-            .map_err(io::Error::other)?;
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
         let endpoints = seed_record
             .endpoints
