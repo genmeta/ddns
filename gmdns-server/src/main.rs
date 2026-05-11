@@ -5,19 +5,22 @@ mod policy;
 mod publish;
 mod storage;
 
-use std::{collections::HashMap, io, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, io, net::SocketAddr, str::FromStr, sync::Arc};
 
 use clap::Parser;
 use gmdns::{MdnsEndpoint, MdnsPacket};
 use h3x::{
-    dquic::prelude::{
-        BindUri,
-        handy::{ToCertificate, ToPrivateKey},
+    dquic::{
+        Identity, Network, QuicEndpoint, ServerName,
+        binds::BindPattern,
+        cert::handy::{ToCertificate, ToPrivateKey},
+        server::ServerQuicConfig,
     },
-    server::{Router, Servers},
+    endpoint::{server::Router, H3Endpoint},
 };
 use rustls::{RootCertStore, server::WebPkiClientVerifier};
-use tracing::{info, level_filters::LevelFilter};
+use tokio_util::task::AbortOnDropHandle;
+use tracing::{Instrument, info, level_filters::LevelFilter};
 use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
 
 use crate::{
@@ -52,7 +55,7 @@ fn build_seed_records(seed_records: &[SeedRecordConfig]) -> io::Result<SeedRecor
         }
 
         let host = error::normalize_host(&seed_record.host)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+            .map_err(io::Error::other)?;
 
         let endpoints = seed_record
             .endpoints
@@ -173,32 +176,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         );
 
-    let bind = {
-        let base = BindUri::from(format!("inet://{}", config.listen));
-        if config.listen.port() == 0 {
-            base.alloc_port()
-        } else {
-            base
-        }
+    let identity = Arc::new(Identity {
+        name: ServerName::new(&config.server_name),
+        certs: Arc::new(cert_pem.to_certificate()),
+        key: Arc::new(key_pem.to_private_key()),
+        ocsp: Arc::new(None),
+    });
+    let server_config = ServerQuicConfig {
+        client_cert_verifier: verifier,
+        ..Default::default()
     };
-
-    let mut servers = Servers::builder()
-        .with_client_cert_verifier(verifier)?
-        .listen()?;
-
-    servers
-        .add_server(
-            config.server_name.clone(),
-            cert_pem.to_certificate(),
-            key_pem.to_private_key(),
-            None,
-            [bind],
-            router,
-        )
-        .await?;
-
+    let quic = QuicEndpoint::builder()
+        .network(Network::builder().build())
+        .identity(identity)
+        .server(server_config)
+        .bind(Arc::new(vec![
+            BindPattern::from_str(&format!("inet://{}", config.listen)).expect("valid bind pattern"),
+        ]))
+        .build()
+        .await;
+    let server = Arc::new(H3Endpoint::new(quic));
     info!(listen = %config.listen, server_name = %config.server_name, "h3_server.start");
-    _ = servers.run().await;
+    let _serve = AbortOnDropHandle::new(
+        tokio::spawn(server.serve_owned(router).in_current_span()),
+    );
 
     Ok(())
 }
