@@ -6,8 +6,9 @@ use std::{
 
 use futures::{FutureExt, Stream, StreamExt, TryFutureExt, stream};
 use h3x::dquic::{
+    net::{EndpointAddr, Family},
     qinterface::device::Devices,
-    qresolve::{EndpointAddr, Family, Publish, Resolve, ResolveFuture, Source},
+    resolver::{Publish, Resolve, ResolveFuture, Source},
 };
 use snafu::Report;
 use tokio::io;

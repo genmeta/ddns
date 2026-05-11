@@ -10,8 +10,9 @@ use futures::{
     stream::{self, FuturesUnordered},
 };
 use h3x::dquic::{
+    net::{EndpointAddr, Family, SocketEndpointAddr},
     qinterface::{BindInterface, WeakInterface, bind_uri::BindUri, io::IO},
-    qresolve::{EndpointAddr, Family, RecordStream, ResolveFuture, SocketEndpointAddr, Source},
+    resolver::{RecordStream, ResolveFuture, Source},
 };
 
 use super::{Publish, Resolve};
@@ -41,7 +42,7 @@ impl Publish for MdnsResolver {
         &'a self,
         name: &'a str,
         packet: &'a [u8],
-    ) -> h3x::dquic::qresolve::PublishFuture<'a> {
+    ) -> h3x::dquic::resolver::PublishFuture<'a> {
         use crate::parser::{packet::be_packet, record::RData};
         let endpoints = be_packet(packet)
             .map(|(_, pkt)| {

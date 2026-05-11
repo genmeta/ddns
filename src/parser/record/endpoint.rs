@@ -8,7 +8,7 @@ use std::{
 
 use base64::Engine;
 use bytes::BufMut;
-use h3x::dquic::qresolve::SocketEndpointAddr;
+use h3x::dquic::net::SocketEndpointAddr;
 use nom::{
     IResult, Parser,
     bytes::streaming::take,
