@@ -6,8 +6,18 @@ use std::{
 
 use clap::Parser;
 use gmdns::{MdnsPacket, parser::record::RData, wire::be_multi_response};
-use h3x::dquic::H3Client;
-use rustls::RootCertStore;
+use h3x::{
+    dquic::{
+        client::{ClientQuicConfig, ServerCertVerifierChoice},
+        resolver::handy::SystemResolver,
+        Network, QuicEndpoint,
+    },
+    endpoint::H3Endpoint,
+};
+use rustls::{
+    RootCertStore,
+    client::WebPkiServerVerifier,
+};
 use tracing::{Level, info};
 
 #[derive(Parser, Debug)]
@@ -95,11 +105,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opt = Options::parse();
     let server_ca = expand_tilde(&opt.server_ca)?;
     let root_store = load_root_store_from_pem(&server_ca)?;
-    let client = H3Client::builder()
-        .with_root_certificates(Arc::new(root_store))
-        .without_identity()
-        .map_err(|e| io::Error::other(e.to_string()))?
-        .build();
+    let verifier = WebPkiServerVerifier::builder(Arc::new(root_store))
+        .build()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let client_config = ClientQuicConfig {
+        verifier: ServerCertVerifierChoice::WebPki(verifier),
+        ..Default::default()
+    };
+    let network = Network::builder().build();
+    let quic = QuicEndpoint::builder()
+        .network(network)
+        .resolver(Arc::new(SystemResolver))
+        .client(client_config)
+        .build()
+        .await;
+    let client = H3Endpoint::new(quic);
 
     let url = format!("{}lookup?host={}", opt.base_url, opt.host);
     info!(url = %url, "lookup.start");
