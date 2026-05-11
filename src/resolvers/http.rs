@@ -6,7 +6,7 @@ use std::{
 
 use dashmap::DashMap;
 use futures::{StreamExt, TryFutureExt, stream};
-use h3x::dquic::qresolve::{Publish, PublishFuture, Resolve, ResolveFuture, Source};
+use h3x::dquic::resolver::{Publish, PublishFuture, Resolve, ResolveFuture, Source};
 use reqwest::{Client, IntoUrl, StatusCode, Url};
 use tokio::time::Instant;
 
@@ -14,7 +14,7 @@ use crate::parser::packet::be_packet;
 
 #[derive(Debug)]
 struct Record {
-    addrs: Vec<h3x::dquic::qresolve::EndpointAddr>,
+    addrs: Vec<h3x::dquic::net::EndpointAddr>,
     expire: Instant,
 }
 
@@ -131,7 +131,7 @@ impl Resolve for HttpResolver {
                 let endpoint_addrs: Vec<_> = record
                     .addrs
                     .iter()
-                    .map(|e: &h3x::dquic::qresolve::EndpointAddr| (soource.clone(), *e))
+                    .map(|e: &h3x::dquic::net::EndpointAddr| (soource.clone(), *e))
                     .collect();
                 return Ok(stream::iter(endpoint_addrs).boxed());
             }
@@ -154,7 +154,7 @@ impl Resolve for HttpResolver {
                 .filter_map(|answer| match answer.data() {
                     record::RData::E(ep) => {
                         let socket_ep = ep.clone().try_into().ok()?;
-                        Some(h3x::dquic::qresolve::EndpointAddr::Socket(socket_ep))
+                        Some(h3x::dquic::net::EndpointAddr::Socket(socket_ep))
                     }
                     _ => {
                         tracing::debug!(?answer, "ignored record");

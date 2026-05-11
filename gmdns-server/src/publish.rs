@@ -1,7 +1,7 @@
 use futures::future::BoxFuture;
 use h3x::{
+    endpoint::server::{Request, Response, Service},
     quic::agent::RemoteAgent,
-    server::{Request, Response, Service},
 };
 use redis::AsyncCommands;
 use tokio::time::{Duration, Instant};

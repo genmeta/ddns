@@ -8,7 +8,7 @@ use gmdns::{
     MdnsPacket,
     parser::{packet::be_packet, record::RData},
 };
-use h3x::server::{Request, Response, Service};
+use h3x::endpoint::server::{Request, Response, Service};
 use redis::AsyncCommands;
 use tracing::debug;
 

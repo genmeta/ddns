@@ -3,12 +3,11 @@ use std::{fmt, io, sync::Arc, time::Duration};
 use dashmap::DashMap;
 use futures::{FutureExt, StreamExt, TryFutureExt, stream};
 use h3x::{
-    client::Client,
+    endpoint::H3Endpoint,
     dquic::{
-        prelude::ConnectServerError,
-        qresolve::{
-            EndpointAddr, Publish, PublishFuture, RecordStream, Resolve, ResolveFuture, Source,
-        },
+        ConnectError,
+        net::EndpointAddr,
+        resolver::{Publish, PublishFuture, RecordStream, Resolve, ResolveFuture, Source},
     },
     quic,
 };
@@ -21,7 +20,7 @@ use crate::{MdnsPacket, parser::packet::be_packet, wire::be_multi_response};
 
 // Inner struct that holds the actual H3 client and runs on a dedicated thread
 pub struct H3Resolver<C: quic::Connect> {
-    client: Client<C>,
+    client: H3Endpoint<C>,
     base_url: Url,
     cached_records: DashMap<String, Record>,
     negative_cache: DashMap<String, Instant>,
@@ -29,7 +28,7 @@ pub struct H3Resolver<C: quic::Connect> {
 
 #[derive(Debug)]
 struct Record {
-    addrs: Vec<h3x::dquic::qresolve::EndpointAddr>,
+    addrs: Vec<h3x::dquic::net::EndpointAddr>,
     expire: Instant,
 }
 
@@ -52,14 +51,14 @@ impl<C: quic::Connect> fmt::Display for H3Resolver<C> {
 }
 
 #[derive(Debug, snafu::Snafu)]
-pub enum Error<E: std::error::Error + Send + Sync + 'static = ConnectServerError> {
+pub enum Error<E: std::error::Error + Send + Sync + 'static = ConnectError> {
     #[snafu(display("h3 stream error"))]
     H3Stream {
-        source: h3x::client::MessageStreamError,
+        source: h3x::endpoint::server::MessageStreamError,
     },
     #[snafu(display("h3 request error"))]
     H3Request {
-        source: h3x::client::RequestError<E>,
+        source: h3x::endpoint::client::RequestError<E>,
     },
 
     #[snafu(display("{status}"))]
@@ -81,7 +80,7 @@ impl<C: quic::Connect> H3Resolver<C>
 where
     C::Error: Send + Sync + 'static,
 {
-    pub fn new(base_url: impl IntoUrl, client: Client<C>) -> io::Result<Self> {
+    pub fn new(base_url: impl IntoUrl, client: H3Endpoint<C>) -> io::Result<Self> {
         let base_url = base_url
             .into_url()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
@@ -110,8 +109,8 @@ where
             let endpoints = endpoints
                 .iter()
                 .filter_map(|ep| match *ep {
-                    h3x::dquic::qresolve::EndpointAddr::Socket(ep) => ep.try_into().ok(),
-                    h3x::dquic::qresolve::EndpointAddr::Ble(..) => None,
+                    h3x::dquic::net::EndpointAddr::Socket(ep) => ep.try_into().ok(),
+                    h3x::dquic::net::EndpointAddr::Ble(..) => None,
                 })
                 .collect();
             let mut hosts = std::collections::HashMap::new();
@@ -225,7 +224,7 @@ where
                         record::RData::E(ep) => {
                             let socket_ep = ep.clone().try_into().ok()?;
                             trace!(?socket_ep, "parsed endpoint from record");
-                            Some(h3x::dquic::qresolve::EndpointAddr::Socket(socket_ep))
+                            Some(h3x::dquic::net::EndpointAddr::Socket(socket_ep))
                         }
                         _ => {
                             tracing::debug!(?answer, "ignored record");
