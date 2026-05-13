@@ -8,8 +8,6 @@ use std::{
 };
 
 use futures::{Stream, stream};
-#[cfg(feature = "h3x-resolver")]
-use h3x::dquic::net::BoundAddr;
 use h3x::dquic::qinterface::{Interface, component::Component, io::IO};
 use tokio::{task::JoinSet, time};
 use tracing::Instrument;
@@ -75,12 +73,7 @@ impl Mdns {
                 "interface is not bound to internet address",
             ));
         };
-        let BoundAddr::Internet(bound_addr) = iface.bound_addr()? else {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "interface is not bound to internet address",
-            ));
-        };
+        let bound_addr = iface.bound_addr()?;
 
         Self::new(service_name, bound_addr.ip(), device)
     }
@@ -92,7 +85,7 @@ impl Mdns {
         let Some((_family, device, _port)) = binding.as_iface_bind_uri() else {
             return;
         };
-        let Ok(BoundAddr::Internet(bound_addr)) = iface.bound_addr() else {
+        let Ok(bound_addr) = iface.bound_addr() else {
             return;
         };
         let ip = bound_addr.ip();

@@ -153,8 +153,8 @@ impl Resolve for HttpResolver {
                 .iter()
                 .filter_map(|answer| match answer.data() {
                     record::RData::E(ep) => {
-                        let socket_ep = ep.clone().try_into().ok()?;
-                        Some(h3x::dquic::net::EndpointAddr::Socket(socket_ep))
+                        let endpoint = ep.clone().try_into().ok()?;
+                        Some(endpoint)
                     }
                     _ => {
                         tracing::debug!(?answer, "ignored record");

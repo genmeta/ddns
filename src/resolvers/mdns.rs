@@ -10,7 +10,7 @@ use futures::{
     stream::{self, FuturesUnordered},
 };
 use h3x::dquic::{
-    net::{EndpointAddr, Family, SocketEndpointAddr},
+    net::Family,
     qinterface::{BindInterface, WeakInterface, bind_uri::BindUri, io::IO},
     resolver::{RecordStream, ResolveFuture, Source},
 };
@@ -66,7 +66,7 @@ impl Resolve for MdnsResolver {
         self.query(name.to_owned())
             .map_ok(move |list| {
                 stream::iter(list.into_iter().filter_map(move |ep| {
-                    let ep = EndpointAddr::Socket(SocketEndpointAddr::try_from(ep).ok()?);
+                    let ep = h3x::dquic::net::EndpointAddr::try_from(ep).ok()?;
                     Some((source.clone(), ep))
                 }))
                 .boxed()
@@ -120,7 +120,7 @@ impl MdnsResolvers {
             let source = resolver.source();
             lookup_futures.push(resolver.query(name.to_owned()).map_ok(move |eps| {
                 stream::iter(eps.into_iter().filter_map(move |ep| {
-                    let ep = EndpointAddr::Socket(SocketEndpointAddr::try_from(ep).ok()?);
+                    let ep = h3x::dquic::net::EndpointAddr::try_from(ep).ok()?;
                     Some((source.clone(), ep))
                 }))
             }));

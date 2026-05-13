@@ -8,16 +8,14 @@ use clap::Parser;
 use gmdns::{MdnsPacket, parser::record::RData, wire::be_multi_response};
 use h3x::{
     dquic::{
+        Network, QuicEndpoint,
         client::{ClientQuicConfig, ServerCertVerifierChoice},
         resolver::handy::SystemResolver,
-        Network, QuicEndpoint,
     },
     endpoint::H3Endpoint,
 };
-use rustls::{
-    RootCertStore,
-    client::WebPkiServerVerifier,
-};
+use http::Method;
+use rustls::{RootCertStore, client::WebPkiServerVerifier};
 use tracing::{Level, info};
 
 #[derive(Parser, Debug)]
@@ -125,7 +123,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(url = %url, "lookup.start");
 
     let uri: http::Uri = url.parse()?;
-    let (_req, mut resp) = client.new_request().get(uri).await?;
+    let client = Arc::new(client);
+    let req = client.new_request_owned();
+    req.method(Method::GET);
+    req.uri(uri);
+    let mut resp = req.into_response().await?;
 
     if resp.status().is_success() {
         let bytes = resp.read_to_bytes().await?;

@@ -1,16 +1,17 @@
 use std::{fmt, io, sync::Arc, time::Duration};
 
 use dashmap::DashMap;
-use futures::{FutureExt, StreamExt, TryFutureExt, stream};
+use futures::{StreamExt, stream};
 use h3x::{
-    endpoint::H3Endpoint,
     dquic::{
         ConnectError,
         net::EndpointAddr,
         resolver::{Publish, PublishFuture, RecordStream, Resolve, ResolveFuture, Source},
     },
+    endpoint::H3Endpoint,
     quic,
 };
+use http::Method;
 use reqwest::IntoUrl;
 use tokio::time::Instant;
 use tracing::trace;
@@ -20,7 +21,7 @@ use crate::{MdnsPacket, parser::packet::be_packet, wire::be_multi_response};
 
 // Inner struct that holds the actual H3 client and runs on a dedicated thread
 pub struct H3Resolver<C: quic::Connect> {
-    client: H3Endpoint<C>,
+    client: Arc<H3Endpoint<C>>,
     base_url: Url,
     cached_records: DashMap<String, Record>,
     negative_cache: DashMap<String, Instant>,
@@ -76,9 +77,10 @@ pub enum Error<E: std::error::Error + Send + Sync + 'static = ConnectError> {
     ParseMultiResponse,
 }
 
-impl<C: quic::Connect> H3Resolver<C>
+impl<C: quic::Connect + Send + Sync + 'static> H3Resolver<C>
 where
     C::Error: Send + Sync + 'static,
+    C::Connection: Send + 'static,
 {
     pub fn new(base_url: impl IntoUrl, client: H3Endpoint<C>) -> io::Result<Self> {
         let base_url = base_url
@@ -92,7 +94,7 @@ where
         })?;
 
         Ok(Self {
-            client,
+            client: Arc::new(client),
             base_url,
             cached_records: DashMap::new(),
             negative_cache: DashMap::new(),
@@ -108,10 +110,7 @@ where
         let bytes = {
             let endpoints = endpoints
                 .iter()
-                .filter_map(|ep| match *ep {
-                    h3x::dquic::net::EndpointAddr::Socket(ep) => ep.try_into().ok(),
-                    h3x::dquic::net::EndpointAddr::Ble(..) => None,
-                })
+                .filter_map(|ep| crate::parser::record::endpoint::EndpointAddr::try_from(*ep).ok())
                 .collect();
             let mut hosts = std::collections::HashMap::new();
             hosts.insert(name.to_string(), endpoints);
@@ -127,11 +126,14 @@ where
         url.set_query(Some(&format!("host={name}")));
         let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
         tracing::trace!("h3x publishing packet for {} to {}", name, self.base_url);
-        let (_, resp) = self
-            .client
-            .new_request()
-            .with_body(bytes::Bytes::copy_from_slice(packet))
-            .post(uri)
+        let req = self.client.new_request_owned();
+        req.method(Method::POST);
+        req.uri(uri);
+        req.write(bytes::Bytes::copy_from_slice(packet))
+            .await
+            .map_err(|source| Error::H3Request { source })?;
+        let resp = req
+            .into_response()
             .await
             .map_err(|source| Error::H3Request { source })?;
 
@@ -183,10 +185,11 @@ where
         let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
 
         tracing::trace!("sending lookup request to {}", self.base_url);
-        let (_req, mut resp) = self
-            .client
-            .new_request()
-            .get(uri)
+        let req = self.client.new_request_owned();
+        req.method(Method::GET);
+        req.uri(uri);
+        let mut resp = req
+            .into_response()
             .await
             .map_err(|source| Error::H3Request { source })?;
 
@@ -222,9 +225,11 @@ where
                     .iter()
                     .filter_map(|answer| match answer.data() {
                         record::RData::E(ep) => {
-                            let socket_ep = ep.clone().try_into().ok()?;
-                            trace!(?socket_ep, "parsed endpoint from record");
-                            Some(h3x::dquic::net::EndpointAddr::Socket(socket_ep))
+                            let endpoint =
+                                TryInto::<h3x::dquic::net::EndpointAddr>::try_into(ep.clone())
+                                    .ok()?;
+                            trace!(?endpoint, "parsed endpoint from record");
+                            Some(endpoint)
                         }
                         _ => {
                             tracing::debug!(?answer, "ignored record");
@@ -256,22 +261,134 @@ where
 
 pub type H3Publisher<C> = H3Resolver<C>;
 
-impl<C: quic::Connect> Publish for H3Publisher<C>
+impl<C: quic::Connect + Send + Sync + 'static> Publish for H3Publisher<C>
 where
     C::Error: Send + Sync + 'static,
+    C::Connection: Send + 'static,
 {
     fn publish<'a>(&'a self, name: &'a str, packet: &'a [u8]) -> PublishFuture<'a> {
-        self.publish_packet(name, packet)
-            .map_err(io::Error::other)
-            .boxed()
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let name = name.to_owned();
+        let packed = bytes::Bytes::copy_from_slice(packet);
+        let base_url = self.base_url.clone();
+        let client = self.client.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build runtime");
+            let result = rt.block_on(async {
+                let mut url = base_url.join("publish").expect("Invalid base URL");
+                url.set_query(Some(&format!("host={name}")));
+                let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
+                let req = client.new_request_owned();
+                req.method(Method::POST);
+                req.uri(uri);
+                req.write(packed)
+                    .await
+                    .map_err(|source| Error::H3Request { source })?;
+                let resp = req
+                    .into_response()
+                    .await
+                    .map_err(|source| Error::H3Request { source })?;
+                if resp.status() != http::StatusCode::OK {
+                    return Err(Error::Status {
+                        status: resp.status(),
+                    });
+                }
+                Ok(())
+            });
+            let _ = tx.send(result);
+        });
+        Box::pin(async move {
+            match rx.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(io::Error::other(e)),
+                Err(_) => Err(io::Error::other("task cancelled")),
+            }
+        })
     }
 }
 
-impl<C: quic::Connect> Resolve for H3Resolver<C>
+impl<C: quic::Connect + Send + Sync + 'static> Resolve for H3Resolver<C>
 where
     C::Error: Send + Sync + 'static,
+    C::Connection: Send + 'static,
 {
     fn lookup<'l>(&'l self, name: &'l str) -> ResolveFuture<'l> {
-        self.lookup(name).map_err(io::Error::other).boxed()
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let name = name.to_owned();
+        let base_url = self.base_url.clone();
+        let client = self.client.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build runtime");
+            let result = rt.block_on(async {
+                let mut url = base_url.join("lookup").expect("Invalid URL");
+                url.set_query(Some(&format!("host={name}")));
+                let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
+                let req = client.new_request_owned();
+                req.method(Method::GET);
+                req.uri(uri);
+                let mut resp = req
+                    .into_response()
+                    .await
+                    .map_err(|source| Error::H3Request { source })?;
+                match resp.status() {
+                    http::StatusCode::OK => {
+                        let response = resp
+                            .read_to_bytes()
+                            .await
+                            .map_err(|source| Error::H3Stream { source })?;
+                        let (_remain, multi) = be_multi_response(response.as_ref())
+                            .map_err(|_| Error::ParseMultiResponse)?;
+                        let mut addrs = Vec::new();
+                        for r in multi.records {
+                            let (_remain, mdns_pkt) =
+                                be_packet(&r.dns).map_err(|source| Error::ParseRecords {
+                                    source: source.to_owned(),
+                                })?;
+                            addrs.extend(mdns_pkt.answers.iter().filter_map(|answer| {
+                                match answer.data() {
+                                    crate::parser::record::RData::E(ep) => {
+                                        TryInto::<h3x::dquic::net::EndpointAddr>::try_into(
+                                            ep.clone(),
+                                        )
+                                        .ok()
+                                    }
+                                    _ => None,
+                                }
+                            }));
+                        }
+                        if addrs.is_empty() {
+                            return Err(Error::NoRecordFound);
+                        }
+                        let server: Arc<str> =
+                            Arc::from(base_url.host_str().unwrap_or("<unknown server>"));
+                        Ok(stream::iter(addrs.into_iter().map(move |ep| {
+                            (
+                                Source::Http {
+                                    server: server.clone(),
+                                },
+                                ep,
+                            )
+                        }))
+                        .boxed())
+                    }
+                    http::StatusCode::NOT_FOUND => Err(Error::NoRecordFound),
+                    status => Err(Error::Status { status }),
+                }
+            });
+            let _ = tx.send(result);
+        });
+        Box::pin(async move {
+            match rx.await {
+                Ok(Ok(stream)) => Ok(stream),
+                Ok(Err(e)) => Err(io::Error::other(e)),
+                Err(_) => Err(io::Error::other("task cancelled")),
+            }
+        })
     }
 }

@@ -16,7 +16,7 @@ use h3x::{
         cert::handy::{ToCertificate, ToPrivateKey},
         server::ServerQuicConfig,
     },
-    endpoint::{server::Router, H3Endpoint},
+    endpoint::{H3Endpoint, server::Router},
 };
 use rustls::{RootCertStore, server::WebPkiClientVerifier};
 use tokio_util::task::AbortOnDropHandle;
@@ -191,15 +191,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .identity(identity)
         .server(server_config)
         .bind(Arc::new(vec![
-            BindPattern::from_str(&format!("inet://{}", config.listen)).expect("valid bind pattern"),
+            BindPattern::from_str(&format!("inet://{}", config.listen))
+                .expect("valid bind pattern"),
         ]))
         .build()
         .await;
     let server = Arc::new(H3Endpoint::new(quic));
     info!(listen = %config.listen, server_name = %config.server_name, "h3_server.start");
-    let _serve = AbortOnDropHandle::new(
-        tokio::spawn(server.serve_owned(router).in_current_span()),
-    );
+    let _serve = AbortOnDropHandle::new(tokio::spawn(server.serve_owned(router).in_current_span()));
 
     Ok(())
 }

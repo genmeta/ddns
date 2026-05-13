@@ -14,10 +14,7 @@ use h3x::dquic::{
     resolver::{Publish, handy::SystemResolver},
 };
 use rustls::{
-    RootCertStore,
-    SignatureScheme,
-    client::WebPkiServerVerifier,
-    pki_types::PrivateKeyDer,
+    RootCertStore, SignatureScheme, client::WebPkiServerVerifier, pki_types::PrivateKeyDer,
     sign::SigningKey,
 };
 use tracing::{Level, info};
