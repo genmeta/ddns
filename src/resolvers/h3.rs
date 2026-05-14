@@ -11,7 +11,6 @@ use h3x::{
     endpoint::H3Endpoint,
     quic,
 };
-use http::Method;
 use reqwest::IntoUrl;
 use tokio::time::Instant;
 use tracing::trace;
@@ -21,7 +20,7 @@ use crate::{MdnsPacket, parser::packet::be_packet, wire::be_multi_response};
 
 // Inner struct that holds the actual H3 client and runs on a dedicated thread
 pub struct H3Resolver<C: quic::Connect> {
-    client: Arc<H3Endpoint<C>>,
+    endpoint: Arc<H3Endpoint<C>>,
     base_url: Url,
     cached_records: DashMap<String, Record>,
     negative_cache: DashMap<String, Instant>,
@@ -94,7 +93,7 @@ where
         })?;
 
         Ok(Self {
-            client: Arc::new(client),
+            endpoint: Arc::new(client),
             base_url,
             cached_records: DashMap::new(),
             negative_cache: DashMap::new(),
@@ -126,14 +125,10 @@ where
         url.set_query(Some(&format!("host={name}")));
         let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
         tracing::trace!("h3x publishing packet for {} to {}", name, self.base_url);
-        let req = self.client.new_request_owned();
-        req.method(Method::POST);
-        req.uri(uri);
-        req.write(bytes::Bytes::copy_from_slice(packet))
-            .await
-            .map_err(|source| Error::H3Request { source })?;
-        let resp = req
-            .into_response()
+        let resp = self
+            .endpoint
+            .post(uri)
+            .body(packet)
             .await
             .map_err(|source| Error::H3Request { source })?;
 
@@ -185,11 +180,9 @@ where
         let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
 
         tracing::trace!("sending lookup request to {}", self.base_url);
-        let req = self.client.new_request_owned();
-        req.method(Method::GET);
-        req.uri(uri);
-        let mut resp = req
-            .into_response()
+        let mut resp = self
+            .endpoint
+            .get(uri)
             .await
             .map_err(|source| Error::H3Request { source })?;
 
@@ -271,7 +264,7 @@ where
         let name = name.to_owned();
         let packed = bytes::Bytes::copy_from_slice(packet);
         let base_url = self.base_url.clone();
-        let client = self.client.clone();
+        let client = self.endpoint.clone();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -281,14 +274,9 @@ where
                 let mut url = base_url.join("publish").expect("Invalid base URL");
                 url.set_query(Some(&format!("host={name}")));
                 let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
-                let req = client.new_request_owned();
-                req.method(Method::POST);
-                req.uri(uri);
-                req.write(packed)
-                    .await
-                    .map_err(|source| Error::H3Request { source })?;
-                let resp = req
-                    .into_response()
+                let resp = client
+                    .post(uri)
+                    .body(packed)
                     .await
                     .map_err(|source| Error::H3Request { source })?;
                 if resp.status() != http::StatusCode::OK {
@@ -319,7 +307,7 @@ where
         let (tx, rx) = tokio::sync::oneshot::channel();
         let name = name.to_owned();
         let base_url = self.base_url.clone();
-        let client = self.client.clone();
+        let client = self.endpoint.clone();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -329,11 +317,8 @@ where
                 let mut url = base_url.join("lookup").expect("Invalid URL");
                 url.set_query(Some(&format!("host={name}")));
                 let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
-                let req = client.new_request_owned();
-                req.method(Method::GET);
-                req.uri(uri);
-                let mut resp = req
-                    .into_response()
+                let mut resp = client
+                    .get(uri)
                     .await
                     .map_err(|source| Error::H3Request { source })?;
                 match resp.status() {

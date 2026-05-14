@@ -14,7 +14,6 @@ use h3x::{
     },
     endpoint::H3Endpoint,
 };
-use http::Method;
 use rustls::{RootCertStore, client::WebPkiServerVerifier};
 use tracing::{Level, info};
 
@@ -124,10 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let uri: http::Uri = url.parse()?;
     let client = Arc::new(client);
-    let req = client.new_request_owned();
-    req.method(Method::GET);
-    req.uri(uri);
-    let mut resp = req.into_response().await?;
+    let mut resp = client.get(uri).await?;
 
     if resp.status().is_success() {
         let bytes = resp.read_to_bytes().await?;

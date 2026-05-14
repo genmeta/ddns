@@ -209,7 +209,7 @@ async fn main() -> io::Result<()> {
         resolver
             .publish(&opt.host, &packet)
             .await
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
         info!("Successfully published endpoint for {}", addr);
     }
     info!("publish.ok");
