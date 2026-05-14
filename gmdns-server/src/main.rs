@@ -11,7 +11,7 @@ use clap::Parser;
 use gmdns::{MdnsEndpoint, MdnsPacket};
 use h3x::{
     dquic::{
-        Identity, Network, QuicEndpoint, ServerName,
+        Identity, Network, QuicEndpoint,
         binds::BindPattern,
         cert::handy::{ToCertificate, ToPrivateKey},
         server::ServerQuicConfig,
@@ -177,7 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
     let identity = Arc::new(Identity {
-        name: ServerName::new(&config.server_name),
+        name: config.server_name.parse().unwrap(),
         certs: Arc::new(cert_pem.to_certificate()),
         key: Arc::new(key_pem.to_private_key()),
         ocsp: Arc::new(None),

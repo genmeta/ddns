@@ -8,7 +8,7 @@ use std::{
 use clap::Parser;
 use gmdns::{parser::record::endpoint::EndpointAddr, resolvers::H3Publisher};
 use h3x::dquic::{
-    Identity, Network, QuicEndpoint, ServerName,
+    Identity, Network, QuicEndpoint,
     cert::handy::{ToCertificate, ToPrivateKey},
     client::{ClientQuicConfig, ServerCertVerifierChoice},
     resolver::{Publish, handy::SystemResolver},
@@ -158,7 +158,7 @@ async fn main() -> io::Result<()> {
 
     // Build TLS identity from cert chain and private key PEM
     let identity = Identity {
-        name: ServerName::new(&opt.client_name),
+        name: opt.client_name.parse().unwrap(),
         certs: Arc::new(cert_chain_pem.to_certificate()),
         key: Arc::new(private_key_pem.to_private_key()),
         ocsp: Arc::new(None),
