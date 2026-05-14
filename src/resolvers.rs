@@ -6,8 +6,7 @@ use std::{
 
 use futures::{FutureExt, Stream, StreamExt, TryFutureExt, stream};
 use h3x::dquic::{
-    net::{EndpointAddr, Family},
-    qinterface::device::Devices,
+    net::EndpointAddr,
     resolver::{Publish, Resolve, ResolveFuture, Source},
 };
 use snafu::Report;
@@ -86,30 +85,6 @@ impl Resolvers {
 
     pub fn with(mut self, resolver: ArcResolver) -> Self {
         self.resolvers.push(resolver);
-        self
-    }
-
-    pub fn with_mdns_resolvers(
-        mut self,
-        service_name: &str,
-        mut filter: impl FnMut(&str, Family) -> bool,
-    ) -> Self {
-        let devices = Devices::global();
-        self.resolvers.extend(
-            devices
-                .interfaces()
-                .iter()
-                .flat_map(|(device, iface)| {
-                    Option::into_iter(
-                        (!iface.ipv4.is_empty()).then_some((device.as_str(), Family::V4)),
-                    )
-                    .chain((!iface.ipv6.is_empty()).then_some((device.as_str(), Family::V6)))
-                })
-                .filter(|(device, family)| filter(device, *family))
-                .filter_map(|(device, ip)| Some((device, devices.resolve(device, ip)?)))
-                .filter_map(|(device, ip)| MdnsResolver::new(service_name, ip, device).ok())
-                .map(|resolver| Arc::new(resolver) as ArcResolver),
-        );
         self
     }
 
