@@ -20,7 +20,7 @@ use crate::{MdnsPacket, parser::packet::be_packet, wire::be_multi_response};
 
 // Inner struct that holds the actual H3 client and runs on a dedicated thread
 pub struct H3Resolver<C: quic::Connect> {
-    endpoint: Arc<H3Endpoint<C>>,
+    endpoint: Arc<H3Endpoint<C, C::Connection>>,
     base_url: Url,
     cached_records: DashMap<String, Record>,
     negative_cache: DashMap<String, Instant>,
@@ -81,7 +81,7 @@ where
     C::Error: Send + Sync + 'static,
     C::Connection: Send + 'static,
 {
-    pub fn new(base_url: impl IntoUrl, client: H3Endpoint<C>) -> io::Result<Self> {
+    pub fn new(base_url: impl IntoUrl, client: H3Endpoint<C, C::Connection>) -> io::Result<Self> {
         let base_url = base_url
             .into_url()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
