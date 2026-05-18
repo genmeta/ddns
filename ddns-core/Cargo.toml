@@ -1,0 +1,17 @@
+[package]
+name = "ddns-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+base64 = "0.22"
+bitfield-struct = "0.10"
+bytes = "1"
+dquic = { git = "ssh://git@github.com/genmeta/dquic.git", branch = "feat/v0.5.1" }
+nom = "8"
+rand = "0.9"
+ring = "0.17"
+rustls = { version = "0.23", default-features = false, features = ["logging", "ring"] }
+rustls-pemfile = "2"
+snafu = "0.8"
+x509-parser = "0.18"

@@ -1,90 +1,10 @@
 [workspace]
-members = ["gmdns-server"]
+members = ["ddns-core", "gmdns", "ddns", "gmdns-server"]
 resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
 
 [patch."https://github.com/genmeta/h3x.git"]
 h3x = { path = "../h3x" }
-
-[package]
-name = "gmdns"
-version = "0.2.0"
-edition = "2024"
-autoexamples = false
-
-[dependencies]
-base64 = "0.22"
-bitfield-struct = "0.10"
-bytes = "1"
-dashmap = "6"
-flume = "0.12"
-futures = "0.3"
-libc = "0.2"
-nom = "8"
-rand = "0.9"
-reqwest = { version = "0.12", default-features = false, features = [
-    "charset",
-    "rustls-tls",
-    "http2",
-    "macos-system-configuration",
-    "json",
-] }
-ring = "0.17"
-rustls = { version = "0.23", default-features = false, features = [
-    "logging",
-    "ring",
-] }
-rustls-pemfile = "2"
-serde = "1"
-shellexpand = "3"
-snafu = "0.8"
-socket2 = { version = "0.5.8", features = ["all"] }
-tokio = { version = "1", features = [
-    "time",
-    "macros",
-    "net",
-    "sync",
-    "rt",
-    "rt-multi-thread",
-] }
-tokio-util = { version = "0.7", features = ["rt"] }
-tracing = "0.1"
-url = "2"
-x509-parser = "0.18"
-
-# Optional HTTP/3 publisher/resolver via h3x
-h3x = { git = "https://github.com/genmeta/h3x.git", branch = "endpoint", default-features = false, features = [
-    "dquic",
-], optional = true }
-http = { version = "1", optional = true }
-
-[features]
-default = ["h3x-resolver"]
-h3x-resolver = ["dep:h3x", "dep:http"]
-
-[dev-dependencies]
-criterion = "0.5"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rustls-pki-types = "1"
-tracing-appender = "0.2"
-# examples: publish / query
-clap = { version = "4", features = ["derive"] }
-idna = "1"
-serde = { version = "1", features = ["derive"] }
-
-[[example]]
-name = "mdns_discover"
-path = "examples/mdns_discover.rs"
-
-[[example]]
-name = "mdns_query"
-path = "examples/mdns_query.rs"
-
-[[example]]
-name = "publish"
-path = "examples/publish.rs"
-required-features = ["h3x-resolver"]
-
-[[example]]
-name = "query"
-path = "examples/query.rs"
-required-features = ["h3x-resolver"]
