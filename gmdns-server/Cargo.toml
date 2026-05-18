@@ -14,8 +14,7 @@ h3x = { git = "https://github.com/genmeta/h3x.git", branch = "endpoint", feature
 ] }
 
 # server-specific deps（不再污染核心库）
-deadpool-redis = "0.12"
-redis = { version = "0.23", features = ["tokio-comp", "aio"] }
+deadpool-redis = "0.23"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 dashmap = "6"

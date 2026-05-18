@@ -9,7 +9,7 @@ use gmdns::{
     parser::{packet::be_packet, record::RData},
 };
 use h3x::endpoint::server::{Request, Response, Service};
-use redis::AsyncCommands;
+use deadpool_redis::redis::{self, AsyncCommands};
 use tracing::debug;
 
 use crate::{
@@ -99,7 +99,7 @@ async fn perform_lookup_multi(
                 .arg(&set_key)
                 .arg("-inf")
                 .arg(cutoff_score)
-                .query_async::<_, ()>(&mut *conn)
+                .query_async::<()>(&mut *conn)
                 .await
                 .unwrap_or(());
 

@@ -3,7 +3,7 @@ use h3x::{
     endpoint::server::{Request, Response, Service},
     quic::agent::RemoteAgent,
 };
-use redis::AsyncCommands;
+use deadpool_redis::redis::{self, AsyncCommands};
 use tokio::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -165,7 +165,8 @@ pub async fn publish_record(
                     return;
                 }
             };
-            let ttl_secs: usize = state.ttl_secs.try_into().unwrap_or(usize::MAX);
+            let ttl_secs = state.ttl_secs;
+            let expire_ttl_secs = i64::try_from(state.ttl_secs).unwrap_or(i64::MAX);
             let now_secs = unix_now_secs();
             let expire_secs = now_secs + state.ttl_secs;
 
@@ -216,7 +217,7 @@ pub async fn publish_record(
             }
 
             // Expire the ZSET key at max(ttl_secs) from now as a safety net.
-            let _: () = conn.expire(&set_key, ttl_secs).await.unwrap_or(());
+            let _: bool = conn.expire(&set_key, expire_ttl_secs).await.unwrap_or(false);
 
             // Evict stale (score < now - ttl) entries.
             let cutoff = now_secs.saturating_sub(state.ttl_secs) as f64;
@@ -224,7 +225,7 @@ pub async fn publish_record(
                 .arg(&set_key)
                 .arg("-inf")
                 .arg(cutoff)
-                .query_async::<_, ()>(&mut *conn)
+                .query_async::<()>(&mut *conn)
                 .await
                 .unwrap_or(());
         }
