@@ -1,9 +1,9 @@
+use deadpool_redis::redis::{self, AsyncCommands};
 use futures::future::BoxFuture;
 use h3x::{
     endpoint::server::{Request, Response, Service},
     quic::agent::RemoteAgent,
 };
-use deadpool_redis::redis::{self, AsyncCommands};
 use tokio::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -217,7 +217,10 @@ pub async fn publish_record(
             }
 
             // Expire the ZSET key at max(ttl_secs) from now as a safety net.
-            let _: bool = conn.expire(&set_key, expire_ttl_secs).await.unwrap_or(false);
+            let _: bool = conn
+                .expire(&set_key, expire_ttl_secs)
+                .await
+                .unwrap_or(false);
 
             // Evict stale (score < now - ttl) entries.
             let cutoff = now_secs.saturating_sub(state.ttl_secs) as f64;

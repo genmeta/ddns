@@ -6,7 +6,7 @@ use std::{
 };
 
 use clap::Parser;
-use gmdns::{parser::record::endpoint::EndpointAddr, resolvers::H3Publisher};
+use ddns::{parser::record::endpoint::EndpointAddr, resolvers::H3Publisher};
 use h3x::dquic::{
     Identity, Network, QuicEndpoint,
     cert::handy::{ToCertificate, ToPrivateKey},
@@ -205,7 +205,7 @@ async fn main() -> io::Result<()> {
         info!("Publishing endpoint: {:?}", endpoint);
         let mut hosts = std::collections::HashMap::new();
         hosts.insert(opt.host.clone(), vec![endpoint]);
-        let packet = gmdns::MdnsPacket::answer(0, &hosts).to_bytes();
+        let packet = ddns::MdnsPacket::answer(0, &hosts).to_bytes();
         resolver
             .publish(&opt.host, &packet)
             .await

@@ -5,15 +5,15 @@ use std::{
 };
 
 use dashmap::DashMap;
-use futures::{
-    FutureExt, Stream, StreamExt, TryFutureExt, future,
-    stream::{self, FuturesUnordered},
-};
 use ddns_core::parser::{packet::Packet, record::RData};
 use dquic::{
     qbase::net::{Family, addr::EndpointAddr as DquicEndpointAddr},
     qinterface::{BindInterface, WeakInterface, bind_uri::BindUri, io::IO},
     qresolve::{Publish, PublishFuture, RecordStream, Resolve, ResolveFuture, Source},
+};
+use futures::{
+    FutureExt, Stream, StreamExt, TryFutureExt, future,
+    stream::{self, FuturesUnordered},
 };
 
 pub use crate::mdns::Mdns as MdnsResolver;
@@ -38,11 +38,7 @@ impl fmt::Display for MdnsResolver {
 }
 
 impl Publish for MdnsResolver {
-    fn publish<'a>(
-        &'a self,
-        name: &'a str,
-        packet: &'a [u8],
-    ) -> PublishFuture<'a> {
+    fn publish<'a>(&'a self, name: &'a str, packet: &'a [u8]) -> PublishFuture<'a> {
         use ddns_core::parser::packet::be_packet;
         let endpoints = be_packet(packet)
             .map(|(_, pkt)| {

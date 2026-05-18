@@ -4,22 +4,26 @@ use std::{
     sync::Arc,
 };
 
-use futures::{FutureExt, Stream, StreamExt, TryFutureExt, stream};
-use h3x::dquic::{
-    net::EndpointAddr,
-    resolver::{Publish, Resolve, ResolveFuture, Source},
+use dquic::{
+    qbase::net::addr::EndpointAddr,
+    qresolve::{Resolve, ResolveFuture, Source},
 };
+use futures::{FutureExt, Stream, StreamExt, TryFutureExt, stream};
 use snafu::Report;
 use tokio::io;
 
 #[cfg(feature = "h3x-resolver")]
 mod h3;
+#[cfg(feature = "http-resolver")]
 mod http;
-mod mdns;
 
 /// Extract and validate the DNS host from `name`, which may include a `:port`
 /// suffix. Returns `Some(host)` if the host part is a valid RFC-compliant DNS
 /// name, or `None` for raw IP addresses, bracketed IPv6, or malformed input.
+#[cfg_attr(
+    not(any(feature = "h3x-resolver", feature = "http-resolver")),
+    allow(dead_code)
+)]
 pub(crate) fn resolvable_name(name: &str) -> Option<&str> {
     let host = match name.rsplit_once(':') {
         Some((h, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => h,
@@ -29,10 +33,11 @@ pub(crate) fn resolvable_name(name: &str) -> Option<&str> {
     Some(host)
 }
 
+pub use gmdns::resolvers::{MdnsResolver, MdnsResolvers};
 #[cfg(feature = "h3x-resolver")]
 pub use h3::{H3Publisher, H3Resolver};
+#[cfg(feature = "http-resolver")]
 pub use http::HttpResolver;
-pub use mdns::{MdnsResolver, MdnsResolvers};
 
 type ArcResolver = Arc<dyn Resolve + Send + Sync + 'static>;
 
@@ -120,5 +125,24 @@ impl Resolve for Resolvers {
             .map_ok(StreamExt::boxed)
             .map_err(io::Error::other)
             .boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolvable_name;
+
+    #[test]
+    fn resolvable_name_accepts_dns_name_with_numeric_port() {
+        assert_eq!(
+            resolvable_name("example.genmeta.net:443"),
+            Some("example.genmeta.net")
+        );
+    }
+
+    #[test]
+    fn resolvable_name_rejects_ip_literals() {
+        assert_eq!(resolvable_name("127.0.0.1:443"), None);
+        assert_eq!(resolvable_name("[::1]:443"), None);
     }
 }

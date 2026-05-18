@@ -1,22 +1,16 @@
 use std::{fmt, io, sync::Arc, time::Duration};
 
 use dashmap::DashMap;
-use futures::{StreamExt, stream};
-use h3x::{
-    dquic::{
-        ConnectError,
-        net::EndpointAddr,
-        resolver::{Publish, PublishFuture, RecordStream, Resolve, ResolveFuture, Source},
-    },
-    endpoint::H3Endpoint,
-    quic,
+use ddns_core::{MdnsPacket, parser::packet::be_packet, wire::be_multi_response};
+use dquic::{
+    qbase::net::addr::EndpointAddr,
+    qresolve::{Publish, PublishFuture, RecordStream, Resolve, ResolveFuture, Source},
 };
-use reqwest::IntoUrl;
+use futures::{StreamExt, stream};
+use h3x::{dquic::ConnectError, endpoint::H3Endpoint, quic};
 use tokio::time::Instant;
 use tracing::trace;
 use url::Url;
-
-use crate::{MdnsPacket, parser::packet::be_packet, wire::be_multi_response};
 
 // Inner struct that holds the actual H3 client and runs on a dedicated thread
 pub struct H3Resolver<C: quic::Connect> {
@@ -28,7 +22,7 @@ pub struct H3Resolver<C: quic::Connect> {
 
 #[derive(Debug)]
 struct Record {
-    addrs: Vec<h3x::dquic::net::EndpointAddr>,
+    addrs: Vec<EndpointAddr>,
     expire: Instant,
 }
 
@@ -81,14 +75,16 @@ where
     C::Error: Send + Sync + 'static,
     C::Connection: Send + 'static,
 {
-    pub fn new(base_url: impl IntoUrl, client: H3Endpoint<C, C::Connection>) -> io::Result<Self> {
-        let base_url = base_url
-            .into_url()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    pub fn new(
+        base_url: impl AsRef<str>,
+        client: H3Endpoint<C, C::Connection>,
+    ) -> io::Result<Self> {
+        let base_url = Url::parse(base_url.as_ref())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         base_url.host_str().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "Base URL must have a valid host",
+                "base URL must have a valid host",
             )
         })?;
 
@@ -109,7 +105,9 @@ where
         let bytes = {
             let endpoints = endpoints
                 .iter()
-                .filter_map(|ep| crate::parser::record::endpoint::EndpointAddr::try_from(*ep).ok())
+                .filter_map(|ep| {
+                    ddns_core::parser::record::endpoint::EndpointAddr::try_from(*ep).ok()
+                })
                 .collect();
             let mut hosts = std::collections::HashMap::new();
             hosts.insert(name.to_string(), endpoints);
@@ -144,7 +142,7 @@ where
     pub const EXCLUDED_DOMAINS: [&str; 2] = ["dns.genmeta.net", "download.genmeta.net"];
 
     pub async fn lookup(&self, name: &str) -> Result<RecordStream, Error<C::Error>> {
-        use crate::parser::record;
+        use ddns_core::parser::record;
         let server = Arc::from(self.base_url.host_str().unwrap_or("<unknown server>"));
         let source = Source::Http { server };
 
@@ -218,9 +216,7 @@ where
                     .iter()
                     .filter_map(|answer| match answer.data() {
                         record::RData::E(ep) => {
-                            let endpoint =
-                                TryInto::<h3x::dquic::net::EndpointAddr>::try_into(ep.clone())
-                                    .ok()?;
+                            let endpoint = TryInto::<EndpointAddr>::try_into(ep.clone()).ok()?;
                             trace!(?endpoint, "parsed endpoint from record");
                             Some(endpoint)
                         }
@@ -337,11 +333,8 @@ where
                                 })?;
                             addrs.extend(mdns_pkt.answers.iter().filter_map(|answer| {
                                 match answer.data() {
-                                    crate::parser::record::RData::E(ep) => {
-                                        TryInto::<h3x::dquic::net::EndpointAddr>::try_into(
-                                            ep.clone(),
-                                        )
-                                        .ok()
+                                    ddns_core::parser::record::RData::E(ep) => {
+                                        TryInto::<EndpointAddr>::try_into(ep.clone()).ok()
                                     }
                                     _ => None,
                                 }

@@ -17,7 +17,7 @@ struct Args {
 async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
-    let mdns = gmdns::mdns::Mdns::new(SERVICE_NAME, args.ip, &args.device)?;
+    let mdns = ddns::Mdns::new(SERVICE_NAME, args.ip, &args.device)?;
 
     let ret = mdns.query("publish.test.genmeta.net".to_string()).await?;
     println!("{ret:?}\n");

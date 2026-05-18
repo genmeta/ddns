@@ -1,5 +1,6 @@
-use nom::number::streaming::be_u16;
 use std::io;
+
+use nom::number::streaming::be_u16;
 
 use super::name::{Name, be_name};
 

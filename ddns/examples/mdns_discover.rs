@@ -21,14 +21,14 @@ struct Args {
 async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
-    let mdns = gmdns::mdns::Mdns::new(SERVICE_NAME, args.ip, &args.device)?;
+    let mdns = ddns::Mdns::new(SERVICE_NAME, args.ip, &args.device)?;
     mdns.insert_host(
         "test.genmeta.net".to_string(),
         vec![
             {
                 let addr: SocketAddr = "192.168.1.7:7000".parse().unwrap();
                 if let SocketAddr::V4(v4) = addr {
-                    gmdns::parser::record::endpoint::EndpointAddr::direct_v4(v4)
+                    ddns::MdnsEndpoint::direct_v4(v4)
                 } else {
                     panic!("Expected IPv4 address");
                 }
@@ -36,7 +36,7 @@ async fn main() -> Result<(), Error> {
             {
                 let addr: SocketAddr = "192.168.1.13:7000".parse().unwrap();
                 if let SocketAddr::V4(v4) = addr {
-                    gmdns::parser::record::endpoint::EndpointAddr::direct_v4(v4)
+                    ddns::MdnsEndpoint::direct_v4(v4)
                 } else {
                     panic!("Expected IPv4 address");
                 }
@@ -50,7 +50,7 @@ async fn main() -> Result<(), Error> {
             {
                 let addr: SocketAddr = "192.168.1.7:7001".parse().unwrap();
                 if let SocketAddr::V4(v4) = addr {
-                    gmdns::parser::record::endpoint::EndpointAddr::direct_v4(v4)
+                    ddns::MdnsEndpoint::direct_v4(v4)
                 } else {
                     panic!("Expected IPv4 address");
                 }
@@ -58,7 +58,7 @@ async fn main() -> Result<(), Error> {
             {
                 let addr: SocketAddr = "192.168.1.7:7001".parse().unwrap();
                 if let SocketAddr::V4(v4) = addr {
-                    gmdns::parser::record::endpoint::EndpointAddr::direct_v4(v4)
+                    ddns::MdnsEndpoint::direct_v4(v4)
                 } else {
                     panic!("Expected IPv4 address");
                 }
@@ -66,7 +66,7 @@ async fn main() -> Result<(), Error> {
             {
                 let addr: SocketAddr = "192.168.1.7:7001".parse().unwrap();
                 if let SocketAddr::V4(v4) = addr {
-                    gmdns::parser::record::endpoint::EndpointAddr::direct_v4(v4)
+                    ddns::MdnsEndpoint::direct_v4(v4)
                 } else {
                     panic!("Expected IPv4 address");
                 }

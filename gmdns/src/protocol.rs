@@ -8,15 +8,14 @@ use std::{
 };
 
 use dashmap::DashMap;
-use futures::{Stream, StreamExt};
-use snafu::Snafu;
-use socket2::{Domain, Socket, Type};
-use tokio::{io, net::UdpSocket, task::JoinSet, time};
-
 use ddns_core::parser::{
     packet::{Packet, be_packet},
     record::endpoint::EndpointAddr,
 };
+use futures::{Stream, StreamExt};
+use snafu::Snafu;
+use socket2::{Domain, Socket, Type};
+use tokio::{io, net::UdpSocket, task::JoinSet, time};
 
 use crate::if_nametoindex::if_nametoindex;
 

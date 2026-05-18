@@ -2,21 +2,21 @@
 
 ## Introduction
 
-`gmdns` is a Rust-implemented DNS library that supports the mDNS (Multicast DNS) protocol and interacts with DNS servers via the HTTP/3 (H3) protocol for service discovery and publishing in local and remote networks. This document introduces how to use the example programs of `gmdns` to publish and query DNS services, including detailed program parameters and HTTP packet structures.
+`ddns` is a Rust-implemented DNS library that supports the mDNS (Multicast DNS) protocol and interacts with DNS servers via the HTTP/3 (H3) protocol for service discovery and publishing in local and remote networks. This document introduces how to use the example programs of `ddns` to publish and query DNS services, including detailed program parameters and HTTP packet structures.
 
 ## Building the Project
 
 First, ensure you have a Rust environment. Clone or enter the project directory, then build:
 
 ```bash
-cargo build --features="h3x-resolver"
+cargo build -p ddns --features="h3x-resolver"
 ```
 
 Note: The example programs require the `h3x-resolver` feature to enable HTTP/3 support.
 
 ## HTTP Packet Structure Overview
 
-`gmdns` uses the HTTP/3 protocol to transmit DNS queries and responses, similar to DNS over HTTPS (DoH) but based on the QUIC protocol. The structure of HTTP requests is as follows:
+`ddns` uses the HTTP/3 protocol to transmit DNS queries and responses, similar to DNS over HTTPS (DoH) but based on the QUIC protocol. The structure of HTTP requests is as follows:
 
 ### URL Structure
 - **Base URL**: Default `https://localhost:4433/`, used to specify the DNS server's address.
@@ -55,7 +55,7 @@ Use the `publish` example to publish a DNS service record to the HTTP/3 DNS serv
 
 #### Example Run Command
 ```bash
-cargo run --example publish --features="h3x-resolver" \
+cargo run -p ddns --example publish --features="h3x-resolver" \
   --server-ca /path/to/root.crt \
   --client-name demo.example.genmeta.net \
   --client-cert /path/to/demo.example.genmeta.net.pem \
@@ -77,7 +77,7 @@ Use the `query` example to query DNS service records from the HTTP/3 DNS server.
 
 #### Example Run Command
 ```bash
-cargo run --example query --features="h3x-resolver" \
+cargo run -p ddns --example query --features="h3x-resolver" \
   --server-ca /path/to/root.crt \
   --host stun.genmeta.net
 ```
@@ -100,7 +100,7 @@ Use the `server` example to start an HTTP/3 DNS server.
 
 #### Example Run Command
 ```bash
-cargo run --example server --features="h3x-resolver" \
+cargo run -p ddns-server -- --features="h3x-resolver" \
   --listen 127.0.0.1:4433 \
   --cert examples/keychain/localhost/server.cert \
   --key examples/keychain/localhost/server.key

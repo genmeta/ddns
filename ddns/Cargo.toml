@@ -6,6 +6,9 @@ autoexamples = false
 
 [dependencies]
 ddns-core = { path = "../ddns-core" }
+nom = "8"
+dashmap = "6"
+bytes = "1"
 dquic = { git = "ssh://git@github.com/genmeta/dquic.git", branch = "feat/v0.5.1" }
 futures = "0.3"
 gmdns = { path = "../gmdns" }
@@ -30,6 +33,7 @@ h3x = { git = "https://github.com/genmeta/h3x.git", branch = "endpoint", default
 idna = "1"
 rustls-pemfile = "2"
 rustls-pki-types = "1"
+shellexpand = "3"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

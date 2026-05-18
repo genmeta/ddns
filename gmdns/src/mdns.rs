@@ -7,9 +7,9 @@ use std::{
     time::Duration,
 };
 
-use futures::{Stream, stream};
 use ddns_core::parser::{packet::Packet, record::endpoint::EndpointAddr};
 use dquic::qinterface::{Interface, component::Component, io::IO};
+use futures::{Stream, stream};
 use tokio::{task::JoinSet, time};
 use tracing::Instrument;
 

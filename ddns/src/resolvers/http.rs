@@ -5,16 +5,18 @@ use std::{
 };
 
 use dashmap::DashMap;
+use ddns_core::parser::packet::be_packet;
+use dquic::{
+    qbase::net::addr::EndpointAddr,
+    qresolve::{Publish, PublishFuture, Resolve, ResolveFuture, Source},
+};
 use futures::{StreamExt, TryFutureExt, stream};
-use h3x::dquic::resolver::{Publish, PublishFuture, Resolve, ResolveFuture, Source};
 use reqwest::{Client, IntoUrl, StatusCode, Url};
 use tokio::time::Instant;
 
-use crate::parser::packet::be_packet;
-
 #[derive(Debug)]
 struct Record {
-    addrs: Vec<h3x::dquic::net::EndpointAddr>,
+    addrs: Vec<EndpointAddr>,
     expire: Instant,
 }
 
@@ -124,14 +126,14 @@ impl Resolve for HttpResolver {
             let server = Arc::from(self.base_url.host_str().unwrap_or("<unknown server>"));
             let soource = Source::Http { server };
 
-            use crate::parser::record;
+            use ddns_core::parser::record;
             self.cached_records
                 .retain(|_host, Record { expire, .. }| *expire < now);
             if let Some(record) = self.cached_records.get(domain) {
                 let endpoint_addrs: Vec<_> = record
                     .addrs
                     .iter()
-                    .map(|e: &h3x::dquic::net::EndpointAddr| (soource.clone(), *e))
+                    .map(|endpoint: &EndpointAddr| (soource.clone(), *endpoint))
                     .collect();
                 return Ok(stream::iter(endpoint_addrs).boxed());
             }

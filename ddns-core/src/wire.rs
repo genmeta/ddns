@@ -103,10 +103,8 @@ mod tests {
 
     #[test]
     fn multi_response_roundtrips() {
-        let response = MultiResponse::new([
-            (vec![1, 2, 3], vec![4, 5]),
-            (vec![6, 7, 8, 9], Vec::new()),
-        ]);
+        let response =
+            MultiResponse::new([(vec![1, 2, 3], vec![4, 5]), (vec![6, 7, 8, 9], Vec::new())]);
         let encoded = response.encode();
         let (remain, decoded) = be_multi_response(&encoded).unwrap();
         assert!(remain.is_empty());

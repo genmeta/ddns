@@ -3,13 +3,13 @@ use std::{
     net::SocketAddr,
 };
 
+use deadpool_redis::redis::{self, AsyncCommands};
 use futures::future::BoxFuture;
 use gmdns::{
     MdnsPacket,
     parser::{packet::be_packet, record::RData},
 };
 use h3x::endpoint::server::{Request, Response, Service};
-use deadpool_redis::redis::{self, AsyncCommands};
 use tracing::debug;
 
 use crate::{

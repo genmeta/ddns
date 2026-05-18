@@ -1,5 +1,6 @@
 use std::{
     fmt::Display,
+    io,
     net::{Ipv4Addr, Ipv6Addr},
 };
 
@@ -13,7 +14,6 @@ use nom::{
 };
 use ptr::{Ptr, be_ptr};
 use srv::{Srv, be_srv};
-use std::io;
 use txt::Txt;
 
 use super::name::{Name, be_name};

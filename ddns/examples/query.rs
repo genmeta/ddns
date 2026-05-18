@@ -5,7 +5,7 @@ use std::{
 };
 
 use clap::Parser;
-use gmdns::{MdnsPacket, parser::record::RData, wire::be_multi_response};
+use ddns::{MdnsPacket, parser::record::RData, wire::be_multi_response};
 use h3x::{
     dquic::{
         Network, QuicEndpoint,
@@ -146,7 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => println!("Source fingerprint: (no certificate)"),
             }
 
-            match gmdns::parser::packet::be_packet(&record.dns) {
+            match ddns::parser::packet::be_packet(&record.dns) {
                 Ok((_, packet)) => {
                     print!("{}", format_packet(&packet));
 
