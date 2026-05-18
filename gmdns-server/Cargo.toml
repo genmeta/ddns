@@ -8,7 +8,7 @@ name = "gmdns-server"
 path = "src/main.rs"
 
 [dependencies]
-gmdns = { path = "..", features = ["h3x-resolver"] }
+ddns = { path = "../ddns", features = ["h3x-resolver"] }
 h3x = { git = "https://github.com/genmeta/h3x.git", branch = "endpoint", features = [
     "dquic",
 ] }

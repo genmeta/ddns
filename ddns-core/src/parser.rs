@@ -1,7 +1,7 @@
-pub(crate) mod header;
-pub(crate) mod name;
+pub mod header;
+pub mod name;
 pub mod packet;
-pub(crate) mod question;
+pub mod question;
 pub mod record;
 pub mod sigin;
 pub mod varint;
