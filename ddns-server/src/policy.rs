@@ -1,4 +1,4 @@
-use gmdns::parser::{packet::be_packet, record::RData};
+use ddns::parser::{packet::be_packet, record::RData};
 use h3x::quic::agent::RemoteAgent;
 use tracing::warn;
 

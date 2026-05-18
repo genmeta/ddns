@@ -1,10 +1,10 @@
 [package]
-name = "gmdns-server"
+name = "ddns-server"
 version = "0.2.0"
 edition = "2024"
 
 [[bin]]
-name = "gmdns-server"
+name = "ddns-server"
 path = "src/main.rs"
 
 [dependencies]
