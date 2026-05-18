@@ -13,13 +13,12 @@ use snafu::Snafu;
 use socket2::{Domain, Socket, Type};
 use tokio::{io, net::UdpSocket, task::JoinSet, time};
 
-use crate::{
-    if_nametoindex::if_nametoindex,
-    parser::{
-        packet::{Packet, be_packet},
-        record::endpoint::EndpointAddr,
-    },
+use ddns_core::parser::{
+    packet::{Packet, be_packet},
+    record::endpoint::EndpointAddr,
 };
+
+use crate::if_nametoindex::if_nametoindex;
 
 #[derive(Debug)]
 pub struct MdnsSocket {
@@ -192,7 +191,7 @@ impl PacketRouter {
     }
 
     pub fn deliver(&self, source: SocketAddr, packet: Packet) {
-        match (packet.header.flags.query(), packet.header.id) {
+        match (packet.is_query(), packet.id()) {
             (true, 0) => {
                 if self.responses.0.try_send((source, packet.clone())).is_err() {
                     // Queue is full, remove oldest message (FIFO)
@@ -288,7 +287,7 @@ impl MdnsProtocol {
         let router = self.router.upgrade().ok_or(Disconnected)?;
 
         let packet = Packet::query_with_id(local_name.clone());
-        let query_id = NonZero::new(packet.header.id).ok_or_else(|| {
+        let query_id = NonZero::new(packet.id()).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "Query id should not be 0")
         })?;
 
@@ -305,7 +304,7 @@ impl MdnsProtocol {
             if let Ok(Some((source, packet))) =
                 time::timeout(Duration::from_millis(300), packets.next()).await
             {
-                use crate::parser::record::RData::*;
+                use ddns_core::parser::record::RData::*;
                 let endpoints = packet
                     .answers
                     .iter()
@@ -313,17 +312,17 @@ impl MdnsProtocol {
                         tracing::debug!(target: "mdns", ?answer, "recv response");
                     })
                     .filter(|answer| {
-                        if answer.name != local_name {
+                        if answer.name() != local_name {
                             tracing::debug!(
                                 target: "mdns",
-                                answer_name = answer.name,
+                                answer_name = answer.name(),
                                 local_name,
                                 "ignored answer for different service name",
                             );
                         }
-                        answer.name == local_name
+                        answer.name() == local_name
                     })
-                    .filter_map(|answer| match &answer.data {
+                    .filter_map(|answer| match answer.data() {
                         E(e) => Some(e.clone()),
                         _ => {
                             tracing::debug!(target: "mdns", ?answer, "ignored record");

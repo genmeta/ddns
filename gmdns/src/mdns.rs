@@ -8,14 +8,12 @@ use std::{
 };
 
 use futures::{Stream, stream};
-use h3x::dquic::qinterface::{Interface, component::Component, io::IO};
+use ddns_core::parser::{packet::Packet, record::endpoint::EndpointAddr};
+use dquic::qinterface::{Interface, component::Component, io::IO};
 use tokio::{task::JoinSet, time};
 use tracing::Instrument;
 
-use crate::{
-    parser::{packet::Packet, record::endpoint::EndpointAddr},
-    protocol::MdnsProtocol,
-};
+use crate::protocol::MdnsProtocol;
 
 #[derive(Clone)]
 pub struct Mdns {
@@ -170,8 +168,8 @@ impl Mdns {
                             query
                                 .questions
                                 .iter()
-                                .any(|q| host_name.iter().any(|h| h.contains(q.name.as_str())))
-                                .then(|| Packet::answer(query.header.id, &guard))
+                                .any(|q| host_name.iter().any(|h| h.contains(q.name().as_str())))
+                                .then(|| Packet::answer(query.id(), &guard))
                         };
 
                         if let Some(packet) = packet
