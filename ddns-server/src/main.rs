@@ -8,7 +8,7 @@ mod storage;
 use std::{collections::HashMap, io, net::SocketAddr, str::FromStr, sync::Arc};
 
 use clap::Parser;
-use gmdns::{MdnsEndpoint, MdnsPacket};
+use ddns::{MdnsEndpoint, MdnsPacket};
 use h3x::{
     dquic::{
         Identity, Network, QuicEndpoint,

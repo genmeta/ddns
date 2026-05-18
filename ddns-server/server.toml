@@ -1,4 +1,4 @@
-# gmdns DNS-over-HTTP/3 Server configuration
+# ddns DNS-over-HTTP/3 server configuration
 # All fields are optional; the values shown below are the built-in defaults.
 
 # Socket address to listen on.

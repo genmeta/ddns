@@ -1,5 +1,5 @@
 [workspace]
-members = ["ddns-core", "gmdns", "ddns", "gmdns-server"]
+members = ["ddns-core", "gmdns", "ddns", "ddns-server"]
 resolver = "2"
 
 [workspace.package]

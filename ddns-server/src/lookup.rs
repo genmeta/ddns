@@ -3,18 +3,19 @@ use std::{
     net::SocketAddr,
 };
 
-use deadpool_redis::redis::{self, AsyncCommands};
-use futures::future::BoxFuture;
-use gmdns::{
+use ddns::{
     MdnsPacket,
     parser::{packet::be_packet, record::RData},
+    wire::MultiResponse,
 };
+use deadpool_redis::redis::{self, AsyncCommands};
+use futures::future::BoxFuture;
 use h3x::endpoint::server::{Request, Response, Service};
 use tracing::debug;
 
 use crate::{
     error::{AppError, normalize_host, parse_query_params},
-    storage::{AppState, LookupRecord, MultiResponse, Storage, StoredRecord, unix_now_secs},
+    storage::{AppState, LookupRecord, Storage, StoredRecord, unix_now_secs},
 };
 
 // ---------------------------------------------------------------------------
