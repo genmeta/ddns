@@ -8,7 +8,7 @@ use std::{
 
 use base64::Engine;
 use bytes::BufMut;
-use h3x::dquic::net::EndpointAddr as DquicEndpointAddr;
+use dquic::qbase::net::addr::EndpointAddr as DquicEndpointAddr;
 use nom::{
     IResult, Parser,
     bytes::streaming::take,
@@ -733,7 +733,6 @@ impl TryFrom<EndpointAddr> for DquicEndpointAddr {
     }
 }
 
-#[cfg(feature = "h3x-resolver")]
 pub fn sign_endponit_address(
     server_id: u8,
     key: Option<(&(impl SigningKey + ?Sized), SignatureScheme)>,

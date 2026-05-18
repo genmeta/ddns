@@ -72,6 +72,14 @@ impl fmt::Display for Packet {
 }
 
 impl Packet {
+    pub fn id(&self) -> u16 {
+        self.header.id
+    }
+
+    pub fn is_query(&self) -> bool {
+        self.header.flags.query()
+    }
+
     pub fn query_with_id(service_name: String) -> Self {
         let mut packet = Packet::default();
         let id: u16 = rand::random();

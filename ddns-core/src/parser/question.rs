@@ -1,5 +1,5 @@
 use nom::number::streaming::be_u16;
-use tokio::io;
+use std::io;
 
 use super::name::{Name, be_name};
 
@@ -22,6 +22,24 @@ pub struct Question {
     pub(crate) prefer_unicast: bool,
     pub(crate) qtype: QueryType,
     pub(crate) qclass: QueryClass,
+}
+
+impl Question {
+    pub fn name(&self) -> &Name {
+        &self.name
+    }
+
+    pub fn prefer_unicast(&self) -> bool {
+        self.prefer_unicast
+    }
+
+    pub fn qtype(&self) -> QueryType {
+        self.qtype
+    }
+
+    pub fn qclass(&self) -> QueryClass {
+        self.qclass
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]

@@ -13,7 +13,7 @@ use nom::{
 };
 use ptr::{Ptr, be_ptr};
 use srv::{Srv, be_srv};
-use tokio::io;
+use std::io;
 use txt::Txt;
 
 use super::name::{Name, be_name};
