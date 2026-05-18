@@ -1,6 +1,15 @@
-# GMDNS
+# DDNS / GMDNS
 
-GMDNS is a high-performance mDNS (Multicast DNS) protocol library built with Rust, specifically designed for P2P network discovery and NAT traversal scenarios. It supports the standard RFC 6762 protocol while extending endpoint discovery capabilities through custom resource records, enabling publication and verification of both direct and relay addresses. Additionally, it integrates HTTP/3 support for secure DNS over HTTP/3 (DoH3) interactions with remote DNS servers.
+This workspace provides DNS discovery crates for the DHTTP ecosystem:
+
+| Crate | Role |
+| --- | --- |
+| `ddns-core` | DNS packet parser, endpoint `E` record, and shared wire types. |
+| `gmdns` | RFC 6762 multicast DNS transport and LAN resolver/publisher. |
+| `ddns` | Facade crate combining `ddns-core`, `gmdns`, and optional HTTP/3/HTTP resolvers. |
+| `ddns-server` | DNS-over-HTTP/3 publish/lookup server binary. |
+
+`gmdns` is the local multicast DNS layer. `ddns` is the high-level crate to use when an application needs both LAN mDNS and remote DNS-over-HTTP/3 resolver support.
 
 ## 🌟 Key Features
 
@@ -17,21 +26,28 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-gmdns = { path = "../gmdns" }
+ddns = { path = "./ddns" }
 ```
 
-For HTTP/3 features, enable the `h3x-resolver` feature:
+For mDNS-only use, depend directly on `gmdns`:
 
 ```toml
 [dependencies]
-gmdns = { path = "../gmdns", features = ["h3x-resolver"] }
+gmdns = { path = "./gmdns" }
+```
+
+For HTTP/3 resolver/publisher support, enable the `h3x-resolver` feature on `ddns`:
+
+```toml
+[dependencies]
+ddns = { path = "./ddns", features = ["h3x-resolver"] }
 ```
 
 ### Simple mDNS Discovery Example
 
 ```rust
-use gmdns::mdns::Mdns;
 use futures::StreamExt;
+use gmdns::Mdns;
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
@@ -50,38 +66,21 @@ async fn main() -> Result<(), std::io::Error> {
 ### HTTP/3 DNS Publishing Example
 
 ```rust
-use gmdns::{resolver::h3_resolver::H3Resolver, parser::record::endpoint::EndpointAddr};
-use std::path::Path;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let resolver = H3Resolver::new(
-        "https://localhost:4433/",
-        Path::new("examples/keychain/localhost/ca.cert"),
-        "client",
-        Path::new("examples/keychain/localhost/client.cert"),
-        Path::new("examples/keychain/localhost/client.key"),
-    )?;
-
-    // Publish a DNS record
-    let endpoint = EndpointAddr::direct_v4("127.0.0.1:5555".parse()?);
-    resolver.publish("client.genmeta.net", &[endpoint]).await?;
-    Ok(())
-}
+// See ddns/examples/publish.rs for a complete mTLS HTTP/3 publisher.
 ```
 
 ---
 
 ## 🌐 HTTP/3 DNS Server
 
-GMDNS includes support for DNS over HTTP/3 (DoH3), allowing secure publication and querying of DNS records via HTTP/3 protocol. This is useful for remote networks where multicast mDNS is not feasible.
+`ddns` includes support for DNS over HTTP/3 (DoH3), allowing secure publication and querying of DNS records via HTTP/3 protocol. This is useful for remote networks where multicast mDNS is not feasible.
 
 ### Publishing Services
 
 Publish DNS service records to an HTTP/3 DNS server:
 
 ```bash
-cargo run --example publish --features="h3x-resolver" \
+cargo run -p ddns --example publish --features="h3x-resolver" \
   --server-ca /path/to/root.crt \
   --client-name demo.example.genmeta.net \
   --client-cert /path/to/demo.example.genmeta.net.pem \
@@ -95,7 +94,7 @@ cargo run --example publish --features="h3x-resolver" \
 Query DNS service records from an HTTP/3 DNS server:
 
 ```bash
-cargo run --example query --features="h3x-resolver" \
+cargo run -p ddns --example query --features="h3x-resolver" \
   --server-ca /path/to/root.crt \
   --host stun.genmeta.net
 ```
@@ -105,13 +104,10 @@ cargo run --example query --features="h3x-resolver" \
 Start an HTTP/3 DNS server:
 
 ```bash
-cargo run --example server --features="h3x-resolver" \
-  --listen 127.0.0.1:4433 \
-  --cert examples/keychain/localhost/server.cert \
-  --key examples/keychain/localhost/server.key
+cargo run -p ddns-server -- --config ddns-server/server.toml
 ```
 
-For detailed parameters and HTTP packet structures, see [examples/README.md](examples/README.md).
+For detailed parameters and HTTP packet structures, see [ddns/examples/README.md](ddns/examples/README.md).
 
 ---
 
@@ -201,8 +197,11 @@ When signature is present: `Scheme (u16)` + `Length (VarInt)` + `Data (N bytes)`
 
 ## 🛠 Project Structure
 
-- `src/parser/`: Core protocol parsing implementation (Nom parsers).
-- `src/protocol.rs`: UDP multicast and packet routing logic.
-- `src/mdns.rs`: High-level mDNS discovery and response API.
-- `src/resolver/`: HTTP/3 resolver implementation for DoH3 support.
-- `examples/`: Sample code including mDNS discovery/query, and HTTP/3 publishing/querying/server examples.
+- `ddns-core/src/parser/`: Core protocol parsing implementation (Nom parsers).
+- `ddns-core/src/wire.rs`: Shared HTTP multi-record response wire format.
+- `gmdns/src/protocol.rs`: UDP multicast and packet routing logic.
+- `gmdns/src/mdns.rs`: High-level mDNS discovery and response API.
+- `gmdns/src/resolvers/`: LAN mDNS resolver implementation.
+- `ddns/src/resolvers/`: Facade resolver chain plus optional HTTP/3 and HTTP resolvers.
+- `ddns/examples/`: mDNS discovery/query and HTTP/3 publish/query examples.
+- `ddns-server/`: DNS-over-HTTP/3 server binary and configuration.

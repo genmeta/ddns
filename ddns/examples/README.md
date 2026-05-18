@@ -86,24 +86,14 @@ This command sends a GET or POST request to the server, the request body contain
 
 ### Running the DNS Server (server)
 
-Use the `server` example to start an HTTP/3 DNS server.
+Use the `ddns-server` binary to start an HTTP/3 DNS server.
 
 #### Program Parameters
-- `--redis <URL>`: Optional Redis connection URL for persistent storage (default: none, uses in-memory storage).
-- `--listen <ADDR>`: Server listen address (default: `127.0.0.1:4433`).
-- `--server-name <NAME>`: Server name (default: `localhost`).
-- `--cert <PATH>`: Server certificate PEM file (default: `examples/keychain/localhost/server.cert`).
-- `--key <PATH>`: Server private key PEM file (default: `examples/keychain/localhost/server.key`).
-- `--root-cert <PATH>`: Root CA certificate PEM file (default: `examples/keychain/localhost/ca.cert`).
-- `--require-signature`: Whether to require client-signed records (default: true).
-- `--ttl-secs <SECS>`: TTL time for records in seconds (default: 30).
+- `--config <PATH>`: TOML configuration file path (default: `server.toml`).
 
 #### Example Run Command
 ```bash
-cargo run -p ddns-server -- --features="h3x-resolver" \
-  --listen 127.0.0.1:4433 \
-  --cert examples/keychain/localhost/server.cert \
-  --key examples/keychain/localhost/server.key
+cargo run -p ddns-server -- --config ddns-server/server.toml
 ```
 
 After the server starts, it listens for HTTP/3 requests and handles publish and query operations.
