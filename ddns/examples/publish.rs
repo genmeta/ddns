@@ -13,10 +13,7 @@ use h3x::dquic::{
     client::{ClientQuicConfig, ServerCertVerifierChoice},
     resolver::{Publish, handy::SystemResolver},
 };
-use rustls::{
-    RootCertStore, SignatureScheme, client::WebPkiServerVerifier, pki_types::PrivateKeyDer,
-    sign::SigningKey,
-};
+use rustls::{RootCertStore, client::WebPkiServerVerifier};
 use tracing::{Level, info};
 
 #[derive(Parser, Debug)]
@@ -91,40 +88,6 @@ fn expand_tilde(path: &Path) -> io::Result<PathBuf> {
     Ok(PathBuf::from(shellexpand::tilde(path).into_owned()))
 }
 
-fn load_private_key_from_pem(pem: &[u8]) -> io::Result<PrivateKeyDer<'static>> {
-    let mut reader = std::io::Cursor::new(pem);
-    let key = rustls_pemfile::private_key(&mut reader)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "No private key found in PEM"))?;
-    Ok(key)
-}
-
-fn build_signing_key_from_pem(pem: &[u8]) -> io::Result<Arc<dyn SigningKey>> {
-    let key = load_private_key_from_pem(pem)?;
-    rustls::crypto::ring::sign::any_supported_type(&key)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-}
-
-fn pick_signature_scheme(key: &dyn SigningKey) -> io::Result<SignatureScheme> {
-    // Order is preference; choose_scheme picks the first it supports.
-    let offered = [
-        SignatureScheme::ED25519,
-        SignatureScheme::ECDSA_NISTP256_SHA256,
-        SignatureScheme::ECDSA_NISTP384_SHA384,
-        SignatureScheme::RSA_PSS_SHA256,
-        SignatureScheme::RSA_PSS_SHA384,
-        SignatureScheme::RSA_PSS_SHA512,
-        SignatureScheme::RSA_PKCS1_SHA256,
-        SignatureScheme::RSA_PKCS1_SHA384,
-        SignatureScheme::RSA_PKCS1_SHA512,
-    ];
-
-    let signer = key
-        .choose_scheme(&offered)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Unsupported key type/scheme"))?;
-    Ok(signer.scheme())
-}
-
 #[tokio::main]
 async fn main() -> io::Result<()> {
     // Install ring crypto provider
@@ -145,30 +108,24 @@ async fn main() -> io::Result<()> {
     let cert_chain_pem = std::fs::read(&client_cert)?;
     let private_key_pem = std::fs::read(&client_key)?;
 
-    let signer = opt
-        .sign
-        .then(|| build_signing_key_from_pem(&private_key_pem))
-        .transpose()?;
-    let signer_scheme = signer.as_deref().map(pick_signature_scheme).transpose()?;
-
     // Build WebPki server cert verifier from CA root store
     let verifier = WebPkiServerVerifier::builder(Arc::new(root_store))
         .build()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     // Build TLS identity from cert chain and private key PEM
-    let identity = Identity {
+    let identity = Arc::new(Identity {
         name: opt.client_name.parse().unwrap(),
         certs: Arc::new(cert_chain_pem.to_certificate()),
         key: Arc::new(private_key_pem.to_private_key()),
         ocsp: Arc::new(None),
-    };
+    });
 
     // Build network and QuicEndpoint with client mTLS config
     let network = Network::builder().build();
     let quic = QuicEndpoint::builder()
         .network(network)
-        .identity(Arc::new(identity))
+        .identity(identity.clone())
         .resolver(Arc::new(SystemResolver))
         .client(ClientQuicConfig {
             verifier: ServerCertVerifierChoice::WebPki(verifier),
@@ -182,8 +139,8 @@ async fn main() -> io::Result<()> {
     let resolver = H3Publisher::new(opt.base_url.clone(), h3_endpoint)?;
 
     info!(host = %opt.host, addrs = ?opt.addr, base_url = %opt.base_url, "publish.start");
-    if let Some(scheme) = signer_scheme {
-        info!(?scheme, "publish.endpoint_signing.enabled");
+    if opt.sign {
+        info!("publish.endpoint_signing.enabled");
     } else {
         info!("publish.endpoint_signing.disabled");
     }
@@ -196,10 +153,11 @@ async fn main() -> io::Result<()> {
         };
         endpoint.set_main(opt.is_main);
         endpoint.set_sequence(opt.sequence);
-        if let Some((key, scheme)) = signer.as_deref().zip(signer_scheme) {
-            info!("Signing endpoint with scheme: {:?}", scheme);
+        if opt.sign {
+            info!("signing endpoint");
             endpoint
-                .sign_with(key, scheme)
+                .sign_with_agent(identity.as_ref())
+                .await
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         }
         info!("Publishing endpoint: {:?}", endpoint);

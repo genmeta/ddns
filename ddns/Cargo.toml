@@ -6,6 +6,7 @@ autoexamples = false
 
 [dependencies]
 ddns-core = { path = "../ddns-core" }
+dhttp-identity = { git = "ssh://git@github.com/genmeta/dhttp.git", branch = "main" }
 nom = "8"
 dashmap = "6"
 bytes = "1"

@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 ddns = { path = "../ddns", features = ["h3x-resolver"] }
+dhttp-identity = { git = "ssh://git@github.com/genmeta/dhttp.git", branch = "main" }
 h3x = { git = "https://github.com/genmeta/h3x.git", branch = "endpoint", features = [
     "dquic",
 ] }

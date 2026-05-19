@@ -162,6 +162,14 @@ pub struct MdnsResolvers {
 }
 
 #[cfg(feature = "h3x-network")]
+#[derive(Debug, Clone)]
+pub struct BoundMdnsResolver {
+    pub device: String,
+    pub family: Family,
+    pub resolver: MdnsResolver,
+}
+
+#[cfg(feature = "h3x-network")]
 impl fmt::Debug for MdnsResolvers {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MdnsResolvers")
@@ -218,6 +226,31 @@ impl MdnsResolvers {
                 });
             }
         }
+    }
+
+    pub fn bound_resolvers(&self) -> Vec<BoundMdnsResolver> {
+        let mut resolvers = Vec::new();
+        for pattern in self.patterns.iter() {
+            let Some(ifaces) = self.bound_interfaces(pattern) else {
+                continue;
+            };
+            for iface in ifaces {
+                let bind_uri = iface.bind_uri();
+                let Some((family, device, _port)) = bind_uri.as_iface_bind_uri() else {
+                    continue;
+                };
+                iface.with_components(|components, _| {
+                    if let Some(resolver) = components.get::<MdnsResolver>() {
+                        resolvers.push(BoundMdnsResolver {
+                            device: device.to_owned(),
+                            family,
+                            resolver: resolver.clone(),
+                        });
+                    }
+                });
+            }
+        }
+        resolvers
     }
 
     pub async fn query(&self, name: &str) -> io::Result<RecordStream> {

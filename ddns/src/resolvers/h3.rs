@@ -12,7 +12,6 @@ use tokio::time::Instant;
 use tracing::trace;
 use url::Url;
 
-// Inner struct that holds the actual H3 client and runs on a dedicated thread
 pub struct H3Resolver<C: quic::Connect> {
     endpoint: Arc<H3Endpoint<C, C::Connection>>,
     base_url: Url,
@@ -263,39 +262,10 @@ where
     C::Connection: Send + 'static,
 {
     fn publish<'a>(&'a self, name: &'a str, packet: &'a [u8]) -> PublishFuture<'a> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let name = name.to_owned();
-        let packed = bytes::Bytes::copy_from_slice(packet);
-        let base_url = self.base_url.clone();
-        let client = self.endpoint.clone();
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to build runtime");
-            let result = rt.block_on(async {
-                let mut url = base_url.join("publish").expect("Invalid base URL");
-                url.set_query(Some(&format!("host={name}")));
-                let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
-                let resp = client
-                    .post(uri)
-                    .body(packed)
-                    .await
-                    .map_err(|source| Error::H3Request { source })?;
-                if resp.status() != http::StatusCode::OK {
-                    return Err(Error::Status {
-                        status: resp.status(),
-                    });
-                }
-                Ok(())
-            });
-            let _ = tx.send(result);
-        });
         Box::pin(async move {
-            match rx.await {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(e)) => Err(io::Error::other(e)),
-                Err(_) => Err(io::Error::other("task cancelled")),
+            match self.publish_packet(name, packet).await {
+                Ok(()) => Ok(()),
+                Err(error) => Err(io::Error::other(error)),
             }
         })
     }
@@ -307,72 +277,10 @@ where
     C::Connection: Send + 'static,
 {
     fn lookup<'l>(&'l self, name: &'l str) -> ResolveFuture<'l> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let name = name.to_owned();
-        let base_url = self.base_url.clone();
-        let client = self.endpoint.clone();
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to build runtime");
-            let result = rt.block_on(async {
-                let mut url = base_url.join("lookup").expect("Invalid URL");
-                url.set_query(Some(&format!("host={name}")));
-                let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
-                let mut resp = client
-                    .get(uri)
-                    .await
-                    .map_err(|source| Error::H3Request { source })?;
-                match resp.status() {
-                    http::StatusCode::OK => {
-                        let response = resp
-                            .read_to_bytes()
-                            .await
-                            .map_err(|source| Error::H3Stream { source })?;
-                        let (_remain, multi) = be_multi_response(response.as_ref())
-                            .map_err(|_| Error::ParseMultiResponse)?;
-                        let mut addrs = Vec::new();
-                        for r in multi.records {
-                            let (_remain, mdns_pkt) =
-                                be_packet(&r.dns).map_err(|source| Error::ParseRecords {
-                                    source: source.to_owned(),
-                                })?;
-                            addrs.extend(mdns_pkt.answers.iter().filter_map(|answer| {
-                                match answer.data() {
-                                    ddns_core::parser::record::RData::E(ep) => {
-                                        TryInto::<EndpointAddr>::try_into(ep.clone()).ok()
-                                    }
-                                    _ => None,
-                                }
-                            }));
-                        }
-                        if addrs.is_empty() {
-                            return Err(Error::NoRecordFound);
-                        }
-                        let server: Arc<str> =
-                            Arc::from(base_url.host_str().unwrap_or("<unknown server>"));
-                        Ok(stream::iter(addrs.into_iter().map(move |ep| {
-                            (
-                                Source::Http {
-                                    server: server.clone(),
-                                },
-                                ep,
-                            )
-                        }))
-                        .boxed())
-                    }
-                    http::StatusCode::NOT_FOUND => Err(Error::NoRecordFound),
-                    status => Err(Error::Status { status }),
-                }
-            });
-            let _ = tx.send(result);
-        });
         Box::pin(async move {
-            match rx.await {
-                Ok(Ok(stream)) => Ok(stream),
-                Ok(Err(e)) => Err(io::Error::other(e)),
-                Err(_) => Err(io::Error::other("task cancelled")),
+            match H3Resolver::lookup(self, name).await {
+                Ok(stream) => Ok(stream),
+                Err(error) => Err(io::Error::other(error)),
             }
         })
     }

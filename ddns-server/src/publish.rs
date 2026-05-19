@@ -1,9 +1,7 @@
 use deadpool_redis::redis::{self, AsyncCommands};
+use dhttp_identity::identity::RemoteAgent;
 use futures::future::BoxFuture;
-use h3x::{
-    endpoint::server::{Request, Response, Service},
-    quic::agent::RemoteAgent,
-};
+use h3x::endpoint::server::{Request, Response, Service};
 use tokio::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 

@@ -200,6 +200,10 @@ impl Resolvers {
         self
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = &ArcResolver> {
+        self.resolvers.iter()
+    }
+
     pub async fn lookup(
         &self,
         name: &str,
