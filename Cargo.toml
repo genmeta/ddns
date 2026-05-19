@@ -5,16 +5,3 @@ resolver = "2"
 [workspace.package]
 version = "0.2.0"
 edition = "2024"
-
-[patch."https://github.com/genmeta/h3x.git"]
-h3x = { path = "../h3x" }
-
-[patch."ssh://git@github.com/genmeta/ddns.git"]
-ddns-core = { path = "ddns-core" }
-gmdns = { path = "gmdns" }
-
-[patch."ssh://git@github.com/genmeta/dhttp.git"]
-dhttp-identity = { path = "../dhttp/identity" }
-
-[patch."ssh://git@github.com/genmeta/dquic.git"]
-dquic = { path = "../dquic/dquic" }
