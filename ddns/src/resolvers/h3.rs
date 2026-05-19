@@ -102,6 +102,17 @@ where
         })
     }
 
+    fn request_error(
+        &self,
+        source: h3x::endpoint::client::RequestError<C::Error>,
+    ) -> Error<C::Error> {
+        // H3 DNS resolvers keep a long-lived endpoint. A network transition may
+        // leave the cached H3 connection with stale QUIC paths, so the next
+        // attempt must establish a fresh connection instead of reusing it.
+        self.endpoint.clear_pool();
+        Error::H3Request { source }
+    }
+
     pub async fn publish_endpoints(
         &self,
         name: &str,
@@ -129,12 +140,10 @@ where
         url.set_query(Some(&format!("host={name}")));
         let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
         tracing::trace!("h3x publishing packet for {} to {}", name, self.base_url);
-        let resp = self
-            .endpoint
-            .post(uri)
-            .body(packet)
-            .await
-            .map_err(|source| Error::H3Request { source })?;
+        let resp = match self.endpoint.post(uri).body(packet).await {
+            Ok(resp) => resp,
+            Err(source) => return Err(self.request_error(source)),
+        };
 
         if resp.status() != http::StatusCode::OK {
             return Err(Error::Status {
@@ -184,11 +193,10 @@ where
         let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
 
         tracing::trace!("sending lookup request to {}", self.base_url);
-        let mut resp = self
-            .endpoint
-            .get(uri)
-            .await
-            .map_err(|source| Error::H3Request { source })?;
+        let mut resp = match self.endpoint.get(uri).await {
+            Ok(resp) => resp,
+            Err(source) => return Err(self.request_error(source)),
+        };
 
         tracing::trace!("received response with status {}", resp.status());
         match resp.status() {
