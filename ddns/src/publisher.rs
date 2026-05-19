@@ -429,7 +429,7 @@ impl Publisher {
                 continue;
             };
             for iface in ifaces {
-                for endpoint in public_endpoints_from_iface(&iface) {
+                for endpoint in public_endpoints_from_iface(&self.network, &iface) {
                     endpoints.insert(endpoint);
                 }
             }
@@ -466,30 +466,51 @@ enum PublishTrigger {
     Location,
 }
 
-fn public_endpoints_from_iface(iface: &h3x::dquic::net::BindInterface) -> Vec<EndpointAddr> {
-    use h3x::dquic::qtraversal::nat::client::StunClientsComponent;
+fn public_endpoints_from_iface(
+    network: &h3x::dquic::Network,
+    iface: &h3x::dquic::net::BindInterface,
+) -> Vec<EndpointAddr> {
+    use h3x::dquic::{net::IO, qtraversal::nat::client::StunClientsComponent};
 
     iface.with_components(|components, current| {
-        let _ = current;
-        let Some(stun) = components.get::<StunClientsComponent>() else {
-            return Vec::new();
-        };
-
-        stun.with_clients(|clients| {
-            clients
-                .values()
-                .filter_map(|client| {
-                    let outer = client.get_outer_addr()?.ok()?;
-                    match client.get_nat_type() {
-                        Some(Ok(NatType::FullCone)) => Some(EndpointAddr::direct(outer)),
-                        Some(Ok(_)) | None => {
-                            Some(EndpointAddr::with_agent(client.agent_addr(), outer))
-                        }
-                        Some(Err(_)) => None,
-                    }
+        let stun_endpoints: Vec<EndpointAddr> = components
+            .get::<StunClientsComponent>()
+            .map(|stun| {
+                stun.with_clients(|clients| {
+                    clients
+                        .values()
+                        .filter_map(|client| {
+                            let outer = client.get_outer_addr()?.ok()?;
+                            match client.get_nat_type() {
+                                Some(Ok(NatType::FullCone)) => Some(EndpointAddr::direct(outer)),
+                                Some(Ok(_)) | None => {
+                                    Some(EndpointAddr::with_agent(client.agent_addr(), outer))
+                                }
+                                Some(Err(_)) => None,
+                            }
+                        })
+                        .collect()
                 })
-                .collect()
-        })
+            })
+            .unwrap_or_default();
+        if !stun_endpoints.is_empty() {
+            return stun_endpoints;
+        }
+
+        // If STUN has not produced an external endpoint yet, publish the
+        // current default-route address as a temporary direct endpoint. This
+        // preserves reachability during local topology changes while avoiding
+        // staging-only/private management links that do not have a default
+        // route. Once STUN converges, its endpoint replaces this fallback.
+        let addr = match current.bound_addr() {
+            Ok(addr) => addr,
+            Err(_) => return Vec::new(),
+        };
+        if network.bound_addr_is_on_default_route(&current.bind_uri(), addr) {
+            vec![EndpointAddr::direct(addr)]
+        } else {
+            Vec::new()
+        }
     })
 }
 
