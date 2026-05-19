@@ -19,8 +19,7 @@ use h3x::{
     endpoint::{H3Endpoint, server::Router},
 };
 use rustls::{RootCertStore, server::WebPkiClientVerifier};
-use tokio_util::task::AbortOnDropHandle;
-use tracing::{Instrument, info, level_filters::LevelFilter};
+use tracing::{info, level_filters::LevelFilter};
 use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
 
 use crate::{
@@ -198,7 +197,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await;
     let server = Arc::new(H3Endpoint::new(quic));
     info!(listen = %config.listen, server_name = %config.server_name, "h3_server.start");
-    let _serve = AbortOnDropHandle::new(tokio::spawn(server.serve_owned(router).in_current_span()));
+    server.serve_owned(router).await?;
 
     Ok(())
 }
