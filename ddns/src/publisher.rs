@@ -1,7 +1,8 @@
 use std::{
-    any::Any,
+    any::{Any, TypeId},
     collections::{HashMap, HashSet},
     io,
+    net::SocketAddr,
     sync::Arc,
     time::Duration,
 };
@@ -15,7 +16,9 @@ use dhttp_identity::identity::LocalAgent;
 use dquic::qbase::net::Family;
 use dquic::{
     qbase::net::addr::EndpointAddr,
+    qinterface::component::location::AddressEvent,
     qresolve::{Publish, Resolve},
+    qtraversal::nat::client::ClientLocationData,
 };
 use snafu::{ResultExt, Snafu};
 
@@ -183,11 +186,14 @@ impl Publisher {
             tokio::select! {
                 _ = &mut interval => return,
                 event = locations.recv() => {
-                    let Some((bind_uri, _event)) = event else {
+                    let Some((bind_uri, event)) = event else {
                         interval.await;
                         return;
                     };
                     if !self.bind_patterns.iter().any(|pattern| pattern.matches(&bind_uri)) {
+                        continue;
+                    }
+                    if !Self::location_event_requires_publish(&event) {
                         continue;
                     }
 
@@ -208,12 +214,15 @@ impl Publisher {
         &self,
         locations: &mut h3x::dquic::qinterface::component::location::Observer,
     ) {
-        while let Ok((bind_uri, _event)) = locations.try_recv() {
-            if self
+        while let Ok((bind_uri, event)) = locations.try_recv() {
+            if !self
                 .bind_patterns
                 .iter()
                 .any(|pattern| pattern.matches(&bind_uri))
             {
+                continue;
+            }
+            if Self::location_event_requires_publish(&event) {
                 self.clear_publish_state();
             }
         }
@@ -225,6 +234,28 @@ impl Publisher {
     ) {
         tokio::time::sleep(PUBLISH_CHANGE_DEBOUNCE).await;
         self.drain_location_events(locations);
+    }
+
+    fn location_event_requires_publish(event: &AddressEvent) -> bool {
+        match event {
+            AddressEvent::Upsert(data) => {
+                // `Locations` also carries transient STUN failures. Those do
+                // not add a publishable endpoint; treating them as publish
+                // triggers creates a retry loop while the node is offline.
+                if let Some(bound_addr) = data.downcast_ref::<io::Result<SocketAddr>>() {
+                    return bound_addr.is_ok();
+                }
+                if let Some(stun_addr) = data.downcast_ref::<ClientLocationData>() {
+                    return stun_addr.is_ok();
+                }
+                false
+            }
+            AddressEvent::Remove(type_id) => {
+                *type_id == TypeId::of::<io::Result<SocketAddr>>()
+                    || *type_id == TypeId::of::<ClientLocationData>()
+            }
+            AddressEvent::Closed => true,
+        }
     }
 
     async fn publish_to_resolver(
@@ -560,11 +591,11 @@ mod tests {
                 let mut buf = [0_u8; 1024];
                 let _ = stream.read(&mut buf).await;
                 server_count.fetch_add(1, Ordering::SeqCst);
-                server_network.locations().upsert(
+                server_network.locations().upsert::<ClientLocationData>(
                     server_bind_uri.clone(),
-                    Arc::new(Ok::<std::net::SocketAddr, io::Error>(
-                        "127.0.0.1:0".parse().expect("valid socket addr"),
-                    )),
+                    Arc::new(Err(dquic::qtraversal::nat::client::ArcIoError::from(
+                        io::Error::from(io::ErrorKind::NetworkUnreachable),
+                    ))),
                 );
                 let _ = stream
                     .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
