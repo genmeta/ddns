@@ -7,7 +7,7 @@ use x509_parser::prelude::FromDer;
 pub enum SignError {
     #[snafu(display("unsupported signature scheme {scheme:?}"))]
     UnsupportedScheme { scheme: SignatureScheme },
-    #[snafu(display("crypto error"))]
+    #[snafu(display("cryptographic operation failed"))]
     Crypto {
         #[snafu(source(false))]
         source: rustls::Error,
@@ -35,12 +35,11 @@ pub enum VerifyError {
     Io { source: std::io::Error },
 }
 
-pub(crate) fn sign(
+pub fn sign_with_key(
     key: &(impl SigningKey + ?Sized),
     scheme: SignatureScheme,
     data: &[u8],
 ) -> Result<Vec<u8>, SignError> {
-    // FIXME: same as load spki then sign with ring?
     let signer = key
         .choose_scheme(&[scheme])
         .ok_or(SignError::UnsupportedScheme { scheme })?;

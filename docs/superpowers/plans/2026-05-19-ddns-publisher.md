@@ -15,12 +15,12 @@
 **Files:**
 - Modify: `dhttp/identity/src/identity.rs`
 - Modify: `dhttp/identity/src/lib.rs`
-- Modify: `h3x/src/quic/agent.rs`
-- Modify: h3x call sites importing `h3x::quic::agent::{LocalAgent, RemoteAgent, SignError, VerifyError}`
+- Delete: `h3x/src/quic/agent.rs`
+- Modify: h3x call sites to import `dhttp_identity::identity::{LocalAgent, RemoteAgent, SignError, VerifyError}` directly
 
 - [ ] Add tests in `dhttp/identity/src/identity.rs` for `Identity` implementing async `LocalAgent` and sync-default `RemoteAgent` verification behavior.
 - [ ] Move `LocalAgent`, `RemoteAgent`, `extract_public_key`, `verify_signature`, and `sign_with_key` equivalents into `dhttp-identity` while preserving async signatures.
-- [ ] Re-export the identity agent API from `h3x::quic::agent` to minimize h3x call-site churn.
+- [ ] Delete `h3x::quic::agent`; downstream crates import the identity agent API from `dhttp_identity::identity` directly.
 - [ ] Run `cargo test -p dhttp-identity` and `cargo test --features dquic` in h3x.
 
 ### Task 2: Replace ddns-core SigningKey signing with LocalAgent signing
@@ -32,7 +32,7 @@
 
 - [ ] Add a failing async test for signing an `EndpointAddr` through a fake `LocalAgent` that rejects the first preferred compatible scheme and accepts the next one.
 - [ ] Add `EndpointAddr::sign_with_agent(&mut self, agent: &(impl LocalAgent + ?Sized)) -> impl Future<Output = Result<(), SignEndpointError>>`.
-- [ ] Delete old `EndpointAddr::sign_with(SigningKey, SignatureScheme)` and update tests/examples to use the async agent method.
+- [ ] Keep old low-level `ddns_core::parser::sigin::sign_with_key(SigningKey, SignatureScheme, data)` helper, delete only the `EndpointAddr::sign_with(SigningKey, SignatureScheme)` convenience method, and update tests/examples to use the async agent method where endpoint records are signed.
 - [ ] Keep verification logic unchanged except for imports.
 - [ ] Run `cargo test -p ddns-core`.
 

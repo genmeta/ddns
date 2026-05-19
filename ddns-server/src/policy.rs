@@ -1,5 +1,5 @@
 use ddns::parser::{packet::be_packet, record::RData};
-use h3x::quic::agent::RemoteAgent;
+use dhttp_identity::identity::RemoteAgent;
 use tracing::warn;
 
 use crate::error::{AppError, normalize_host};
