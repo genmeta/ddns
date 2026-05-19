@@ -156,7 +156,9 @@ impl Publisher {
             let trigger = self.wait_next_publish_trigger(&mut locations).await;
             let published = self.publish_attempt().await;
             self.settle_publish_events(&mut locations).await;
-            if matches!(trigger, PublishTrigger::Location) && !published {
+            if !published
+                && (matches!(trigger, PublishTrigger::Location) || self.has_public_endpoints())
+            {
                 self.retry_changed_publish(&mut locations).await;
             }
         }
@@ -435,6 +437,10 @@ impl Publisher {
             }
         }
         endpoints.into_iter().collect()
+    }
+
+    fn has_public_endpoints(&self) -> bool {
+        !self.public_endpoints().is_empty()
     }
 
     #[cfg(feature = "mdns-resolver")]
