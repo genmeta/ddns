@@ -182,6 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ocsp: Arc::new(None),
     });
     let server_config = ServerQuicConfig {
+        alpns: vec![b"h3".to_vec()],
         client_cert_verifier: verifier,
         ..Default::default()
     };
