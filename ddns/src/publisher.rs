@@ -26,6 +26,7 @@ pub const DEFAULT_PUBLISH_INTERVAL: Duration = Duration::from_secs(20);
 /// longer exist. Timing out the attempt keeps consecutive publishes
 /// independent: the next interval observes the current bindings again.
 pub const DEFAULT_PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
+const PUBLISH_CHANGE_DEBOUNCE: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Snafu)]
 #[snafu(module(create_publisher_error))]
@@ -137,26 +138,82 @@ impl Publisher {
     }
 
     pub async fn run(&self) -> ! {
+        let mut locations = self.network.locations().subscribe();
+        self.publish_attempt().await;
+        tokio::time::sleep(PUBLISH_CHANGE_DEBOUNCE).await;
+        self.drain_location_events(&mut locations);
+
         loop {
-            match tokio::time::timeout(self.publish_timeout, self.publish_once()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    let report = snafu::Report::from_error(&error);
-                    tracing::warn!(error = %report, "dns publish failed");
-                }
-                Err(_elapsed) => {
-                    // Dropping a timed-out publish future does not let the H3
-                    // resolver observe a request error. Reset resolver-owned
-                    // connection state so the next interval reconnects from
-                    // the current network bindings.
+            self.wait_next_publish_trigger(&mut locations).await;
+            self.publish_attempt().await;
+        }
+    }
+
+    async fn publish_attempt(&self) {
+        match tokio::time::timeout(self.publish_timeout, self.publish_once()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                let report = snafu::Report::from_error(&error);
+                tracing::warn!(error = %report, "dns publish failed");
+            }
+            Err(_elapsed) => {
+                // Dropping a timed-out publish future does not let the H3
+                // resolver observe a request error. Reset resolver-owned
+                // connection state so the next interval reconnects from
+                // the current network bindings.
+                self.clear_publish_state();
+                tracing::warn!(
+                    timeout_ms = self.publish_timeout.as_millis(),
+                    "dns publish timed out"
+                );
+            }
+        }
+    }
+
+    async fn wait_next_publish_trigger(
+        &self,
+        locations: &mut h3x::dquic::qinterface::component::location::Observer,
+    ) {
+        let interval = tokio::time::sleep(self.interval);
+        tokio::pin!(interval);
+
+        loop {
+            tokio::select! {
+                _ = &mut interval => return,
+                event = locations.recv() => {
+                    let Some((bind_uri, _event)) = event else {
+                        interval.await;
+                        return;
+                    };
+                    if !self.bind_patterns.iter().any(|pattern| pattern.matches(&bind_uri)) {
+                        continue;
+                    }
+
+                    // A local-address change invalidates cached H3 DNS
+                    // connections even if no request has failed yet. Clear
+                    // resolver-owned connection state before publishing from
+                    // the new binding set.
                     self.clear_publish_state();
-                    tracing::warn!(
-                        timeout_ms = self.publish_timeout.as_millis(),
-                        "dns publish timed out"
-                    );
+                    tokio::time::sleep(PUBLISH_CHANGE_DEBOUNCE).await;
+                    self.drain_location_events(locations);
+                    return;
                 }
             }
-            tokio::time::sleep(self.interval).await;
+        }
+    }
+
+    fn drain_location_events(
+        &self,
+        locations: &mut h3x::dquic::qinterface::component::location::Observer,
+    ) {
+        while let Ok((bind_uri, _event)) = locations.try_recv() {
+            if self
+                .bind_patterns
+                .iter()
+                .any(|pattern| pattern.matches(&bind_uri))
+            {
+                self.clear_publish_state();
+            }
         }
     }
 
