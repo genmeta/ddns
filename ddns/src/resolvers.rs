@@ -262,8 +262,14 @@ impl Resolve for Resolvers {
 mod tests {
     use std::str::FromStr;
 
+    #[cfg(any(
+        feature = "h3x-resolver",
+        feature = "http-resolver",
+        feature = "mdns-resolver"
+    ))]
+    use super::Resolvers;
     #[cfg(feature = "mdns-resolver")]
-    use super::{DHTTP_MDNS_SERVICE, MdnsResolvers, Resolvers};
+    use super::{DHTTP_MDNS_SERVICE, MdnsResolvers};
     use super::{DnsScheme, resolvable_name};
 
     #[test]
