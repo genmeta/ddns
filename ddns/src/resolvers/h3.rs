@@ -113,6 +113,10 @@ where
         Error::H3Request { source }
     }
 
+    pub fn clear_pool(&self) {
+        self.endpoint.clear_pool();
+    }
+
     pub async fn publish_endpoints(
         &self,
         name: &str,

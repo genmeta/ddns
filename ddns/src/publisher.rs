@@ -145,6 +145,11 @@ impl Publisher {
                     tracing::warn!(error = %report, "dns publish failed");
                 }
                 Err(_elapsed) => {
+                    // Dropping a timed-out publish future does not let the H3
+                    // resolver observe a request error. Reset resolver-owned
+                    // connection state so the next interval reconnects from
+                    // the current network bindings.
+                    self.clear_publish_state();
                     tracing::warn!(
                         timeout_ms = self.publish_timeout.as_millis(),
                         "dns publish timed out"
@@ -174,6 +179,27 @@ impl Publisher {
 
         self.publish_single_resolver(resolver, public_endpoints)
             .await
+    }
+
+    fn clear_publish_state(&self) {
+        Self::clear_resolver_publish_state(self.resolver.as_ref());
+    }
+
+    fn clear_resolver_publish_state(resolver: &(dyn Resolve + Send + Sync)) {
+        let any: &dyn Any = resolver;
+
+        if let Some(resolvers) = any.downcast_ref::<Resolvers>() {
+            for resolver in resolvers.iter() {
+                Self::clear_resolver_publish_state(resolver.as_ref());
+            }
+        }
+
+        #[cfg(feature = "h3x-resolver")]
+        if let Some(h3) =
+            any.downcast_ref::<crate::resolvers::H3Resolver<h3x::dquic::QuicEndpoint>>()
+        {
+            h3.clear_pool();
+        }
     }
 
     async fn publish_single_resolver(
