@@ -25,6 +25,7 @@ url = { version = "2", optional = true }
 [features]
 default = []
 h3x-resolver = ["dep:h3x", "dep:http", "dep:url"]
+mdns-resolver = ["dep:h3x", "gmdns/h3x-network"]
 http-resolver = ["dep:reqwest"]
 
 [dev-dependencies]

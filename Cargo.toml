@@ -8,3 +8,7 @@ edition = "2024"
 
 [patch."https://github.com/genmeta/h3x.git"]
 h3x = { path = "../h3x" }
+
+[patch."ssh://git@github.com/genmeta/ddns.git"]
+ddns-core = { path = "ddns-core" }
+gmdns = { path = "gmdns" }

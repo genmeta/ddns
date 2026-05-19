@@ -77,8 +77,6 @@ impl Mdns {
     }
 
     pub fn reinit(&self, iface: &(impl IO + ?Sized)) {
-        // Extract interface info
-
         let binding = iface.bind_uri();
         let Some((_family, device, _port)) = binding.as_iface_bind_uri() else {
             return;
@@ -86,11 +84,12 @@ impl Mdns {
         let Ok(bound_addr) = iface.bound_addr() else {
             return;
         };
-        let ip = bound_addr.ip();
 
+        self.reinit_on(device, bound_addr.ip());
+    }
+
+    pub fn reinit_on(&self, device: &str, ip: IpAddr) {
         let mut inner = self.inner.lock().expect("Mdns inner lock poisoned");
-
-        // Skip if already using same device/IP with active protocol
 
         if inner.proto.bound_nic() == device && inner.proto.bound_ip() == ip {
             return;
@@ -113,7 +112,6 @@ impl Mdns {
             self.hosts.clone(),
             self.service_name.clone(),
         );
-        // Update state with new protocol and tasks
     }
 
     fn spawn_tasks(

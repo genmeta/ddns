@@ -9,8 +9,13 @@ ddns-core = { path = "../ddns-core" }
 dquic = { git = "ssh://git@github.com/genmeta/dquic.git", branch = "feat/v0.5.1" }
 flume = "0.12"
 futures = "0.3"
+h3x = { git = "https://github.com/genmeta/h3x.git", branch = "endpoint", default-features = false, features = ["dquic"], optional = true }
 libc = "0.2"
 snafu = "0.8"
 socket2 = { version = "0.5.8", features = ["all"] }
 tokio = { version = "1", features = ["time", "macros", "net", "sync", "rt", "rt-multi-thread"] }
 tracing = "0.1"
+
+[features]
+default = []
+h3x-network = ["dep:h3x"]

@@ -79,6 +79,13 @@ where
         base_url: impl AsRef<str>,
         client: H3Endpoint<C, C::Connection>,
     ) -> io::Result<Self> {
+        Self::from_endpoint(base_url, Arc::new(client))
+    }
+
+    pub fn from_endpoint(
+        base_url: impl AsRef<str>,
+        endpoint: Arc<H3Endpoint<C, C::Connection>>,
+    ) -> io::Result<Self> {
         let base_url = Url::parse(base_url.as_ref())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         base_url.host_str().ok_or_else(|| {
@@ -89,7 +96,7 @@ where
         })?;
 
         Ok(Self {
-            endpoint: Arc::new(client),
+            endpoint,
             base_url,
             cached_records: DashMap::new(),
             negative_cache: DashMap::new(),

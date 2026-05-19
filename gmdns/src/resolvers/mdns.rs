@@ -1,22 +1,22 @@
-use std::{
-    fmt, io,
-    net::{IpAddr, SocketAddr},
-    sync::Arc,
-};
+use std::{fmt, io, net::IpAddr};
+#[cfg(feature = "h3x-network")]
+use std::{net::SocketAddr, sync::Arc};
 
-use dashmap::DashMap;
-use ddns_core::parser::{packet::Packet, record::RData};
+#[cfg(feature = "h3x-network")]
+use ddns_core::parser::packet::Packet;
+use ddns_core::parser::record::RData;
+#[cfg(feature = "h3x-network")]
+use dquic::qresolve::RecordStream;
 use dquic::{
     qbase::net::{Family, addr::EndpointAddr as DquicEndpointAddr},
-    qinterface::{BindInterface, WeakInterface, bind_uri::BindUri, io::IO},
-    qresolve::{Publish, PublishFuture, RecordStream, Resolve, ResolveFuture, Source},
+    qresolve::{Publish, PublishFuture, Resolve, ResolveFuture, Source},
 };
-use futures::{
-    FutureExt, Stream, StreamExt, TryFutureExt, future,
-    stream::{self, FuturesUnordered},
-};
+use futures::{FutureExt, StreamExt, TryFutureExt, future, stream};
+#[cfg(feature = "h3x-network")]
+use futures::{Stream, stream::FuturesUnordered};
 
 pub use crate::mdns::Mdns as MdnsResolver;
+#[cfg(feature = "h3x-network")]
 use crate::protocol::MdnsProtocol;
 
 impl MdnsResolver {
@@ -39,20 +39,12 @@ impl fmt::Display for MdnsResolver {
 
 impl Publish for MdnsResolver {
     fn publish<'a>(&'a self, name: &'a str, packet: &'a [u8]) -> PublishFuture<'a> {
-        use ddns_core::parser::packet::be_packet;
-        let endpoints = be_packet(packet)
-            .map(|(_, pkt)| {
-                pkt.answers
-                    .iter()
-                    .filter_map(|rr| match rr.data() {
-                        RData::E(ep) => Some(ep.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let endpoints = match endpoints_from_packet(packet) {
+            Ok(endpoints) => endpoints,
+            Err(error) => return future::ready(Err(error)).boxed(),
+        };
         self.insert_host(name.to_string(), endpoints);
-        Box::pin(future::ready(Ok(())))
+        future::ready(Ok(())).boxed()
     }
 }
 
@@ -71,43 +63,161 @@ impl Resolve for MdnsResolver {
     }
 }
 
-#[derive(Default, Clone, Debug)]
-pub struct MdnsResolvers {
-    ifaces: DashMap<BindUri, WeakInterface>,
+fn endpoints_from_packet(packet: &[u8]) -> io::Result<Vec<ddns_core::MdnsEndpoint>> {
+    use ddns_core::parser::packet::be_packet;
+
+    be_packet(packet)
+        .map(|(_, pkt)| {
+            pkt.answers
+                .iter()
+                .filter_map(|rr| match rr.data() {
+                    RData::E(ep) => Some(ep.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
 }
 
-impl fmt::Display for MdnsResolvers {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "MDNS Resolvers")
-    }
+#[cfg(feature = "h3x-network")]
+pub struct MdnsBindDriver {
+    iface_manager: Arc<h3x::dquic::net::InterfaceManager>,
+    null_io_factory: Arc<h3x::dquic::NullIoFactory>,
+    service_name: Arc<str>,
 }
 
-impl MdnsResolvers {
-    pub fn new() -> Self {
-        Self::default()
+#[cfg(feature = "h3x-network")]
+impl MdnsBindDriver {
+    pub fn new(service_name: impl Into<Arc<str>>) -> Self {
+        Self {
+            iface_manager: Arc::new(h3x::dquic::net::InterfaceManager::new()),
+            null_io_factory: Arc::new(h3x::dquic::NullIoFactory),
+            service_name: service_name.into(),
+        }
     }
 
-    pub fn insert_iface(&self, iface: BindInterface) {
-        let Some(iface) = iface.with_components(|component, iface| {
-            component.exist::<MdnsResolver>().then(|| iface.downgrade())
-        }) else {
+    fn install_or_rebind_mdns(
+        &self,
+        network: &h3x::dquic::Network,
+        bind_iface: &h3x::dquic::net::BindInterface,
+    ) {
+        let bind_uri = bind_iface.bind_uri();
+        let Some((family, device, _port)) = bind_uri.as_iface_bind_uri() else {
+            tracing::debug!(%bind_uri, "skipping mdns binding for non-interface bind uri");
             return;
         };
-        self.ifaces.insert(iface.bind_uri(), iface);
+        let Some(ip) = network.resolve_device_addr(device, family) else {
+            tracing::debug!(%bind_uri, "skipping mdns binding without local interface address");
+            return;
+        };
+
+        bind_iface.with_components_mut(|components, _iface| {
+            match components.try_init_with(|| crate::Mdns::new(&self.service_name, ip, device)) {
+                Ok(mdns) => mdns.reinit_on(device, ip),
+                Err(error) => {
+                    let report = snafu::Report::from_error(&error);
+                    tracing::debug!(error = %report, %bind_uri, "failed to initialize mdns binding");
+                }
+            }
+        });
+    }
+}
+
+#[cfg(feature = "h3x-network")]
+impl h3x::dquic::BindDriver for MdnsBindDriver {
+    fn bind<'a>(
+        &'a self,
+        network: &'a h3x::dquic::Network,
+        uri: h3x::dquic::net::BindUri,
+    ) -> futures::future::BoxFuture<'a, h3x::dquic::net::BindInterface> {
+        async move {
+            let iface = self
+                .iface_manager
+                .bind(uri, self.null_io_factory.clone())
+                .await;
+            self.install_or_rebind_mdns(network, &iface);
+            iface
+        }
+        .boxed()
+    }
+
+    fn rebind<'a>(
+        &'a self,
+        network: &'a h3x::dquic::Network,
+        iface: &'a h3x::dquic::net::BindInterface,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        async move {
+            self.install_or_rebind_mdns(network, iface);
+        }
+        .boxed()
+    }
+}
+
+#[cfg(feature = "h3x-network")]
+pub struct MdnsResolvers {
+    network: Arc<h3x::dquic::Network>,
+    driver: Arc<MdnsBindDriver>,
+    patterns: Arc<Vec<h3x::dquic::binds::BindPattern>>,
+    _handles: Vec<h3x::dquic::BindHandle>,
+}
+
+#[cfg(feature = "h3x-network")]
+impl fmt::Debug for MdnsResolvers {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MdnsResolvers")
+            .field("patterns", &self.patterns)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "h3x-network")]
+impl fmt::Display for MdnsResolvers {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("mDNS resolvers")
+    }
+}
+
+#[cfg(feature = "h3x-network")]
+impl MdnsResolvers {
+    pub async fn bind(
+        network: Arc<h3x::dquic::Network>,
+        patterns: Arc<Vec<h3x::dquic::binds::BindPattern>>,
+        service_name: impl Into<Arc<str>>,
+    ) -> Self {
+        let driver = Arc::new(MdnsBindDriver::new(service_name));
+        let mut handles = Vec::with_capacity(patterns.len());
+        for pattern in patterns.iter() {
+            handles.push(network.bind_with(driver.clone(), pattern.clone()).await);
+        }
+
+        Self {
+            network,
+            driver,
+            patterns,
+            _handles: handles,
+        }
+    }
+
+    pub fn bound_interfaces(
+        &self,
+        pattern: &h3x::dquic::binds::BindPattern,
+    ) -> Option<Vec<h3x::dquic::net::BindInterface>> {
+        self.network.get_interfaces_with(&self.driver, pattern)
     }
 
     fn for_each_resolver(&self, mut f: impl FnMut(&MdnsResolver)) {
-        self.ifaces.retain(|_, iface| {
-            iface
-                .upgrade()
-                .ok()
-                .and_then(|iface| {
-                    iface.bind_interface().with_components(|components, _| {
-                        components.get::<MdnsResolver>().map(&mut f)
-                    })
-                })
-                .is_some()
-        });
+        for pattern in self.patterns.iter() {
+            let Some(ifaces) = self.bound_interfaces(pattern) else {
+                continue;
+            };
+            for iface in ifaces {
+                iface.with_components(|components, _| {
+                    if let Some(mdns) = components.get::<MdnsResolver>() {
+                        f(mdns);
+                    }
+                });
+            }
+        }
     }
 
     pub async fn query(&self, name: &str) -> io::Result<RecordStream> {
@@ -137,19 +247,7 @@ impl MdnsResolvers {
             .boxed())
     }
 
-    pub fn merge(&self, other: &Self) {
-        other.ifaces.iter().for_each(|entry| {
-            self.ifaces
-                .entry(entry.key().clone())
-                .or_insert_with(|| entry.value().clone());
-        });
-    }
-
     /// Discover mDNS broadcasts from all active resolvers.
-    ///
-    /// Returns a stream of `(SocketAddr, Packet)` pairs by polling all
-    /// underlying protocols concurrently. Unlike per-resolver `discover()`,
-    /// this uses a single `Box::pin` allocation for the combined stream.
     pub fn discover(&self) -> impl Stream<Item = (SocketAddr, Packet)> + use<> {
         let mut protos = Vec::new();
         self.for_each_resolver(|resolver| {
@@ -176,10 +274,7 @@ impl MdnsResolvers {
                         pending.push(receive_one(proto));
                         return Poll::Ready(Some(item));
                     }
-                    Poll::Ready(Some(None)) => {
-                        // This resolver's protocol disconnected, skip it
-                        continue;
-                    }
+                    Poll::Ready(Some(None)) => continue,
                     Poll::Ready(None) => return Poll::Ready(None),
                     Poll::Pending => return Poll::Pending,
                 }
@@ -188,6 +283,23 @@ impl MdnsResolvers {
     }
 }
 
+#[cfg(feature = "h3x-network")]
+impl Publish for MdnsResolvers {
+    fn publish<'a>(&'a self, name: &'a str, packet: &'a [u8]) -> PublishFuture<'a> {
+        let endpoints = match endpoints_from_packet(packet) {
+            Ok(endpoints) => endpoints,
+            Err(error) => return future::ready(Err(error)).boxed(),
+        };
+
+        self.for_each_resolver(|resolver| {
+            resolver.insert_host(name.to_string(), endpoints.clone());
+        });
+
+        future::ready(Ok(())).boxed()
+    }
+}
+
+#[cfg(feature = "h3x-network")]
 impl Resolve for MdnsResolvers {
     fn lookup<'l>(&'l self, name: &'l str) -> ResolveFuture<'l> {
         self.query(name).boxed()

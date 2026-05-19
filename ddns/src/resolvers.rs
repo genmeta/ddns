@@ -33,7 +33,59 @@ pub(crate) fn resolvable_name(name: &str) -> Option<&str> {
     Some(host)
 }
 
-pub use gmdns::resolvers::{MdnsResolver, MdnsResolvers};
+/// Default DNS-over-H3 server for DHTTP endpoints.
+pub const DHTTP_H3_DNS_SERVER: &str = "https://dns.genmeta.net:4433";
+
+/// Default DNS-over-HTTP server for DHTTP endpoints.
+pub const DHTTP_HTTP_DNS_SERVER: &str = "https://dns.genmeta.net";
+
+/// mDNS service type used by DHTTP endpoints.
+pub const DHTTP_MDNS_SERVICE: &str = "_genmeta.local";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum DnsScheme {
+    Mdns,
+    Http,
+    H3,
+    System,
+}
+
+impl Display for DnsScheme {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Mdns => "mdns",
+            Self::Http => "http",
+            Self::H3 => "h3",
+            Self::System => "system",
+        })
+    }
+}
+
+#[derive(Debug, snafu::Snafu)]
+#[snafu(display("unsupported dns scheme {scheme}"))]
+pub struct ParseDnsSchemeError {
+    scheme: String,
+}
+
+impl std::str::FromStr for DnsScheme {
+    type Err = ParseDnsSchemeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "mdns" => Ok(Self::Mdns),
+            "http" => Ok(Self::Http),
+            "h3" => Ok(Self::H3),
+            "system" => Ok(Self::System),
+            scheme => Err(ParseDnsSchemeError {
+                scheme: scheme.to_owned(),
+            }),
+        }
+    }
+}
+
+pub use gmdns::resolvers::MdnsResolver;
+#[cfg(feature = "mdns-resolver")]
+pub use gmdns::resolvers::MdnsResolvers;
 #[cfg(feature = "h3x-resolver")]
 pub use h3::{H3Publisher, H3Resolver};
 #[cfg(feature = "http-resolver")]
@@ -83,7 +135,62 @@ impl fmt::Display for DnsErrors {
 
 impl Error for DnsErrors {}
 
+#[derive(Default)]
+pub struct ResolversBuilder {
+    resolvers: Resolvers,
+}
+
+impl ResolversBuilder {
+    #[cfg(feature = "mdns-resolver")]
+    pub async fn mdns(
+        mut self,
+        network: Arc<h3x::dquic::Network>,
+        patterns: Arc<Vec<h3x::dquic::binds::BindPattern>>,
+    ) -> Self {
+        let mdns = Arc::new(MdnsResolvers::bind(network, patterns, DHTTP_MDNS_SERVICE).await);
+        self.resolvers = self.resolvers.with(mdns);
+        self
+    }
+
+    #[cfg(feature = "h3x-resolver")]
+    pub fn h3<C>(
+        mut self,
+        endpoint: Arc<h3x::endpoint::H3Endpoint<C, C::Connection>>,
+    ) -> io::Result<Self>
+    where
+        C: h3x::quic::Connect + Send + Sync + 'static,
+        C::Error: Send + Sync + 'static,
+        C::Connection: Send + 'static,
+    {
+        let resolver = H3Resolver::from_endpoint(DHTTP_H3_DNS_SERVER, endpoint)?;
+        self.resolvers = self.resolvers.with(Arc::new(resolver));
+        Ok(self)
+    }
+
+    #[cfg(feature = "http-resolver")]
+    pub fn http(mut self) -> io::Result<Self> {
+        let resolver = HttpResolver::new(DHTTP_HTTP_DNS_SERVER)?;
+        self.resolvers = self.resolvers.with(Arc::new(resolver));
+        Ok(self)
+    }
+
+    pub fn system(mut self) -> Self {
+        self.resolvers = self
+            .resolvers
+            .with(Arc::new(dquic::qresolve::SystemResolver));
+        self
+    }
+
+    pub fn build(self) -> Resolvers {
+        self.resolvers
+    }
+}
+
 impl Resolvers {
+    pub fn builder() -> ResolversBuilder {
+        ResolversBuilder::default()
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -130,7 +237,11 @@ impl Resolve for Resolvers {
 
 #[cfg(test)]
 mod tests {
-    use super::resolvable_name;
+    use std::str::FromStr;
+
+    #[cfg(feature = "mdns-resolver")]
+    use super::{DHTTP_MDNS_SERVICE, MdnsResolvers, Resolvers};
+    use super::{DnsScheme, resolvable_name};
 
     #[test]
     fn resolvable_name_accepts_dns_name_with_numeric_port() {
@@ -144,5 +255,65 @@ mod tests {
     fn resolvable_name_rejects_ip_literals() {
         assert_eq!(resolvable_name("127.0.0.1:443"), None);
         assert_eq!(resolvable_name("[::1]:443"), None);
+    }
+
+    #[test]
+    fn dns_scheme_round_trips_supported_schemes_and_rejects_dht() {
+        let cases = [
+            ("mdns", DnsScheme::Mdns),
+            ("http", DnsScheme::Http),
+            ("h3", DnsScheme::H3),
+            ("system", DnsScheme::System),
+        ];
+
+        for (text, scheme) in cases {
+            assert_eq!(DnsScheme::from_str(text).expect("supported scheme"), scheme);
+            assert_eq!(scheme.to_string(), text);
+        }
+
+        assert!(DnsScheme::from_str("dht").is_err());
+    }
+
+    #[cfg(feature = "mdns-resolver")]
+    #[tokio::test]
+    async fn resolvers_builder_can_enable_mdns() {
+        use std::sync::Arc;
+
+        use h3x::dquic::{Network, binds::BindPattern};
+
+        let network = Network::builder().build();
+        let pattern = BindPattern::from_str("iface://v4.lo:0").expect("valid pattern");
+
+        let resolvers = Resolvers::builder()
+            .mdns(network, Arc::new(vec![pattern]))
+            .await
+            .build();
+
+        assert!(resolvers.to_string().contains("mDNS resolvers"));
+    }
+
+    #[cfg(feature = "mdns-resolver")]
+    #[tokio::test]
+    async fn mdns_resolvers_bind_installs_mdns_on_null_io_binding() {
+        use std::sync::Arc;
+
+        use dquic::qinterface::io::IO;
+        use h3x::dquic::{Network, binds::BindPattern};
+
+        let network = Network::builder().build();
+        let pattern = BindPattern::from_str("iface://v4.lo:0").expect("valid pattern");
+        let resolvers = MdnsResolvers::bind(
+            network.clone(),
+            Arc::new(vec![pattern.clone()]),
+            DHTTP_MDNS_SERVICE,
+        )
+        .await;
+
+        let ifaces = resolvers
+            .bound_interfaces(&pattern)
+            .expect("bound interfaces");
+        assert!(!ifaces.is_empty());
+        assert!(ifaces[0].borrow().bound_addr().is_err());
+        assert!(ifaces[0].with_components(|components, _| components.exist::<gmdns::Mdns>()));
     }
 }
