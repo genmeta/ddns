@@ -11,8 +11,10 @@ use ddns_core::{
     parser::record::endpoint::{EndpointAddr as DnsEndpointAddr, SignEndpointError},
 };
 use dhttp_identity::identity::LocalAgent;
+#[cfg(feature = "mdns-resolver")]
+use dquic::qbase::net::Family;
 use dquic::{
-    qbase::net::{Family, addr::EndpointAddr},
+    qbase::net::addr::EndpointAddr,
     qresolve::{Publish, Resolve},
 };
 use snafu::{ResultExt, Snafu};
@@ -140,12 +142,12 @@ impl Publisher {
     pub async fn run(&self) -> ! {
         let mut locations = self.network.locations().subscribe();
         self.publish_attempt().await;
-        tokio::time::sleep(PUBLISH_CHANGE_DEBOUNCE).await;
-        self.drain_location_events(&mut locations);
+        self.settle_publish_events(&mut locations).await;
 
         loop {
             self.wait_next_publish_trigger(&mut locations).await;
             self.publish_attempt().await;
+            self.settle_publish_events(&mut locations).await;
         }
     }
 
@@ -215,6 +217,14 @@ impl Publisher {
                 self.clear_publish_state();
             }
         }
+    }
+
+    async fn settle_publish_events(
+        &self,
+        locations: &mut h3x::dquic::qinterface::component::location::Observer,
+    ) {
+        tokio::time::sleep(PUBLISH_CHANGE_DEBOUNCE).await;
+        self.drain_location_events(locations);
     }
 
     async fn publish_to_resolver(
@@ -345,6 +355,7 @@ impl Publisher {
         endpoints.into_iter().collect()
     }
 
+    #[cfg(feature = "mdns-resolver")]
     fn local_endpoints_for(&self, device: &str, family: Family) -> Vec<EndpointAddr> {
         let mut endpoints = HashSet::new();
         for pattern in self.bind_patterns.iter() {
@@ -387,6 +398,7 @@ fn endpoint_from_iface(iface: &h3x::dquic::net::BindInterface) -> Option<Endpoin
     })
 }
 
+#[cfg(feature = "mdns-resolver")]
 fn local_endpoint_from_iface(
     iface: &h3x::dquic::net::BindInterface,
     family: Family,
@@ -405,11 +417,19 @@ fn local_endpoint_from_iface(
 
 #[cfg(test)]
 mod tests {
-    use std::{fmt, sync::Arc};
+    use std::{
+        fmt,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
     use dquic::qresolve::{ResolveFuture, Source};
     use futures::{FutureExt, StreamExt, future::BoxFuture, stream};
     use rustls::{SignatureAlgorithm, SignatureScheme, pki_types::CertificateDer};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
 
@@ -507,5 +527,90 @@ mod tests {
         assert!(!endpoint.is_main());
         assert!(endpoint.is_clustered());
         assert!(endpoint.is_signed());
+    }
+
+    #[cfg(feature = "http-resolver")]
+    #[tokio::test]
+    async fn run_drains_events_generated_during_publish_attempt() {
+        async fn wait_for_count(count: &AtomicUsize, target: usize) {
+            loop {
+                if count.load(Ordering::SeqCst) >= target {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+
+        let network = h3x::dquic::Network::builder().build();
+        let bind_uri: h3x::dquic::net::BindUri =
+            "inet://127.0.0.1:0".parse().expect("valid bind uri");
+        let publish_count = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test http server");
+        let port = listener.local_addr().expect("local addr").port();
+        let server_network = network.clone();
+        let server_bind_uri = bind_uri.clone();
+        let server_count = publish_count.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _peer)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = [0_u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                server_count.fetch_add(1, Ordering::SeqCst);
+                server_network.locations().upsert(
+                    server_bind_uri.clone(),
+                    Arc::new(Ok::<std::net::SocketAddr, io::Error>(
+                        "127.0.0.1:0".parse().expect("valid socket addr"),
+                    )),
+                );
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+
+        let resolver = Arc::new(
+            crate::resolvers::HttpResolver::new(format!("http://127.0.0.1:{port}/"))
+                .expect("valid http resolver"),
+        );
+        let publisher = Publisher::new(
+            Arc::new(TestAgent),
+            network.clone(),
+            resolver,
+            Arc::new(vec![
+                "inet://127.0.0.1:0".parse().expect("valid bind pattern"),
+            ]),
+        );
+        let publisher = tokio::spawn(async move {
+            publisher.run().await;
+        });
+
+        wait_for_count(&publish_count, 1).await;
+        tokio::time::sleep(PUBLISH_CHANGE_DEBOUNCE + Duration::from_millis(100)).await;
+
+        network.locations().upsert(
+            bind_uri,
+            Arc::new(Ok::<std::net::SocketAddr, io::Error>(
+                "127.0.0.1:0".parse().expect("valid socket addr"),
+            )),
+        );
+        wait_for_count(&publish_count, 2).await;
+
+        let third_publish = tokio::time::timeout(
+            PUBLISH_CHANGE_DEBOUNCE + Duration::from_millis(500),
+            wait_for_count(&publish_count, 3),
+        )
+        .await;
+
+        publisher.abort();
+        server.abort();
+
+        assert!(
+            third_publish.is_err(),
+            "publish-generated location events must not trigger another immediate publish"
+        );
     }
 }
