@@ -6,7 +6,8 @@ pub use ddns_core::{MdnsEndpoint, MdnsPacket, parser, sign_endponit_address, wir
 pub use gmdns::{Mdns, MdnsResolver, mdns};
 #[cfg(any(feature = "h3x-resolver", feature = "mdns-resolver"))]
 pub use publisher::{
-    CreatePublisherError, DEFAULT_PUBLISH_INTERVAL, PublishOnceError, PublishOptions, Publisher,
+    CreatePublisherError, DEFAULT_PUBLISH_INTERVAL, DEFAULT_PUBLISH_TIMEOUT, PublishOnceError,
+    PublishOptions, Publisher,
 };
 #[cfg(feature = "http-resolver")]
 pub use resolvers::HttpResolver;

@@ -20,6 +20,12 @@ use snafu::{ResultExt, Snafu};
 use crate::resolvers::Resolvers;
 
 pub const DEFAULT_PUBLISH_INTERVAL: Duration = Duration::from_secs(20);
+/// Upper bound for a single publish attempt in the background loop.
+///
+/// Network changes can leave an in-flight H3 publish waiting on paths that no
+/// longer exist. Timing out the attempt keeps consecutive publishes
+/// independent: the next interval observes the current bindings again.
+pub const DEFAULT_PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Snafu)]
 #[snafu(module(create_publisher_error))]
@@ -60,6 +66,7 @@ pub struct Publisher {
     resolver: Arc<dyn Resolve + Send + Sync>,
     bind_patterns: Arc<Vec<h3x::dquic::binds::BindPattern>>,
     interval: Duration,
+    publish_timeout: Duration,
     options: PublishOptions,
 }
 
@@ -69,6 +76,7 @@ impl std::fmt::Debug for Publisher {
             .field("identity", &self.identity.name())
             .field("bind_patterns", &self.bind_patterns)
             .field("interval", &self.interval)
+            .field("publish_timeout", &self.publish_timeout)
             .field("options", &self.options)
             .finish_non_exhaustive()
     }
@@ -87,6 +95,7 @@ impl Publisher {
             resolver,
             bind_patterns,
             interval: DEFAULT_PUBLISH_INTERVAL,
+            publish_timeout: DEFAULT_PUBLISH_TIMEOUT,
             options: PublishOptions::default(),
         }
     }
@@ -102,6 +111,15 @@ impl Publisher {
 
     pub fn interval(&self) -> Duration {
         self.interval
+    }
+
+    pub fn publish_timeout(&self) -> Duration {
+        self.publish_timeout
+    }
+
+    pub fn with_publish_timeout(mut self, timeout: Duration) -> Self {
+        self.publish_timeout = timeout;
+        self
     }
 
     pub async fn publish_once(&self) -> Result<(), PublishOnceError> {
@@ -120,9 +138,18 @@ impl Publisher {
 
     pub async fn run(&self) -> ! {
         loop {
-            if let Err(error) = self.publish_once().await {
-                let report = snafu::Report::from_error(&error);
-                tracing::warn!(error = %report, "dns publish failed");
+            match tokio::time::timeout(self.publish_timeout, self.publish_once()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    let report = snafu::Report::from_error(&error);
+                    tracing::warn!(error = %report, "dns publish failed");
+                }
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        timeout_ms = self.publish_timeout.as_millis(),
+                        "dns publish timed out"
+                    );
+                }
             }
             tokio::time::sleep(self.interval).await;
         }
@@ -359,6 +386,21 @@ mod tests {
 
         let error = publisher.publish_once().await.unwrap_err();
         assert!(matches!(error, PublishOnceError::NoPublisherResolver));
+    }
+
+    #[tokio::test]
+    async fn publisher_timeout_is_configurable() {
+        let publisher = Publisher::new(
+            Arc::new(TestAgent),
+            h3x::dquic::Network::builder().build(),
+            Arc::new(DisplayOnlyResolver),
+            Arc::new(Vec::new()),
+        );
+        assert_eq!(publisher.publish_timeout(), DEFAULT_PUBLISH_TIMEOUT);
+
+        let timeout = Duration::from_secs(3);
+        let publisher = publisher.with_publish_timeout(timeout);
+        assert_eq!(publisher.publish_timeout(), timeout);
     }
 
     #[tokio::test]
