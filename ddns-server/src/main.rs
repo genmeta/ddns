@@ -30,6 +30,17 @@ use crate::{
     storage::{AppState, MemoryStorage, SeedRecords, Storage},
 };
 
+fn bind_patterns_for_listen(listen: SocketAddr) -> Vec<BindPattern> {
+    let bind_addr = match listen {
+        SocketAddr::V4(addr) if addr.ip().is_unspecified() => {
+            SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), addr.port())
+        }
+        addr => addr,
+    };
+
+    vec![BindPattern::from_str(&format!("inet://{bind_addr}")).expect("valid bind pattern")]
+}
+
 // ---------------------------------------------------------------------------
 // TLS helpers
 // ---------------------------------------------------------------------------
@@ -190,10 +201,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .network(Network::builder().build())
         .identity(identity)
         .server(server_config)
-        .bind(Arc::new(vec![
-            BindPattern::from_str(&format!("inet://{}", config.listen))
-                .expect("valid bind pattern"),
-        ]))
+        .bind(Arc::new(bind_patterns_for_listen(config.listen)))
         .build()
         .await;
     let server = Arc::new(H3Endpoint::new(quic));
@@ -201,4 +209,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     server.serve_owned(router).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+
+    use super::*;
+
+    #[test]
+    fn unspecified_ipv4_listen_uses_dual_stack_wildcard() {
+        let listen: SocketAddr = "0.0.0.0:4433".parse().unwrap();
+        let patterns = bind_patterns_for_listen(listen);
+
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].to_string(), "inet://[::]:4433");
+    }
 }
