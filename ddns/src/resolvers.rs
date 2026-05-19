@@ -154,7 +154,7 @@ impl ResolversBuilder {
 
     #[cfg(feature = "h3x-resolver")]
     pub fn h3<C>(
-        mut self,
+        self,
         endpoint: Arc<h3x::endpoint::H3Endpoint<C, C::Connection>>,
     ) -> io::Result<Self>
     where
@@ -162,14 +162,33 @@ impl ResolversBuilder {
         C::Error: Send + Sync + 'static,
         C::Connection: Send + 'static,
     {
-        let resolver = H3Resolver::from_endpoint(DHTTP_H3_DNS_SERVER, endpoint)?;
+        self.h3_with_base_url(DHTTP_H3_DNS_SERVER, endpoint)
+    }
+
+    #[cfg(feature = "h3x-resolver")]
+    pub fn h3_with_base_url<C>(
+        mut self,
+        base_url: impl AsRef<str>,
+        endpoint: Arc<h3x::endpoint::H3Endpoint<C, C::Connection>>,
+    ) -> io::Result<Self>
+    where
+        C: h3x::quic::Connect + Send + Sync + 'static,
+        C::Error: Send + Sync + 'static,
+        C::Connection: Send + 'static,
+    {
+        let resolver = H3Resolver::from_endpoint(base_url, endpoint)?;
         self.resolvers = self.resolvers.with(Arc::new(resolver));
         Ok(self)
     }
 
     #[cfg(feature = "http-resolver")]
-    pub fn http(mut self) -> io::Result<Self> {
-        let resolver = HttpResolver::new(DHTTP_HTTP_DNS_SERVER)?;
+    pub fn http(self) -> io::Result<Self> {
+        self.http_with_base_url(DHTTP_HTTP_DNS_SERVER)
+    }
+
+    #[cfg(feature = "http-resolver")]
+    pub fn http_with_base_url(mut self, base_url: impl AsRef<str>) -> io::Result<Self> {
+        let resolver = HttpResolver::new(base_url.as_ref())?;
         self.resolvers = self.resolvers.with(Arc::new(resolver));
         Ok(self)
     }
@@ -294,6 +313,34 @@ mod tests {
             .build();
 
         assert!(resolvers.to_string().contains("mDNS resolvers"));
+    }
+
+    #[cfg(feature = "h3x-resolver")]
+    #[tokio::test]
+    async fn resolvers_builder_accepts_custom_h3_base_url() {
+        use std::sync::Arc;
+
+        let endpoint = Arc::new(h3x::endpoint::H3Endpoint::new(
+            h3x::dquic::QuicEndpoint::builder().build().await,
+        ));
+
+        let resolvers = Resolvers::builder()
+            .h3_with_base_url("https://custom-dns.example:4433", endpoint)
+            .expect("valid h3 dns url")
+            .build();
+
+        assert!(resolvers.to_string().contains("custom-dns.example"));
+    }
+
+    #[cfg(feature = "http-resolver")]
+    #[test]
+    fn resolvers_builder_accepts_custom_http_base_url() {
+        let resolvers = Resolvers::builder()
+            .http_with_base_url("https://custom-dns.example")
+            .expect("valid http dns url")
+            .build();
+
+        assert!(resolvers.to_string().contains("custom-dns.example"));
     }
 
     #[cfg(feature = "mdns-resolver")]

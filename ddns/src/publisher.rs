@@ -44,12 +44,23 @@ pub enum PublishOnceError {
     },
 }
 
+/// Optional metadata applied to endpoint records before signing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PublishOptions {
+    /// Stable server identifier for names served by multiple publishers.
+    ///
+    /// `0` marks the endpoint as the main record. Non-zero values mark the
+    /// record as clustered and encode the identifier as its sequence number.
+    pub server_id: Option<u8>,
+}
+
 pub struct Publisher {
     identity: Arc<dyn LocalAgent>,
     network: Arc<h3x::dquic::Network>,
     resolver: Arc<dyn Resolve + Send + Sync>,
     bind_patterns: Arc<Vec<h3x::dquic::binds::BindPattern>>,
     interval: Duration,
+    options: PublishOptions,
 }
 
 impl std::fmt::Debug for Publisher {
@@ -58,6 +69,7 @@ impl std::fmt::Debug for Publisher {
             .field("identity", &self.identity.name())
             .field("bind_patterns", &self.bind_patterns)
             .field("interval", &self.interval)
+            .field("options", &self.options)
             .finish_non_exhaustive()
     }
 }
@@ -75,7 +87,17 @@ impl Publisher {
             resolver,
             bind_patterns,
             interval: DEFAULT_PUBLISH_INTERVAL,
+            options: PublishOptions::default(),
         }
+    }
+
+    pub fn with_options(mut self, options: PublishOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    pub fn options(&self) -> PublishOptions {
+        self.options
     }
 
     pub fn interval(&self) -> Duration {
@@ -182,6 +204,10 @@ impl Publisher {
         for endpoint in endpoints {
             let mut endpoint = DnsEndpointAddr::try_from(*endpoint)
                 .map_err(|_| publish_once_error::EncodeEndpointSnafu.build())?;
+            if let Some(server_id) = self.options.server_id {
+                endpoint.set_main(server_id == 0);
+                endpoint.set_sequence(server_id.into());
+            }
             endpoint
                 .sign_with_agent(self.identity.as_ref())
                 .await
@@ -333,5 +359,28 @@ mod tests {
 
         let error = publisher.publish_once().await.unwrap_err();
         assert!(matches!(error, PublishOnceError::NoPublisherResolver));
+    }
+
+    #[tokio::test]
+    async fn signed_packet_applies_publish_options_server_id() {
+        let publisher = Publisher::new(
+            Arc::new(TestAgent),
+            h3x::dquic::Network::builder().build(),
+            Arc::new(DisplayOnlyResolver),
+            Arc::new(Vec::new()),
+        )
+        .with_options(PublishOptions { server_id: Some(2) });
+
+        let endpoint = EndpointAddr::direct("127.0.0.1:443".parse().unwrap());
+        let packet = publisher.signed_packet(&[endpoint]).await.unwrap();
+        let (_remain, packet) = ddns_core::parser::packet::be_packet(&packet).unwrap();
+        let record = packet.answers.first().expect("endpoint answer");
+        let ddns_core::parser::record::RData::E(endpoint) = record.data() else {
+            panic!("expected endpoint record");
+        };
+
+        assert!(!endpoint.is_main());
+        assert!(endpoint.is_clustered());
+        assert!(endpoint.is_signed());
     }
 }
