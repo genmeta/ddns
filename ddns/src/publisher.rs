@@ -498,6 +498,7 @@ fn public_endpoints_from_iface(
     use h3x::dquic::{net::IO, qtraversal::nat::client::StunClientsComponent};
 
     iface.with_components(|components, current| {
+        let addr = current.bound_addr().ok();
         let mut endpoints: Vec<EndpointAddr> = components
             .get::<StunClientsComponent>()
             .map(|stun| {
@@ -523,8 +524,13 @@ fn public_endpoints_from_iface(
             })
             .unwrap_or_default();
 
-        if endpoints.is_empty()
-            && let Ok(addr) = current.bound_addr()
+        // Also publish the current default-route address. STUN-derived
+        // endpoints make the node reachable from outside the local network,
+        // while the bound address is still the shortest valid path for peers
+        // on the same link and for separate local client processes on the
+        // same host. Keep it after STUN endpoints so translated-NAT peers get
+        // the externally reachable candidate first.
+        if let Some(addr) = addr
             && network.bound_addr_is_on_default_route(&current.bind_uri(), addr)
         {
             endpoints.push(EndpointAddr::direct(addr));
