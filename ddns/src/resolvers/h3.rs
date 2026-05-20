@@ -12,7 +12,7 @@ use tokio::time::Instant;
 use tracing::trace;
 use url::Url;
 
-const LOOKUP_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const LOOKUP_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 const LOOKUP_REQUEST_ATTEMPTS: usize = 3;
 
 pub struct H3Resolver<C: quic::Connect> {
@@ -353,5 +353,20 @@ where
                 Err(error) => Err(io::Error::other(error)),
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lookup_retry_budget_leaves_external_timeout_margin() {
+        let total_budget = LOOKUP_REQUEST_TIMEOUT * LOOKUP_REQUEST_ATTEMPTS as u32;
+
+        assert!(
+            total_budget <= Duration::from_secs(10),
+            "h3 lookup must return before common 15s command timeouts so callers can retry"
+        );
     }
 }
