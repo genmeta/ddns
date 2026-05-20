@@ -433,18 +433,19 @@ impl Publisher {
     }
 
     fn public_endpoints(&self) -> Vec<EndpointAddr> {
-        let mut endpoints = HashSet::new();
+        let mut endpoints = Vec::new();
+        let mut seen = HashSet::new();
         for pattern in self.bind_patterns.iter() {
             let Some(ifaces) = self.network.get_interfaces(pattern) else {
                 continue;
             };
             for iface in ifaces {
                 for endpoint in public_endpoints_from_iface(&self.network, &iface) {
-                    endpoints.insert(endpoint);
+                    push_unique_endpoint(&mut endpoints, &mut seen, endpoint);
                 }
             }
         }
-        endpoints.into_iter().collect()
+        endpoints
     }
 
     fn has_public_endpoints(&self) -> bool {
@@ -480,6 +481,16 @@ enum PublishTrigger {
     Location,
 }
 
+fn push_unique_endpoint(
+    endpoints: &mut Vec<EndpointAddr>,
+    seen: &mut HashSet<EndpointAddr>,
+    endpoint: EndpointAddr,
+) {
+    if seen.insert(endpoint) {
+        endpoints.push(endpoint);
+    }
+}
+
 fn public_endpoints_from_iface(
     network: &h3x::dquic::Network,
     iface: &h3x::dquic::net::BindInterface,
@@ -487,7 +498,6 @@ fn public_endpoints_from_iface(
     use h3x::dquic::{net::IO, qtraversal::nat::client::StunClientsComponent};
 
     iface.with_components(|components, current| {
-        let addr = current.bound_addr().ok();
         let mut endpoints: Vec<EndpointAddr> = components
             .get::<StunClientsComponent>()
             .map(|stun| {
@@ -513,13 +523,8 @@ fn public_endpoints_from_iface(
             })
             .unwrap_or_default();
 
-        // Also publish the current default-route address. STUN-derived
-        // endpoints make the node reachable from outside the local network,
-        // while the bound address is still the shortest valid path for peers
-        // on the same link and for self-connectivity checks. Restrict this to
-        // default-route bindings so staging-only management links are not
-        // advertised.
-        if let Some(addr) = addr
+        if endpoints.is_empty()
+            && let Ok(addr) = current.bound_addr()
             && network.bound_addr_is_on_default_route(&current.bind_uri(), addr)
         {
             endpoints.push(EndpointAddr::direct(addr));
@@ -690,6 +695,23 @@ mod tests {
             publisher.public_endpoints().is_empty(),
             "public DNS publishing must wait for STUN-derived external endpoints; local addresses are published through mDNS"
         );
+    }
+
+    #[test]
+    fn push_unique_endpoint_preserves_first_seen_order() {
+        let agent = EndpointAddr::with_agent(
+            "10.10.0.2:20004".parse().expect("valid agent addr"),
+            "10.10.0.10:45635".parse().expect("valid outer addr"),
+        );
+        let direct = EndpointAddr::direct("10.110.0.10:45635".parse().expect("valid direct addr"));
+        let mut endpoints = Vec::new();
+        let mut seen = HashSet::new();
+
+        push_unique_endpoint(&mut endpoints, &mut seen, agent);
+        push_unique_endpoint(&mut endpoints, &mut seen, direct);
+        push_unique_endpoint(&mut endpoints, &mut seen, agent);
+
+        assert_eq!(endpoints, vec![agent, direct]);
     }
 
     #[test]
