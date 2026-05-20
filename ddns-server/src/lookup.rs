@@ -176,6 +176,11 @@ pub fn body_response(status: http::StatusCode, body: impl Into<bytes::Bytes>) ->
 }
 
 pub fn write_error(err: AppError) -> Response {
+    debug!(
+        status = %err.status(),
+        error = %err,
+        "writing error response"
+    );
     body_response(err.status(), bytes::Bytes::from(err.to_string()))
 }
 

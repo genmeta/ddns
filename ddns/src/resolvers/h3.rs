@@ -142,15 +142,28 @@ where
             .authority()
             .expect("h3 dns request URL must include an authority")
             .clone();
-        let connection = self
-            .endpoint
-            .connect(authority)
-            .await
-            .map_err(|source| self.connect_error(source))?;
-        connection
-            .execute_hyper_request(request)
-            .await
-            .map_err(|source| self.request_error(source))
+        tracing::trace!(%authority, "connecting h3 dns endpoint");
+        let connection = match self.endpoint.connect(authority.clone()).await {
+            Ok(connection) => {
+                tracing::trace!(%authority, "connected h3 dns endpoint");
+                connection
+            }
+            Err(source) => return Err(self.connect_error(source)),
+        };
+
+        let method = request.method().clone();
+        let uri = request.uri().clone();
+        tracing::trace!(%method, %uri, "executing h3 dns request");
+        match connection.execute_hyper_request(request).await {
+            Ok(response) => {
+                tracing::trace!(
+                    status = %response.status(),
+                    "h3 dns request response received"
+                );
+                Ok(response)
+            }
+            Err(source) => Err(self.request_error(source)),
+        }
     }
 
     pub fn clear_pool(&self) {
@@ -183,7 +196,12 @@ where
         let mut url = self.base_url.join("publish").expect("Invalid base URL");
         url.set_query(Some(&format!("host={name}")));
         let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
-        tracing::trace!("h3x publishing packet for {} to {}", name, self.base_url);
+        tracing::trace!(
+            name,
+            packet_len = packet.len(),
+            url = %self.base_url,
+            "h3x publishing packet"
+        );
         let request = http::Request::post(uri)
             .body(Full::new(bytes::Bytes::copy_from_slice(packet)))
             .expect("h3 dns publish request must be valid");

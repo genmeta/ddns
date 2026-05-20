@@ -102,9 +102,18 @@ async fn publish_with_cert(state: AppState, request: Request) -> Response {
 
     // Validate DNS packet; signature check only for Standard hosts.
     let require_sig = policy == DomainPolicy::Standard && state.require_signature;
+    debug!(
+        host = %host,
+        bytes = body.len(),
+        require_signature = require_sig,
+        "validating publish packet"
+    );
     let packet_name = match validate_dns_packet(body.as_ref(), require_sig, agent.as_ref()) {
         Ok(n) => n,
-        Err(e) => return write_error(e),
+        Err(e) => {
+            debug!(host = %host, error = %e, "publish packet rejected");
+            return write_error(e);
+        }
     };
 
     let packet_host = match normalize_host(&packet_name) {

@@ -1,6 +1,6 @@
 use ddns::parser::{packet::be_packet, record::RData};
 use dhttp_identity::identity::RemoteAgent;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::error::{AppError, normalize_host};
 
@@ -107,6 +107,10 @@ pub fn validate_dns_packet(
     if !remaining.is_empty() {
         warn!(remain = remaining.len(), "dns.parse.extra_bytes");
     }
+    debug!(
+        answers = dns_packet.answers.len(),
+        require_signature, "validating dns packet"
+    );
 
     if require_signature {
         let has_signature = dns_packet
@@ -136,9 +140,10 @@ pub fn validate_dns_packet(
         }
     }
 
-    dns_packet
-        .answers
-        .first()
-        .map(|record| record.name().to_string())
-        .ok_or(AppError::NoAnswersInPacket)
+    let Some(first_answer) = dns_packet.answers.first() else {
+        debug!("dns packet has no answers");
+        return Err(AppError::NoAnswersInPacket);
+    };
+
+    Ok(first_answer.name().to_string())
 }

@@ -131,6 +131,11 @@ impl Publisher {
     pub async fn publish_once(&self) -> Result<(), PublishOnceError> {
         let mut published = false;
         let public_endpoints = self.public_endpoints();
+        tracing::debug!(
+            endpoint_count = public_endpoints.len(),
+            endpoints = ?public_endpoints,
+            "publishing public endpoints"
+        );
         published |= self
             .publish_to_resolver(self.resolver.as_ref(), &public_endpoints)
             .await?;
@@ -155,6 +160,10 @@ impl Publisher {
     }
 
     async fn publish_attempt(&self) -> bool {
+        tracing::trace!(
+            timeout_ms = self.publish_timeout.as_millis(),
+            "starting dns publish attempt"
+        );
         match tokio::time::timeout(self.publish_timeout, self.publish_once()).await {
             Ok(Ok(())) => {
                 tracing::info!("published resolver endpoints");
@@ -350,6 +359,13 @@ impl Publisher {
     ) -> Result<(), PublishOnceError> {
         let packet = self.signed_packet(endpoints).await?;
         let name = self.identity.name();
+        tracing::debug!(
+            publisher = %publisher,
+            name,
+            endpoint_count = endpoints.len(),
+            packet_len = packet.len(),
+            "publishing dns packet"
+        );
         publisher
             .publish(name, &packet)
             .await
@@ -384,6 +400,7 @@ impl Publisher {
         let mut seen = HashSet::new();
         for pattern in self.bind_patterns.iter() {
             let Some(ifaces) = self.network.get_interfaces(pattern) else {
+                tracing::trace!(?pattern, "no interfaces for bind pattern");
                 continue;
             };
             for iface in ifaces {
@@ -436,6 +453,7 @@ fn public_endpoints_from_iface(
     use h3x::dquic::{net::IO, qtraversal::nat::client::StunClientsComponent};
 
     iface.with_components(|components, current| {
+        let bind_uri = current.bind_uri();
         let addr = current.bound_addr().ok();
         let mut endpoints: Vec<EndpointAddr> = components
             .get::<StunClientsComponent>()
@@ -461,6 +479,7 @@ fn public_endpoints_from_iface(
                 })
             })
             .unwrap_or_default();
+        let stun_endpoint_count = endpoints.len();
 
         // Also publish the current default-route address. STUN-derived
         // endpoints make the node reachable from outside the local network,
@@ -469,10 +488,19 @@ fn public_endpoints_from_iface(
         // same host. Keep it after STUN endpoints so translated-NAT peers get
         // the externally reachable candidate first.
         if let Some(addr) = addr
-            && network.bound_addr_is_on_default_route(&current.bind_uri(), addr)
+            && network.bound_addr_is_on_default_route(&bind_uri, addr)
         {
             endpoints.push(EndpointAddr::direct(addr));
         }
+
+        tracing::trace!(
+            bind_uri = %bind_uri,
+            bound_addr = ?addr,
+            stun_endpoint_count,
+            endpoint_count = endpoints.len(),
+            endpoints = ?endpoints,
+            "collected public endpoints from interface"
+        );
 
         endpoints
     })
