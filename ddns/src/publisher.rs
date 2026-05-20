@@ -495,11 +495,15 @@ fn public_endpoints_from_iface(
                         .values()
                         .filter_map(|client| {
                             let outer = client.get_outer_addr()?.ok()?;
+                            let bound = current.bound_addr().ok()?;
                             match client.get_nat_type() {
-                                Some(Ok(NatType::FullCone)) => Some(EndpointAddr::direct(outer)),
-                                Some(Ok(_)) | None => {
-                                    Some(EndpointAddr::with_agent(client.agent_addr(), outer))
-                                }
+                                Some(Ok(nat_type)) => Some(publish_endpoint_from_stun(
+                                    bound,
+                                    client.agent_addr(),
+                                    outer,
+                                    nat_type,
+                                )),
+                                None => Some(EndpointAddr::with_agent(client.agent_addr(), outer)),
                                 Some(Err(_)) => None,
                             }
                         })
@@ -526,6 +530,19 @@ fn public_endpoints_from_iface(
             Vec::new()
         }
     })
+}
+
+fn publish_endpoint_from_stun(
+    bound: SocketAddr,
+    agent: SocketAddr,
+    outer: SocketAddr,
+    nat_type: NatType,
+) -> EndpointAddr {
+    if nat_type == NatType::FullCone && bound == outer {
+        EndpointAddr::direct(outer)
+    } else {
+        EndpointAddr::with_agent(agent, outer)
+    }
 }
 
 #[cfg(feature = "mdns-resolver")]
@@ -676,6 +693,27 @@ mod tests {
             publisher.public_endpoints().is_empty(),
             "public DNS publishing must wait for STUN-derived external endpoints; local addresses are published through mDNS"
         );
+    }
+
+    #[test]
+    fn full_cone_nat_endpoint_preserves_agent_when_outer_differs_from_bound_addr() {
+        let bound = "10.110.0.10:45635".parse().expect("valid bound addr");
+        let agent = "10.10.0.2:20004".parse().expect("valid agent addr");
+        let outer = "10.10.0.10:45635".parse().expect("valid outer addr");
+
+        let endpoint = publish_endpoint_from_stun(bound, agent, outer, NatType::FullCone);
+
+        assert_eq!(endpoint, EndpointAddr::with_agent(agent, outer));
+    }
+
+    #[test]
+    fn full_cone_endpoint_is_direct_without_address_translation() {
+        let bound = "10.10.0.100:45635".parse().expect("valid bound addr");
+        let agent = "10.10.0.2:20004".parse().expect("valid agent addr");
+
+        let endpoint = publish_endpoint_from_stun(bound, agent, bound, NatType::FullCone);
+
+        assert_eq!(endpoint, EndpointAddr::direct(bound));
     }
 
     #[cfg(feature = "http-resolver")]
