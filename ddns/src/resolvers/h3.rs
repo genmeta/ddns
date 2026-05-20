@@ -1,4 +1,4 @@
-use std::{fmt, io, sync::Arc, time::Duration};
+use std::{convert::Infallible, fmt, io, sync::Arc, time::Duration};
 
 use dashmap::DashMap;
 use ddns_core::{MdnsPacket, parser::packet::be_packet, wire::be_multi_response};
@@ -7,7 +7,11 @@ use dquic::{
     qresolve::{Publish, PublishFuture, RecordStream, Resolve, ResolveFuture, Source},
 };
 use futures::{StreamExt, stream};
-use h3x::{dquic::ConnectError, endpoint::H3Endpoint, quic};
+use h3x::{
+    dquic::ConnectError, endpoint::H3Endpoint, hyper::client::RequestError as HyperRequestError,
+    quic,
+};
+use http_body_util::{BodyExt, Empty, Full};
 use tokio::time::Instant;
 use tracing::trace;
 use url::Url;
@@ -52,9 +56,11 @@ pub enum Error<E: std::error::Error + Send + Sync + 'static = ConnectError> {
     H3Stream {
         source: h3x::endpoint::server::MessageStreamError,
     },
+    #[snafu(display("failed to connect h3 endpoint"))]
+    Connect { source: h3x::pool::ConnectError<E> },
     #[snafu(display("h3 request error"))]
     H3Request {
-        source: h3x::endpoint::client::RequestError<E>,
+        source: HyperRequestError<Infallible>,
     },
     #[snafu(display("h3 request timed out after {timeout:?}"))]
     RequestTimeout { timeout: Duration },
@@ -107,15 +113,44 @@ where
         })
     }
 
-    fn request_error(
-        &self,
-        source: h3x::endpoint::client::RequestError<C::Error>,
-    ) -> Error<C::Error> {
+    fn connect_error(&self, source: h3x::pool::ConnectError<C::Error>) -> Error<C::Error> {
         // H3 DNS resolvers keep a long-lived endpoint. A network transition may
         // leave the cached H3 connection with stale QUIC paths, so the next
         // attempt must establish a fresh connection instead of reusing it.
         self.endpoint.clear_pool();
+        Error::Connect { source }
+    }
+
+    fn request_error(&self, source: HyperRequestError<Infallible>) -> Error<C::Error> {
+        self.endpoint.clear_pool();
         Error::H3Request { source }
+    }
+
+    async fn execute_request(
+        &self,
+        request: http::Request<
+            impl http_body::Body<Data = bytes::Bytes, Error = Infallible> + Send + 'static,
+        >,
+    ) -> Result<
+        http::Response<
+            impl http_body::Body<Data = bytes::Bytes, Error = h3x::endpoint::server::MessageStreamError>,
+        >,
+        Error<C::Error>,
+    > {
+        let authority = request
+            .uri()
+            .authority()
+            .expect("h3 dns request URL must include an authority")
+            .clone();
+        let connection = self
+            .endpoint
+            .connect(authority)
+            .await
+            .map_err(|source| self.connect_error(source))?;
+        connection
+            .execute_hyper_request(request)
+            .await
+            .map_err(|source| self.request_error(source))
     }
 
     pub fn clear_pool(&self) {
@@ -149,10 +184,10 @@ where
         url.set_query(Some(&format!("host={name}")));
         let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
         tracing::trace!("h3x publishing packet for {} to {}", name, self.base_url);
-        let resp = match self.endpoint.post(uri).body(packet).await {
-            Ok(resp) => resp,
-            Err(source) => return Err(self.request_error(source)),
-        };
+        let request = http::Request::post(uri)
+            .body(Full::new(bytes::Bytes::copy_from_slice(packet)))
+            .expect("h3 dns publish request must be valid");
+        let resp = self.execute_request(request).await?;
 
         if resp.status() != http::StatusCode::OK {
             return Err(Error::Status {
@@ -164,14 +199,17 @@ where
     }
 
     fn retryable_lookup_error(error: &Error<C::Error>) -> bool {
-        matches!(error, Error::H3Request { .. } | Error::H3Stream { .. })
+        matches!(
+            error,
+            Error::Connect { .. } | Error::H3Request { .. } | Error::H3Stream { .. }
+        )
     }
 
     async fn lookup_response(&self, uri: http::Uri) -> Result<bytes::Bytes, Error<C::Error>> {
-        let mut resp = match self.endpoint.get(uri).await {
-            Ok(resp) => resp,
-            Err(source) => return Err(self.request_error(source)),
-        };
+        let request = http::Request::get(uri)
+            .body(Empty::<bytes::Bytes>::new())
+            .expect("h3 dns lookup request must be valid");
+        let resp = self.execute_request(request).await?;
 
         tracing::trace!("received response with status {}", resp.status());
         match resp.status() {
@@ -180,8 +218,8 @@ where
             status => return Err(Error::Status { status }),
         }
 
-        match resp.read_to_bytes().await {
-            Ok(response) => Ok(response),
+        match resp.into_body().collect().await {
+            Ok(response) => Ok(response.to_bytes()),
             Err(source) => Err(Error::H3Stream { source }),
         }
     }

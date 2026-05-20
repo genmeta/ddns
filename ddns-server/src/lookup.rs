@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    convert::Infallible,
     net::SocketAddr,
 };
 
@@ -9,14 +10,17 @@ use ddns::{
     wire::MultiResponse,
 };
 use deadpool_redis::redis::{self, AsyncCommands};
-use futures::future::BoxFuture;
-use h3x::endpoint::server::{Request, Response, Service};
+use h3x::message::stream::MessageStreamError;
+use http_body_util::{Full, combinators::UnsyncBoxBody};
 use tracing::debug;
 
 use crate::{
     error::{AppError, normalize_host, parse_query_params},
     storage::{AppState, LookupRecord, Storage, StoredRecord, unix_now_secs},
 };
+
+pub type Request = http::Request<UnsyncBoxBody<bytes::Bytes, MessageStreamError>>;
+pub type Response = http::Response<Full<bytes::Bytes>>;
 
 // ---------------------------------------------------------------------------
 // Lookup result type
@@ -164,10 +168,15 @@ async fn perform_lookup_multi(
 // HTTP response helpers
 // ---------------------------------------------------------------------------
 
-pub async fn write_error(resp: &mut Response, err: AppError) {
-    resp.set_status(err.status())
-        .set_body(bytes::Bytes::from(format!("{}", err)));
-    let _ = resp.flush().await;
+pub fn body_response(status: http::StatusCode, body: impl Into<bytes::Bytes>) -> Response {
+    http::Response::builder()
+        .status(status)
+        .body(Full::new(body.into()))
+        .expect("response parts must be valid")
+}
+
+pub fn write_error(err: AppError) -> Response {
+    body_response(err.status(), bytes::Bytes::from(err.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -187,11 +196,10 @@ pub struct LookupSvc {
 ///
 /// Optional query param `limit=N` caps the number of records returned.
 /// Dynamic records are newest-first; configured seed records are appended after them.
-pub async fn lookup_with_cert(state: AppState, request: &mut Request, response: &mut Response) {
-    let params = parse_query_params(&request.uri());
+pub async fn lookup_with_cert(state: AppState, request: Request) -> Response {
+    let params = parse_query_params(request.uri());
     let Some(host) = params.get("host") else {
-        write_error(response, AppError::MissingHostParam).await;
-        return;
+        return write_error(AppError::MissingHostParam);
     };
 
     let limit: Option<usize> = params
@@ -204,38 +212,33 @@ pub async fn lookup_with_cert(state: AppState, request: &mut Request, response: 
     match perform_lookup(&state, host, limit).await {
         Ok(LookupResult::NotFound) => {
             debug!(host = %host, "lookup.not_found");
-            response
-                .set_status(http::StatusCode::NOT_FOUND)
-                .set_body(bytes::Bytes::from_static(b"Not Found"));
-            let _ = response.flush().await;
+            body_response(
+                http::StatusCode::NOT_FOUND,
+                bytes::Bytes::from_static(b"Not Found"),
+            )
         }
 
         Ok(LookupResult::Multi(resp)) => {
             let body = resp.encode();
             debug!(host = %host, records = resp.records.len(), "lookup.found");
-            response
-                .set_status(http::StatusCode::OK)
-                .set_body(bytes::Bytes::from(body));
+            let mut response = body_response(http::StatusCode::OK, bytes::Bytes::from(body));
             response.headers_mut().insert(
                 http::HeaderName::from_static("x-record-format"),
                 http::HeaderValue::from_static("multi"),
             );
-            let _ = response.flush().await;
+            response
         }
 
-        Err(e) => {
-            write_error(response, e).await;
-        }
+        Err(e) => write_error(e),
     }
 }
 
-impl Service for LookupSvc {
-    type Future<'s> = BoxFuture<'s, ()>;
-
-    fn serve<'s>(&self, request: &'s mut Request, response: &'s mut Response) -> Self::Future<'s> {
+impl LookupSvc {
+    pub fn call(
+        &self,
+        request: Request,
+    ) -> impl Future<Output = Result<Response, Infallible>> + Send + 'static {
         let state = self.state.clone();
-        Box::pin(async move {
-            lookup_with_cert(state, request, response).await;
-        })
+        async move { Ok(lookup_with_cert(state, request).await) }
     }
 }

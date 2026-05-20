@@ -18,14 +18,16 @@ snafu = "0.8"
 tokio = { version = "1", features = ["time", "macros", "net", "sync", "rt", "rt-multi-thread"] }
 tracing = "0.1"
 
-h3x = { git = "https://github.com/genmeta/h3x.git", branch = "endpoint", default-features = false, features = ["dquic"], optional = true }
+h3x = { git = "https://github.com/genmeta/h3x.git", branch = "endpoint", default-features = false, features = ["dquic", "hyper"], optional = true }
 http = { version = "1", optional = true }
+http-body = { version = "1", optional = true }
+http-body-util = { version = "0.1", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["charset", "rustls-tls", "http2", "macos-system-configuration", "json"], optional = true }
 url = { version = "2", optional = true }
 
 [features]
 default = []
-h3x-resolver = ["dep:h3x", "dep:http", "dep:url"]
+h3x-resolver = ["dep:h3x", "dep:http", "dep:http-body", "dep:http-body-util", "dep:url"]
 mdns-resolver = ["dep:h3x", "gmdns/h3x-network"]
 http-resolver = ["dep:reqwest"]
 

@@ -14,6 +14,7 @@ use h3x::{
     },
     endpoint::H3Endpoint,
 };
+use http_body_util::{BodyExt, Empty};
 use rustls::{RootCertStore, client::WebPkiServerVerifier};
 use tracing::{Level, info};
 
@@ -122,11 +123,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(url = %url, "lookup.start");
 
     let uri: http::Uri = url.parse()?;
-    let client = Arc::new(client);
-    let mut resp = client.get(uri).await?;
+    let authority = uri
+        .authority()
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "query URL must include authority",
+            )
+        })?
+        .clone();
+    let connection = Arc::new(client).connect(authority).await?;
+    let request = http::Request::get(uri)
+        .body(Empty::<bytes::Bytes>::new())
+        .expect("query request must be valid");
+    let resp = connection.execute_hyper_request(request).await?;
 
     if resp.status().is_success() {
-        let bytes = resp.read_to_bytes().await?;
+        let bytes = resp.into_body().collect().await?.to_bytes();
 
         let (_remain, multi) = be_multi_response(bytes.as_ref()).map_err(|e| {
             io::Error::new(

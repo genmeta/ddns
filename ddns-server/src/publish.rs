@@ -1,13 +1,15 @@
+use std::{convert::Infallible, sync::Arc};
+
 use deadpool_redis::redis::{self, AsyncCommands};
 use dhttp_identity::identity::RemoteAgent;
-use futures::future::BoxFuture;
-use h3x::endpoint::server::{Request, Response, Service};
+use h3x::{connection::ConnectionState, quic};
+use http_body_util::BodyExt;
 use tokio::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 use crate::{
     error::{AppError, normalize_host, parse_query_params},
-    lookup::write_error,
+    lookup::{Request, Response, body_response, write_error},
     policy::{DomainPolicy, client_allowed_host, validate_dns_packet},
     storage::{
         AppState, Record, Storage, StoredRecord, cert_fingerprint, cert_fingerprint_hex,
@@ -24,101 +26,104 @@ pub struct PublishSvc {
     pub state: AppState,
 }
 
-impl Service for PublishSvc {
-    type Future<'s> = BoxFuture<'s, ()>;
-
-    fn serve<'s>(&self, request: &'s mut Request, response: &'s mut Response) -> Self::Future<'s> {
+impl PublishSvc {
+    pub fn call(
+        &self,
+        request: Request,
+    ) -> impl Future<Output = Result<Response, Infallible>> + Send + 'static {
         let state = self.state.clone();
-        Box::pin(async move {
-            debug!("received publish request");
-
-            let params = parse_query_params(&request.uri());
-            debug!("query params: {:?}", params);
-
-            let Some(host) = params.get("host") else {
-                warn!("missing host parameter");
-                write_error(response, AppError::MissingHostParam).await;
-                return;
-            };
-
-            let host = match normalize_host(host) {
-                Ok(h) => h,
-                Err(e) => {
-                    write_error(response, e).await;
-                    return;
-                }
-            };
-            debug!(host = %host, "publish.host");
-
-            // Require a valid client certificate for all publish requests.
-            let Some(agent) = request.agent().cloned() else {
-                warn!("missing client certificate");
-                write_error(response, AppError::MissingClientCertificate).await;
-                return;
-            };
-
-            let policy = state.policies.policy_for(&host).clone();
-
-            // Standard policy: cert SAN must match the target host.
-            // OpenMulti policy: any authenticated node may publish — skip SAN check.
-            if policy == DomainPolicy::Standard {
-                let allowed = match client_allowed_host(agent.as_ref()) {
-                    Ok(h) => h,
-                    Err(e) => {
-                        warn!(error = %snafu::Report::from_error(&e), "client certificate domain not allowed");
-                        write_error(response, e).await;
-                        return;
-                    }
-                };
-                if allowed != host {
-                    warn!(allowed = %allowed, requested = %host, "publish.host_mismatch");
-                    write_error(response, AppError::HostMismatch).await;
-                    return;
-                }
-            }
-
-            let body = match request.read_to_bytes().await {
-                Ok(b) => b,
-                Err(e) => {
-                    warn!(error = %snafu::Report::from_error(&e), "failed to read request body");
-                    write_error(
-                        response,
-                        AppError::InvalidDnsPacket {
-                            message: e.to_string(),
-                        },
-                    )
-                    .await;
-                    return;
-                }
-            };
-
-            // Validate DNS packet; signature check only for Standard hosts.
-            let require_sig = policy == DomainPolicy::Standard && state.require_signature;
-            let packet_name = match validate_dns_packet(body.as_ref(), require_sig, agent.as_ref())
-            {
-                Ok(n) => n,
-                Err(e) => {
-                    write_error(response, e).await;
-                    return;
-                }
-            };
-
-            let packet_host = match normalize_host(&packet_name) {
-                Ok(h) => h,
-                Err(e) => {
-                    write_error(response, e).await;
-                    return;
-                }
-            };
-
-            if packet_host != host {
-                write_error(response, AppError::HostMismatch).await;
-                return;
-            }
-
-            publish_record(&state, &host, &body, agent.as_ref(), response).await
-        })
+        async move { Ok(publish_with_cert(state, request).await) }
     }
+}
+
+async fn publish_with_cert(state: AppState, request: Request) -> Response {
+    debug!("received publish request");
+
+    let params = parse_query_params(request.uri());
+    debug!("query params: {:?}", params);
+
+    let Some(host) = params.get("host") else {
+        warn!("missing host parameter");
+        return write_error(AppError::MissingHostParam);
+    };
+
+    let host = match normalize_host(host) {
+        Ok(h) => h,
+        Err(e) => return write_error(e),
+    };
+    debug!(host = %host, "publish.host");
+
+    // Require a valid client certificate for all publish requests.
+    let agent = match request_connection(&request) {
+        Some(connection) => match connection.remote_agent().await {
+            Ok(Some(agent)) => agent,
+            Ok(None) => {
+                warn!("missing client certificate");
+                return write_error(AppError::MissingClientCertificate);
+            }
+            Err(error) => {
+                warn!(error = %snafu::Report::from_error(&error), "failed to read client certificate");
+                return write_error(AppError::MissingClientCertificate);
+            }
+        },
+        None => {
+            warn!("missing client certificate");
+            return write_error(AppError::MissingClientCertificate);
+        }
+    };
+
+    let policy = state.policies.policy_for(&host).clone();
+
+    // Standard policy: cert SAN must match the target host.
+    // OpenMulti policy: any authenticated node may publish — skip SAN check.
+    if policy == DomainPolicy::Standard {
+        let allowed = match client_allowed_host(agent.as_ref()) {
+            Ok(h) => h,
+            Err(e) => {
+                warn!(error = %snafu::Report::from_error(&e), "client certificate domain not allowed");
+                return write_error(e);
+            }
+        };
+        if allowed != host {
+            warn!(allowed = %allowed, requested = %host, "publish.host_mismatch");
+            return write_error(AppError::HostMismatch);
+        }
+    }
+
+    let body = match request.into_body().collect().await {
+        Ok(body) => body.to_bytes(),
+        Err(e) => {
+            warn!(error = %snafu::Report::from_error(&e), "failed to read request body");
+            return write_error(AppError::InvalidDnsPacket {
+                message: e.to_string(),
+            });
+        }
+    };
+
+    // Validate DNS packet; signature check only for Standard hosts.
+    let require_sig = policy == DomainPolicy::Standard && state.require_signature;
+    let packet_name = match validate_dns_packet(body.as_ref(), require_sig, agent.as_ref()) {
+        Ok(n) => n,
+        Err(e) => return write_error(e),
+    };
+
+    let packet_host = match normalize_host(&packet_name) {
+        Ok(h) => h,
+        Err(e) => return write_error(e),
+    };
+
+    if packet_host != host {
+        return write_error(AppError::HostMismatch);
+    }
+
+    publish_record(&state, &host, &body, agent.as_ref()).await
+}
+
+fn request_connection(request: &Request) -> Option<Arc<ConnectionState<dyn quic::DynConnection>>> {
+    request
+        .extensions()
+        .get::<Arc<ConnectionState<dyn quic::DynConnection>>>()
+        .cloned()
 }
 
 /// Unified publish handler: stores the record keyed by (host, cert-fingerprint).
@@ -137,8 +142,7 @@ pub async fn publish_record(
     host: &str,
     body: &bytes::Bytes,
     agent: &(impl RemoteAgent + ?Sized),
-    response: &mut Response,
-) {
+) -> Response {
     let cert_bytes = agent
         .cert_chain()
         .first()
@@ -153,14 +157,9 @@ pub async fn publish_record(
             let mut conn = match pool.get().await {
                 Ok(c) => c,
                 Err(e) => {
-                    write_error(
-                        response,
-                        AppError::Redis {
-                            message: e.to_string(),
-                        },
-                    )
-                    .await;
-                    return;
+                    return write_error(AppError::Redis {
+                        message: e.to_string(),
+                    });
                 }
             };
             let ttl_secs = state.ttl_secs;
@@ -190,28 +189,18 @@ pub async fn publish_record(
                 .set_ex::<_, _, ()>(&fp_key, &new_member, ttl_secs)
                 .await
             {
-                write_error(
-                    response,
-                    AppError::Redis {
-                        message: e.to_string(),
-                    },
-                )
-                .await;
-                return;
+                return write_error(AppError::Redis {
+                    message: e.to_string(),
+                });
             }
 
             if let Err(e) = conn
                 .zadd::<_, _, _, ()>(&set_key, &new_member, now_secs as f64)
                 .await
             {
-                write_error(
-                    response,
-                    AppError::Redis {
-                        message: e.to_string(),
-                    },
-                )
-                .await;
-                return;
+                return write_error(AppError::Redis {
+                    message: e.to_string(),
+                });
             }
 
             // Expire the ZSET key at max(ttl_secs) from now as a safety net.
@@ -249,8 +238,5 @@ pub async fn publish_record(
     }
 
     info!(host = %host, ttl = state.ttl_secs, bytes = body.len(), fp = %fp_hex, "publish.ok");
-    response
-        .set_status(http::StatusCode::OK)
-        .set_body(bytes::Bytes::from_static(b"OK"));
-    let _ = response.flush().await;
+    body_response(http::StatusCode::OK, bytes::Bytes::from_static(b"OK"))
 }

@@ -12,6 +12,7 @@ ddns = { path = "../ddns", features = ["h3x-resolver"] }
 dhttp-identity = { git = "ssh://git@github.com/genmeta/dhttp.git", branch = "main" }
 h3x = { git = "https://github.com/genmeta/h3x.git", branch = "endpoint", features = [
     "dquic",
+    "hyper",
 ] }
 
 # server-specific deps（不再污染核心库）
@@ -23,6 +24,8 @@ bytes = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 http = "1"
+http-body-util = "0.1"
+tower-service = "0.3"
 nom = "8"
 rustls = { version = "0.23", default-features = false, features = [
     "logging",

@@ -5,10 +5,18 @@ mod policy;
 mod publish;
 mod storage;
 
-use std::{collections::HashMap, io, net::SocketAddr, str::FromStr, sync::Arc};
+use std::{
+    collections::HashMap,
+    io,
+    net::SocketAddr,
+    str::FromStr,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
 use clap::Parser;
 use ddns::{MdnsEndpoint, MdnsPacket};
+use futures::future::BoxFuture;
 use h3x::{
     dquic::{
         Identity, Network, QuicEndpoint,
@@ -16,7 +24,8 @@ use h3x::{
         cert::handy::{ToCertificate, ToPrivateKey},
         server::ServerQuicConfig,
     },
-    endpoint::{H3Endpoint, server::Router},
+    endpoint::H3Endpoint,
+    hyper::server::TowerService,
 };
 use rustls::{RootCertStore, server::WebPkiClientVerifier};
 use tracing::{info, level_filters::LevelFilter};
@@ -29,6 +38,49 @@ use crate::{
     publish::PublishSvc,
     storage::{AppState, MemoryStorage, SeedRecords, Storage},
 };
+
+#[derive(Clone)]
+struct DnsService {
+    publish: PublishSvc,
+    lookup: LookupSvc,
+}
+
+impl tower_service::Service<lookup::Request> for DnsService {
+    type Response = lookup::Response;
+    type Error = io::Error;
+    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: lookup::Request) -> Self::Future {
+        let method = request.method().clone();
+        let path = request.uri().path().to_owned();
+        let publish = self.publish.clone();
+        let lookup = self.lookup.clone();
+        Box::pin(async move {
+            match (method, path.as_str()) {
+                (http::Method::POST, "/publish") => match publish.call(request).await {
+                    Ok(response) => Ok(response),
+                    Err(never) => match never {},
+                },
+                (http::Method::GET, "/lookup") => match lookup.call(request).await {
+                    Ok(response) => Ok(response),
+                    Err(never) => match never {},
+                },
+                (_, "/publish" | "/lookup") => Ok(lookup::body_response(
+                    http::StatusCode::METHOD_NOT_ALLOWED,
+                    bytes::Bytes::from_static(b"Method Not Allowed"),
+                )),
+                _ => Ok(lookup::body_response(
+                    http::StatusCode::NOT_FOUND,
+                    bytes::Bytes::from_static(b"Not Found"),
+                )),
+            }
+        })
+    }
+}
 
 fn bind_patterns_for_listen(listen: SocketAddr) -> Vec<BindPattern> {
     let bind_addr = match listen {
@@ -172,19 +224,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cert_pem = std::fs::read(&config.cert)?;
     let key_pem = std::fs::read(&config.key)?;
 
-    let router = Router::new()
-        .post(
-            "/publish",
-            PublishSvc {
-                state: state.clone(),
-            },
-        )
-        .get(
-            "/lookup",
-            LookupSvc {
-                state: state.clone(),
-            },
-        );
+    let router = TowerService(DnsService {
+        publish: PublishSvc {
+            state: state.clone(),
+        },
+        lookup: LookupSvc {
+            state: state.clone(),
+        },
+    });
 
     let identity = Arc::new(Identity {
         name: config.server_name.parse().unwrap(),
