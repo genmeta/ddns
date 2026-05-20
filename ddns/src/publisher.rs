@@ -150,14 +150,17 @@ impl Publisher {
     pub async fn run(&self) -> ! {
         let mut locations = self.network.locations().subscribe();
         self.publish_attempt().await;
-        self.settle_publish_events(&mut locations).await;
+        if self.settle_publish_events(&mut locations).await {
+            self.retry_changed_publish(&mut locations).await;
+        }
 
         loop {
             let trigger = self.wait_next_publish_trigger(&mut locations).await;
             let published = self.publish_attempt().await;
-            self.settle_publish_events(&mut locations).await;
-            if !published
-                && (matches!(trigger, PublishTrigger::Location) || self.has_public_endpoints())
+            let changed_during_publish = self.settle_publish_events(&mut locations).await;
+            if changed_during_publish
+                || (!published
+                    && (matches!(trigger, PublishTrigger::Location) || self.has_public_endpoints()))
             {
                 self.retry_changed_publish(&mut locations).await;
             }
@@ -256,8 +259,10 @@ impl Publisher {
             }
 
             if self.publish_attempt().await {
-                self.settle_publish_events(locations).await;
-                return;
+                if !self.settle_publish_events(locations).await {
+                    return;
+                }
+                continue;
             }
             self.settle_publish_events(locations).await;
         }
@@ -266,7 +271,8 @@ impl Publisher {
     fn drain_location_events(
         &self,
         locations: &mut h3x::dquic::qinterface::component::location::Observer,
-    ) {
+    ) -> bool {
+        let mut requires_publish = false;
         while let Ok((bind_uri, event)) = locations.try_recv() {
             if !self
                 .bind_patterns
@@ -277,16 +283,18 @@ impl Publisher {
             }
             if Self::location_event_requires_publish(&event) {
                 self.clear_publish_state();
+                requires_publish = true;
             }
         }
+        requires_publish
     }
 
     async fn settle_publish_events(
         &self,
         locations: &mut h3x::dquic::qinterface::component::location::Observer,
-    ) {
+    ) -> bool {
         tokio::time::sleep(PUBLISH_CHANGE_DEBOUNCE).await;
-        self.drain_location_events(locations);
+        self.drain_location_events(locations)
     }
 
     fn location_event_requires_publish(event: &AddressEvent) -> bool {
@@ -668,6 +676,86 @@ mod tests {
             publisher.public_endpoints().is_empty(),
             "public DNS publishing must wait for STUN-derived external endpoints; local addresses are published through mDNS"
         );
+    }
+
+    #[cfg(feature = "http-resolver")]
+    #[tokio::test]
+    async fn run_republishes_when_location_changes_during_publish_attempt() {
+        async fn wait_for_count(count: &AtomicUsize, target: usize) {
+            loop {
+                if count.load(Ordering::SeqCst) >= target {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+
+        let network = h3x::dquic::Network::builder().build();
+        let bind_uri: h3x::dquic::net::BindUri =
+            "inet://127.0.0.1:0".parse().expect("valid bind uri");
+        let publish_count = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test http server");
+        let port = listener.local_addr().expect("local addr").port();
+        let server_network = network.clone();
+        let server_bind_uri = bind_uri.clone();
+        let server_count = publish_count.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _peer)) = listener.accept().await else {
+                    break;
+                };
+                let current = server_count.fetch_add(1, Ordering::SeqCst) + 1;
+                let mut buf = [0_u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                if current == 2 {
+                    server_network.locations().upsert(
+                        server_bind_uri.clone(),
+                        Arc::new(Ok::<std::net::SocketAddr, io::Error>(
+                            "127.0.0.1:10001".parse().expect("valid socket addr"),
+                        )),
+                    );
+                }
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+
+        let resolver = Arc::new(
+            crate::resolvers::HttpResolver::new(format!("http://127.0.0.1:{port}/"))
+                .expect("valid http resolver"),
+        );
+        let mut publisher = Publisher::new(
+            Arc::new(TestAgent),
+            network.clone(),
+            resolver,
+            Arc::new(vec![
+                "inet://127.0.0.1:0".parse().expect("valid bind pattern"),
+            ]),
+        );
+        publisher.interval = Duration::from_secs(60);
+
+        let publisher = tokio::spawn(async move {
+            publisher.run().await;
+        });
+
+        wait_for_count(&publish_count, 1).await;
+        tokio::time::sleep(PUBLISH_CHANGE_DEBOUNCE + Duration::from_millis(100)).await;
+        network.locations().upsert(
+            bind_uri,
+            Arc::new(Ok::<std::net::SocketAddr, io::Error>(
+                "127.0.0.1:10000".parse().expect("valid socket addr"),
+            )),
+        );
+
+        tokio::time::timeout(Duration::from_secs(2), wait_for_count(&publish_count, 3))
+            .await
+            .expect("publishable location changes during publish must trigger another publish");
+
+        publisher.abort();
+        server.abort();
     }
 
     #[cfg(feature = "http-resolver")]
