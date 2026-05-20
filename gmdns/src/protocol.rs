@@ -1,6 +1,6 @@
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    num::NonZero,
+    num::{NonZero, NonZeroU32},
     pin::Pin,
     sync::{Arc, Weak},
     task::{Context, Poll},
@@ -50,6 +50,22 @@ impl MdnsSocket {
                 socket.bind(&bind.into())?;
                 #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
                 socket.bind_device(Some(device.as_bytes()))?;
+                #[cfg(any(
+                    target_os = "ios",
+                    target_os = "visionos",
+                    target_os = "macos",
+                    target_os = "tvos",
+                    target_os = "watchos",
+                ))]
+                {
+                    let ifindex = NonZeroU32::new(if_nametoindex(device)?).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "interface index must be non-zero",
+                        )
+                    })?;
+                    socket.bind_device_by_index_v4(Some(ifindex))?;
+                }
                 // Always enable multicast loopback so that mDNS services on the
                 // same host (but in different processes) can communicate.
                 socket.set_multicast_loop_v4(true)?;
@@ -75,9 +91,22 @@ impl MdnsSocket {
                 // same host (but in different processes) can communicate.
                 socket.set_multicast_loop_v6(true)?;
                 // TODO: 外面传进来
-                let ifindex = if_nametoindex(device)?;
-                socket.join_multicast_v6(&MULTICAST_ADDR_V6, ifindex)?;
-                socket.set_multicast_if_v6(ifindex)?;
+                let ifindex = NonZeroU32::new(if_nametoindex(device)?).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "interface index must be non-zero",
+                    )
+                })?;
+                #[cfg(any(
+                    target_os = "ios",
+                    target_os = "visionos",
+                    target_os = "macos",
+                    target_os = "tvos",
+                    target_os = "watchos",
+                ))]
+                socket.bind_device_by_index_v6(Some(ifindex))?;
+                socket.join_multicast_v6(&MULTICAST_ADDR_V6, ifindex.get())?;
+                socket.set_multicast_if_v6(ifindex.get())?;
 
                 socket
             }
