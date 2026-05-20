@@ -12,6 +12,9 @@ use tokio::time::Instant;
 use tracing::trace;
 use url::Url;
 
+const LOOKUP_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const LOOKUP_REQUEST_ATTEMPTS: usize = 3;
+
 pub struct H3Resolver<C: quic::Connect> {
     endpoint: Arc<H3Endpoint<C, C::Connection>>,
     base_url: Url,
@@ -53,6 +56,8 @@ pub enum Error<E: std::error::Error + Send + Sync + 'static = ConnectError> {
     H3Request {
         source: h3x::endpoint::client::RequestError<E>,
     },
+    #[snafu(display("h3 request timed out after {timeout:?}"))]
+    RequestTimeout { timeout: Duration },
 
     #[snafu(display("{status}"))]
     Status { status: http::StatusCode },
@@ -158,6 +163,70 @@ where
         Ok(())
     }
 
+    fn retryable_lookup_error(error: &Error<C::Error>) -> bool {
+        matches!(error, Error::H3Request { .. } | Error::H3Stream { .. })
+    }
+
+    async fn lookup_response(&self, uri: http::Uri) -> Result<bytes::Bytes, Error<C::Error>> {
+        let mut resp = match self.endpoint.get(uri).await {
+            Ok(resp) => resp,
+            Err(source) => return Err(self.request_error(source)),
+        };
+
+        tracing::trace!("received response with status {}", resp.status());
+        match resp.status() {
+            http::StatusCode::OK => {}
+            http::StatusCode::NOT_FOUND => return Err(Error::NoRecordFound),
+            status => return Err(Error::Status { status }),
+        }
+
+        match resp.read_to_bytes().await {
+            Ok(response) => Ok(response),
+            Err(source) => Err(Error::H3Stream { source }),
+        }
+    }
+
+    async fn lookup_response_with_retry(
+        &self,
+        uri: http::Uri,
+    ) -> Result<bytes::Bytes, Error<C::Error>> {
+        for attempt in 1..=LOOKUP_REQUEST_ATTEMPTS {
+            match tokio::time::timeout(LOOKUP_REQUEST_TIMEOUT, self.lookup_response(uri.clone()))
+                .await
+            {
+                Ok(Ok(response)) => return Ok(response),
+                Ok(Err(error))
+                    if Self::retryable_lookup_error(&error)
+                        && attempt < LOOKUP_REQUEST_ATTEMPTS =>
+                {
+                    self.endpoint.clear_pool();
+                    tracing::debug!(
+                        attempt,
+                        timeout_ms = LOOKUP_REQUEST_TIMEOUT.as_millis(),
+                        "h3 dns lookup failed, retrying"
+                    );
+                }
+                Ok(Err(error)) => return Err(error),
+                Err(_elapsed) if attempt < LOOKUP_REQUEST_ATTEMPTS => {
+                    self.endpoint.clear_pool();
+                    tracing::debug!(
+                        attempt,
+                        timeout_ms = LOOKUP_REQUEST_TIMEOUT.as_millis(),
+                        "h3 dns lookup timed out, retrying"
+                    );
+                }
+                Err(_elapsed) => {
+                    self.endpoint.clear_pool();
+                    return Err(Error::RequestTimeout {
+                        timeout: LOOKUP_REQUEST_TIMEOUT,
+                    });
+                }
+            }
+        }
+
+        unreachable!("lookup retry loop returns on the final attempt")
+    }
+
     pub const EXCLUDED_DOMAINS: [&str; 2] = ["dns.genmeta.net", "download.genmeta.net"];
 
     pub async fn lookup(&self, name: &str) -> Result<RecordStream, Error<C::Error>> {
@@ -197,26 +266,15 @@ where
         let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
 
         tracing::trace!("sending lookup request to {}", self.base_url);
-        let mut resp = match self.endpoint.get(uri).await {
-            Ok(resp) => resp,
-            Err(source) => return Err(self.request_error(source)),
-        };
-
-        tracing::trace!("received response with status {}", resp.status());
-        match resp.status() {
-            http::StatusCode::OK => {}
-            http::StatusCode::NOT_FOUND => {
+        let response = match self.lookup_response_with_retry(uri).await {
+            Ok(response) => response,
+            Err(Error::NoRecordFound) => {
                 self.negative_cache
                     .insert(domain.to_string(), now + negative_ttl);
                 return Err(Error::NoRecordFound);
             }
-            status => return Err(Error::Status { status }),
-        }
-
-        let response = resp
-            .read_to_bytes()
-            .await
-            .map_err(|source| Error::H3Stream { source })?;
+            Err(error) => return Err(error),
+        };
 
         // Server always returns multi-record format.
         let (_remain, multi) =
