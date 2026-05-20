@@ -487,7 +487,8 @@ fn public_endpoints_from_iface(
     use h3x::dquic::{net::IO, qtraversal::nat::client::StunClientsComponent};
 
     iface.with_components(|components, current| {
-        let stun_endpoints: Vec<EndpointAddr> = components
+        let addr = current.bound_addr().ok();
+        let mut endpoints: Vec<EndpointAddr> = components
             .get::<StunClientsComponent>()
             .map(|stun| {
                 stun.with_clients(|clients| {
@@ -511,24 +512,20 @@ fn public_endpoints_from_iface(
                 })
             })
             .unwrap_or_default();
-        if !stun_endpoints.is_empty() {
-            return stun_endpoints;
+
+        // Also publish the current default-route address. STUN-derived
+        // endpoints make the node reachable from outside the local network,
+        // while the bound address is still the shortest valid path for peers
+        // on the same link and for self-connectivity checks. Restrict this to
+        // default-route bindings so staging-only management links are not
+        // advertised.
+        if let Some(addr) = addr
+            && network.bound_addr_is_on_default_route(&current.bind_uri(), addr)
+        {
+            endpoints.push(EndpointAddr::direct(addr));
         }
 
-        // If STUN has not produced an external endpoint yet, publish the
-        // current default-route address as a temporary direct endpoint. This
-        // preserves reachability during local topology changes while avoiding
-        // staging-only/private management links that do not have a default
-        // route. Once STUN converges, its endpoint replaces this fallback.
-        let addr = match current.bound_addr() {
-            Ok(addr) => addr,
-            Err(_) => return Vec::new(),
-        };
-        if network.bound_addr_is_on_default_route(&current.bind_uri(), addr) {
-            vec![EndpointAddr::direct(addr)]
-        } else {
-            Vec::new()
-        }
+        endpoints
     })
 }
 
