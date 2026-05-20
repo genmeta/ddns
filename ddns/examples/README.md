@@ -73,13 +73,13 @@ Use the `query` example to query DNS service records from the HTTP/3 DNS server.
 #### Program Parameters
 - `--base-url <URL>`: Base URL of the DNS server (default: `https://dns.genmeta.net:4433/`).
 - `--server-ca <PATH>`: CA certificate PEM file path for verifying the online server certificate.
-- `--host <NAME>`: DNS name to query (default: `stun.genmeta.net`).
+- `--host <NAME>`: DNS name to query (default: `nat.genmeta.net`).
 
 #### Example Run Command
 ```bash
 cargo run -p ddns --example query --features="h3x-resolver" \
   --server-ca /path/to/root.crt \
-  --host stun.genmeta.net
+  --host nat.genmeta.net
 ```
 
 This command sends a GET or POST request to the server, the request body contains the DNS query message, the server returns matching records.

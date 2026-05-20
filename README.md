@@ -96,7 +96,7 @@ Query DNS service records from an HTTP/3 DNS server:
 ```bash
 cargo run -p ddns --example query --features="h3x-resolver" \
   --server-ca /path/to/root.crt \
-  --host stun.genmeta.net
+  --host nat.genmeta.net
 ```
 
 ### Running the DNS Server

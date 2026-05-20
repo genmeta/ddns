@@ -42,14 +42,14 @@ ttl_secs = 30
 # ---------------------------------------------------------------------------
 
 [[domain_policies]]
-host = "stun.genmeta.net"
+host = "nat.genmeta.net"
 policy = "open_multi"
 
 
 # Static bootstrap STUN endpoints returned even before any node publishes.
 # Ordering keeps the main :20002 endpoints ahead of the auxiliary :20003 endpoints.
 [[seed_records]]
-host = "stun.genmeta.net"
+host = "nat.genmeta.net"
 endpoints = []
 
 # Add more rules as needed, e.g.:

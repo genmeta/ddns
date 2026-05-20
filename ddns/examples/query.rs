@@ -29,7 +29,7 @@ struct Options {
     server_ca: PathBuf,
 
     /// 要查询的线上域名。
-    #[arg(long, default_value = "stun.genmeta.net")]
+    #[arg(long, default_value = "nat.genmeta.net")]
     host: String,
 }
 

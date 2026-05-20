@@ -4,7 +4,7 @@ use std::{
     io,
     net::SocketAddr,
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use ddns_core::{
@@ -32,11 +32,6 @@ pub const DEFAULT_PUBLISH_INTERVAL: Duration = Duration::from_secs(20);
 /// independent: the next interval observes the current bindings again.
 pub const DEFAULT_PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
 const PUBLISH_CHANGE_DEBOUNCE: Duration = Duration::from_millis(500);
-#[cfg(not(test))]
-const PUBLISH_CHANGE_RETRY_DELAY: Duration = Duration::from_secs(2);
-#[cfg(test)]
-const PUBLISH_CHANGE_RETRY_DELAY: Duration = Duration::from_millis(20);
-const PUBLISH_CHANGE_RETRY_WINDOW: Duration = Duration::from_secs(90);
 
 #[derive(Debug, Snafu)]
 #[snafu(module(create_publisher_error))]
@@ -149,21 +144,13 @@ impl Publisher {
 
     pub async fn run(&self) -> ! {
         let mut locations = self.network.locations().subscribe();
-        self.publish_attempt().await;
-        if self.settle_publish_events(&mut locations).await {
-            self.retry_changed_publish(&mut locations).await;
-        }
+        let _ = self.publish_attempt().await;
+        let _ = self.settle_publish_events(&mut locations).await;
 
         loop {
-            let trigger = self.wait_next_publish_trigger(&mut locations).await;
-            let published = self.publish_attempt().await;
-            let changed_during_publish = self.settle_publish_events(&mut locations).await;
-            if changed_during_publish
-                || (!published
-                    && (matches!(trigger, PublishTrigger::Location) || self.has_public_endpoints()))
-            {
-                self.retry_changed_publish(&mut locations).await;
-            }
+            self.wait_next_publish_trigger(&mut locations).await;
+            let _ = self.publish_attempt().await;
+            let _ = self.settle_publish_events(&mut locations).await;
         }
     }
 
@@ -196,17 +183,17 @@ impl Publisher {
     async fn wait_next_publish_trigger(
         &self,
         locations: &mut h3x::dquic::qinterface::component::location::Observer,
-    ) -> PublishTrigger {
+    ) {
         let interval = tokio::time::sleep(self.interval);
         tokio::pin!(interval);
 
         loop {
             tokio::select! {
-                _ = &mut interval => return PublishTrigger::Interval,
+                _ = &mut interval => return,
                 event = locations.recv() => {
                     let Some((bind_uri, event)) = event else {
                         interval.await;
-                        return PublishTrigger::Interval;
+                        return;
                     };
                     if !self.bind_patterns.iter().any(|pattern| pattern.matches(&bind_uri)) {
                         continue;
@@ -222,49 +209,9 @@ impl Publisher {
                     self.clear_publish_state();
                     tokio::time::sleep(PUBLISH_CHANGE_DEBOUNCE).await;
                     self.drain_location_events(locations);
-                    return PublishTrigger::Location;
-                }
-            }
-        }
-    }
-
-    async fn retry_changed_publish(
-        &self,
-        locations: &mut h3x::dquic::qinterface::component::location::Observer,
-    ) {
-        let deadline = Instant::now() + PUBLISH_CHANGE_RETRY_WINDOW;
-
-        while Instant::now() < deadline {
-            let retry_delay = tokio::time::sleep(PUBLISH_CHANGE_RETRY_DELAY);
-            tokio::pin!(retry_delay);
-
-            loop {
-                tokio::select! {
-                    _ = &mut retry_delay => break,
-                    event = locations.recv() => {
-                        let Some((bind_uri, event)) = event else {
-                            break;
-                        };
-                        if !self.bind_patterns.iter().any(|pattern| pattern.matches(&bind_uri)) {
-                            continue;
-                        }
-                        if !Self::location_event_requires_publish(&event) {
-                            continue;
-                        }
-                        self.clear_publish_state();
-                        tokio::time::sleep(PUBLISH_CHANGE_DEBOUNCE).await;
-                        self.drain_location_events(locations);
-                    }
-                }
-            }
-
-            if self.publish_attempt().await {
-                if !self.settle_publish_events(locations).await {
                     return;
                 }
-                continue;
             }
-            self.settle_publish_events(locations).await;
         }
     }
 
@@ -448,10 +395,6 @@ impl Publisher {
         endpoints
     }
 
-    fn has_public_endpoints(&self) -> bool {
-        !self.public_endpoints().is_empty()
-    }
-
     #[cfg(feature = "mdns-resolver")]
     fn local_endpoints_for(&self, device: &str, family: Family) -> Vec<EndpointAddr> {
         let mut endpoints = HashSet::new();
@@ -474,11 +417,6 @@ impl Publisher {
         }
         endpoints.into_iter().collect()
     }
-}
-
-enum PublishTrigger {
-    Interval,
-    Location,
 }
 
 fn push_unique_endpoint(
@@ -743,7 +681,7 @@ mod tests {
 
     #[cfg(feature = "http-resolver")]
     #[tokio::test]
-    async fn run_republishes_when_location_changes_during_publish_attempt() {
+    async fn run_treats_location_publish_attempts_as_independent() {
         async fn wait_for_count(count: &AtomicUsize, target: usize) {
             loop {
                 if count.load(Ordering::SeqCst) >= target {
@@ -813,12 +751,23 @@ mod tests {
             )),
         );
 
-        tokio::time::timeout(Duration::from_secs(2), wait_for_count(&publish_count, 3))
+        tokio::time::timeout(Duration::from_secs(2), wait_for_count(&publish_count, 2))
             .await
-            .expect("publishable location changes during publish must trigger another publish");
+            .expect("publishable location changes should trigger the next independent publish");
+
+        let third_publish = tokio::time::timeout(
+            PUBLISH_CHANGE_DEBOUNCE + Duration::from_millis(500),
+            wait_for_count(&publish_count, 3),
+        )
+        .await;
 
         publisher.abort();
         server.abort();
+
+        assert!(
+            third_publish.is_err(),
+            "location events generated by a publish attempt must not trigger an immediate retry"
+        );
     }
 
     #[cfg(feature = "http-resolver")]
@@ -908,7 +857,7 @@ mod tests {
 
     #[cfg(feature = "http-resolver")]
     #[tokio::test]
-    async fn run_retries_location_publish_after_timeout() {
+    async fn run_does_not_retry_location_publish_after_timeout() {
         async fn wait_for_count(count: &AtomicUsize, target: usize) {
             loop {
                 if count.load(Ordering::SeqCst) >= target {
@@ -972,11 +921,19 @@ mod tests {
             )),
         );
 
-        tokio::time::timeout(Duration::from_secs(2), wait_for_count(&publish_count, 3))
-            .await
-            .expect("location-triggered publish should be retried after timeout");
+        wait_for_count(&publish_count, 2).await;
+        let third_publish = tokio::time::timeout(
+            PUBLISH_CHANGE_DEBOUNCE + Duration::from_millis(500),
+            wait_for_count(&publish_count, 3),
+        )
+        .await;
 
         publisher.abort();
         server.abort();
+
+        assert!(
+            third_publish.is_err(),
+            "timed out location-triggered publish must not be retried before the next interval"
+        );
     }
 }
