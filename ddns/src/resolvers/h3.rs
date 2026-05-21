@@ -42,11 +42,7 @@ impl<C: quic::Connect> fmt::Debug for H3Resolver<C> {
 
 impl<C: quic::Connect> fmt::Display for H3Resolver<C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "H3 DNS Resolver({})",
-            self.base_url.host_str().unwrap_or("<unknown server>")
-        )
+        write!(f, "H3 DNS Resolver({})", self.base_url)
     }
 }
 
@@ -287,8 +283,8 @@ where
 
     pub async fn lookup(&self, name: &str) -> Result<RecordStream, Error<C::Error>> {
         use ddns_core::parser::record;
-        let server = Arc::from(self.base_url.host_str().unwrap_or("<unknown server>"));
-        let source = Source::Http { server };
+        let server = Arc::from(self.base_url.origin().ascii_serialization());
+        let source = Source::H3 { server };
 
         let Some(domain) = super::resolvable_name(name) else {
             return Err(Error::NoRecordFound);
@@ -423,6 +419,35 @@ mod tests {
         assert!(
             total_budget <= Duration::from_secs(10),
             "h3 lookup must return before common 15s command timeouts so callers can retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_lookup_reports_h3_dns_source() {
+        let endpoint = Arc::new(h3x::endpoint::H3Endpoint::new(
+            h3x::dquic::QuicEndpoint::builder().build().await,
+        ));
+        let resolver = H3Resolver::from_endpoint("https://dns.genmeta.net:4433", endpoint).unwrap();
+        resolver.cached_records.insert(
+            "car.lab.genmeta.net".to_owned(),
+            Record {
+                addrs: vec![EndpointAddr::direct("192.168.5.78:41748".parse().unwrap())],
+                expire: Instant::now() + Duration::from_secs(60),
+            },
+        );
+
+        let mut records = resolver.lookup("car.lab.genmeta.net").await.unwrap();
+        let (source, endpoint) = records.next().await.unwrap();
+
+        assert_eq!(
+            source,
+            Source::H3 {
+                server: Arc::from("https://dns.genmeta.net:4433")
+            }
+        );
+        assert_eq!(
+            endpoint,
+            EndpointAddr::direct("192.168.5.78:41748".parse().unwrap())
         );
     }
 }
