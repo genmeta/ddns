@@ -1,8 +1,10 @@
 use std::{
     any::{Any, TypeId},
     collections::{HashMap, HashSet},
+    future::Future,
     io,
     net::SocketAddr,
+    pin::Pin,
     sync::Arc,
     time::Duration,
 };
@@ -31,7 +33,9 @@ pub const DEFAULT_PUBLISH_INTERVAL: Duration = Duration::from_secs(20);
 /// longer exist. Timing out the attempt keeps consecutive publishes
 /// independent: the next interval observes the current bindings again.
 pub const DEFAULT_PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
-const PUBLISH_CHANGE_DEBOUNCE: Duration = Duration::from_millis(500);
+const PUBLISH_CHANGE_DEBOUNCE: Duration = Duration::from_millis(50);
+
+type PublishLoopFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
 #[derive(Debug, Snafu)]
 #[snafu(module(create_publisher_error))]
@@ -149,14 +153,51 @@ impl Publisher {
 
     pub async fn run(&self) -> ! {
         let mut locations = self.network.locations().subscribe();
-        let _ = self.publish_attempt().await;
-        let _ = self.settle_publish_events(&mut locations).await;
+        let interval = tokio::time::sleep(self.interval);
+        tokio::pin!(interval);
+        // Keep at most one publish attempt in flight. A timer tick or
+        // publishable location change drops the current future and starts a new
+        // debounced attempt so a stale H3 publish cannot block publication from
+        // the latest bindings.
+        let mut current_publish = self.new_publish_loop_future();
 
         loop {
-            self.wait_next_publish_trigger(&mut locations).await;
-            let _ = self.publish_attempt().await;
-            let _ = self.settle_publish_events(&mut locations).await;
+            tokio::select! {
+                _ = &mut current_publish => {
+                    current_publish = Self::pending_publish_loop_future();
+                }
+                _ = &mut interval => {
+                    interval.as_mut().reset(tokio::time::Instant::now() + self.interval);
+                    self.clear_publish_state();
+                    current_publish = self.new_publish_loop_future();
+                }
+                event = locations.recv() => {
+                    let Some((bind_uri, event)) = event else {
+                        continue;
+                    };
+                    if !self.bind_patterns.iter().any(|pattern| pattern.matches(&bind_uri)) {
+                        continue;
+                    }
+                    if !Self::location_event_requires_publish(&event) {
+                        continue;
+                    }
+
+                    self.clear_publish_state();
+                    current_publish = self.new_publish_loop_future();
+                }
+            }
         }
+    }
+
+    fn new_publish_loop_future(&self) -> PublishLoopFuture<'_> {
+        Box::pin(async move {
+            tokio::time::sleep(PUBLISH_CHANGE_DEBOUNCE).await;
+            let _ = self.publish_attempt().await;
+        })
+    }
+
+    fn pending_publish_loop_future<'a>() -> PublishLoopFuture<'a> {
+        Box::pin(std::future::pending())
     }
 
     async fn publish_attempt(&self) -> bool {
@@ -187,70 +228,6 @@ impl Publisher {
                 false
             }
         }
-    }
-
-    async fn wait_next_publish_trigger(
-        &self,
-        locations: &mut h3x::dquic::qinterface::component::location::Observer,
-    ) {
-        let interval = tokio::time::sleep(self.interval);
-        tokio::pin!(interval);
-
-        loop {
-            tokio::select! {
-                _ = &mut interval => return,
-                event = locations.recv() => {
-                    let Some((bind_uri, event)) = event else {
-                        interval.await;
-                        return;
-                    };
-                    if !self.bind_patterns.iter().any(|pattern| pattern.matches(&bind_uri)) {
-                        continue;
-                    }
-                    if !Self::location_event_requires_publish(&event) {
-                        continue;
-                    }
-
-                    // A local-address change invalidates cached H3 DNS
-                    // connections even if no request has failed yet. Clear
-                    // resolver-owned connection state before publishing from
-                    // the new binding set.
-                    self.clear_publish_state();
-                    tokio::time::sleep(PUBLISH_CHANGE_DEBOUNCE).await;
-                    self.drain_location_events(locations);
-                    return;
-                }
-            }
-        }
-    }
-
-    fn drain_location_events(
-        &self,
-        locations: &mut h3x::dquic::qinterface::component::location::Observer,
-    ) -> bool {
-        let mut requires_publish = false;
-        while let Ok((bind_uri, event)) = locations.try_recv() {
-            if !self
-                .bind_patterns
-                .iter()
-                .any(|pattern| pattern.matches(&bind_uri))
-            {
-                continue;
-            }
-            if Self::location_event_requires_publish(&event) {
-                self.clear_publish_state();
-                requires_publish = true;
-            }
-        }
-        requires_publish
-    }
-
-    async fn settle_publish_events(
-        &self,
-        locations: &mut h3x::dquic::qinterface::component::location::Observer,
-    ) -> bool {
-        tokio::time::sleep(PUBLISH_CHANGE_DEBOUNCE).await;
-        self.drain_location_events(locations)
     }
 
     fn location_event_requires_publish(event: &AddressEvent) -> bool {
@@ -709,7 +686,7 @@ mod tests {
 
     #[cfg(feature = "http-resolver")]
     #[tokio::test]
-    async fn run_treats_location_publish_attempts_as_independent() {
+    async fn run_restarts_when_publish_attempt_observes_location_change() {
         async fn wait_for_count(count: &AtomicUsize, target: usize) {
             loop {
                 if count.load(Ordering::SeqCst) >= target {
@@ -783,24 +760,20 @@ mod tests {
             .await
             .expect("publishable location changes should trigger the next independent publish");
 
-        let third_publish = tokio::time::timeout(
+        tokio::time::timeout(
             PUBLISH_CHANGE_DEBOUNCE + Duration::from_millis(500),
             wait_for_count(&publish_count, 3),
         )
-        .await;
+        .await
+        .expect("publishable location events should replace the current publish attempt");
 
         publisher.abort();
         server.abort();
-
-        assert!(
-            third_publish.is_err(),
-            "location events generated by a publish attempt must not trigger an immediate retry"
-        );
     }
 
     #[cfg(feature = "http-resolver")]
     #[tokio::test]
-    async fn run_drains_events_generated_during_publish_attempt() {
+    async fn run_ignores_transient_location_failures_generated_during_publish_attempt() {
         async fn wait_for_count(count: &AtomicUsize, target: usize) {
             loop {
                 if count.load(Ordering::SeqCst) >= target {
@@ -963,5 +936,86 @@ mod tests {
             third_publish.is_err(),
             "timed out location-triggered publish must not be retried before the next interval"
         );
+    }
+
+    #[cfg(feature = "http-resolver")]
+    #[tokio::test]
+    async fn run_replaces_in_flight_publish_on_publishable_location_change() {
+        async fn wait_for_count(count: &AtomicUsize, target: usize) {
+            loop {
+                if count.load(Ordering::SeqCst) >= target {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+
+        let network = h3x::dquic::Network::builder().build();
+        let bind_uri: h3x::dquic::net::BindUri =
+            "inet://127.0.0.1:0".parse().expect("valid bind uri");
+        let publish_count = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test http server");
+        let port = listener.local_addr().expect("local addr").port();
+        let server_count = publish_count.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _peer)) = listener.accept().await else {
+                    break;
+                };
+                let current = server_count.fetch_add(1, Ordering::SeqCst) + 1;
+                tokio::spawn(async move {
+                    let mut buf = [0_u8; 1024];
+                    let _ = stream.read(&mut buf).await;
+                    if current == 1 {
+                        std::future::pending::<()>().await;
+                    }
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                        .await;
+                });
+            }
+        });
+
+        let resolver = Arc::new(
+            crate::resolvers::HttpResolver::new(format!("http://127.0.0.1:{port}/"))
+                .expect("valid http resolver"),
+        );
+        let mut publisher = Publisher::new(
+            Arc::new(TestAgent),
+            network.clone(),
+            resolver,
+            Arc::new(vec![
+                "inet://127.0.0.1:0".parse().expect("valid bind pattern"),
+            ]),
+        )
+        .with_publish_timeout(Duration::from_secs(30));
+        publisher.interval = Duration::from_secs(60);
+
+        let publisher = tokio::spawn(async move {
+            publisher.run().await;
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), wait_for_count(&publish_count, 1))
+            .await
+            .expect("initial publish should start");
+
+        network.locations().upsert(
+            bind_uri,
+            Arc::new(Ok::<std::net::SocketAddr, io::Error>(
+                "127.0.0.1:10000".parse().expect("valid socket addr"),
+            )),
+        );
+
+        tokio::time::timeout(
+            PUBLISH_CHANGE_DEBOUNCE + Duration::from_millis(800),
+            wait_for_count(&publish_count, 2),
+        )
+        .await
+        .expect("publishable location change should replace the in-flight publish");
+
+        publisher.abort();
+        server.abort();
     }
 }
