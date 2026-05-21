@@ -10,7 +10,7 @@ use tracing::{debug, info, warn};
 use crate::{
     error::{AppError, normalize_host, parse_query_params},
     lookup::{Request, Response, body_response, write_error},
-    policy::{DomainPolicy, client_allowed_host, validate_dns_packet},
+    policy::{DomainPolicy, ValidatedDnsPacket, client_allowed_host, validate_dns_packet},
     storage::{
         AppState, Record, Storage, StoredRecord, cert_fingerprint, cert_fingerprint_hex,
         unix_now_secs,
@@ -108,7 +108,7 @@ async fn publish_with_cert(state: AppState, request: Request) -> Response {
         require_signature = require_sig,
         "validating publish packet"
     );
-    let packet_name = match validate_dns_packet(body.as_ref(), require_sig, agent.as_ref()) {
+    let packet = match validate_dns_packet(body.as_ref(), require_sig, agent.as_ref()) {
         Ok(n) => n,
         Err(e) => {
             debug!(host = %host, error = %e, "publish packet rejected");
@@ -116,16 +116,21 @@ async fn publish_with_cert(state: AppState, request: Request) -> Response {
         }
     };
 
-    let packet_host = match normalize_host(&packet_name) {
-        Ok(h) => h,
-        Err(e) => return write_error(e),
-    };
+    match packet {
+        ValidatedDnsPacket::Records { host: packet_name } => {
+            let packet_host = match normalize_host(&packet_name) {
+                Ok(h) => h,
+                Err(e) => return write_error(e),
+            };
 
-    if packet_host != host {
-        return write_error(AppError::HostMismatch);
+            if packet_host != host {
+                return write_error(AppError::HostMismatch);
+            }
+
+            publish_record(&state, &host, &body, agent.as_ref()).await
+        }
+        ValidatedDnsPacket::Empty => clear_record(&state, &host, agent.as_ref()).await,
     }
-
-    publish_record(&state, &host, &body, agent.as_ref()).await
 }
 
 fn request_connection(request: &Request) -> Option<Arc<ConnectionState<dyn quic::DynConnection>>> {
@@ -248,4 +253,175 @@ pub async fn publish_record(
 
     info!(host = %host, ttl = state.ttl_secs, bytes = body.len(), fp = %fp_hex, "publish.ok");
     body_response(http::StatusCode::OK, bytes::Bytes::from_static(b"OK"))
+}
+
+pub async fn clear_record(
+    state: &AppState,
+    host: &str,
+    agent: &(impl RemoteAgent + ?Sized),
+) -> Response {
+    let cert_bytes = agent
+        .cert_chain()
+        .first()
+        .map(|c| c.as_ref().to_vec())
+        .unwrap_or_default();
+
+    let fp = cert_fingerprint(&cert_bytes);
+    let fp_hex = cert_fingerprint_hex(&cert_bytes);
+
+    match &state.storage {
+        Storage::Redis(pool) => {
+            let mut conn = match pool.get().await {
+                Ok(c) => c,
+                Err(e) => {
+                    return write_error(AppError::Redis {
+                        message: e.to_string(),
+                    });
+                }
+            };
+
+            let fp_key = format!("{host}:fp:{fp_hex}");
+            let set_key = format!("{host}:multi");
+
+            let old_member: Option<Vec<u8>> = conn.get(&fp_key).await.unwrap_or(None);
+            if let Some(old) = old_member {
+                let _: () = conn.zrem(&set_key, &old).await.unwrap_or(());
+            }
+            if let Err(e) = conn.del::<_, ()>(&fp_key).await {
+                return write_error(AppError::Redis {
+                    message: e.to_string(),
+                });
+            }
+        }
+        Storage::Memory(mem) => {
+            let remove_host = if let Some(mut host_map) = mem.records.get_mut(host) {
+                host_map.remove(&fp);
+                host_map.is_empty()
+            } else {
+                false
+            };
+            if remove_host {
+                mem.records.remove(host);
+            }
+        }
+    }
+
+    info!(host = %host, fp = %fp_hex, "publish.clear");
+    body_response(http::StatusCode::OK, bytes::Bytes::from_static(b"OK"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::HashMap,
+        net::{Ipv4Addr, SocketAddrV4},
+        sync::Arc,
+    };
+
+    use ddns::{MdnsPacket, parser::record::endpoint::EndpointAddr};
+    use dhttp_identity::identity::RemoteAgent;
+    use rustls::pki_types::CertificateDer;
+
+    use super::*;
+    use crate::{
+        lookup::{LookupResult, perform_lookup},
+        policy::DomainPolicies,
+        storage::{MemoryStorage, SeedRecords},
+    };
+
+    #[derive(Debug)]
+    struct TestAgent {
+        name: &'static str,
+        certs: Vec<CertificateDer<'static>>,
+    }
+
+    impl TestAgent {
+        fn new(name: &'static str, cert_bytes: Vec<u8>) -> Self {
+            Self {
+                name,
+                certs: vec![CertificateDer::from(cert_bytes)],
+            }
+        }
+    }
+
+    impl RemoteAgent for TestAgent {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn cert_chain(&self) -> &[CertificateDer<'static>] {
+            &self.certs
+        }
+    }
+
+    fn memory_state() -> AppState {
+        AppState {
+            storage: Storage::Memory(MemoryStorage::new()),
+            require_signature: true,
+            ttl_secs: 30,
+            policies: Arc::new(DomainPolicies::default()),
+            seed_records: SeedRecords::default(),
+        }
+    }
+
+    fn packet_for(host: &str, last_octet: u8) -> bytes::Bytes {
+        let endpoint = EndpointAddr::direct_v4(SocketAddrV4::new(
+            Ipv4Addr::new(203, 0, 113, last_octet),
+            4433,
+        ));
+        let mut hosts = HashMap::new();
+        hosts.insert(host.to_owned(), vec![endpoint]);
+        bytes::Bytes::from(MdnsPacket::answer(0, &hosts).to_bytes())
+    }
+
+    #[tokio::test]
+    async fn clear_record_removes_only_current_certificate_fingerprint() {
+        let state = memory_state();
+        let host = "reimu.pilot.genmeta.net";
+        let agent_a = TestAgent::new("agent-a", vec![1]);
+        let agent_b = TestAgent::new("agent-b", vec![2]);
+        let packet_a = packet_for(host, 1);
+        let packet_b = packet_for(host, 2);
+
+        assert_eq!(
+            publish_record(&state, host, &packet_a, &agent_a)
+                .await
+                .status(),
+            http::StatusCode::OK
+        );
+        assert_eq!(
+            publish_record(&state, host, &packet_b, &agent_b)
+                .await
+                .status(),
+            http::StatusCode::OK
+        );
+
+        assert_eq!(
+            clear_record(&state, host, &agent_a).await.status(),
+            http::StatusCode::OK
+        );
+
+        let LookupResult::Multi(response) = perform_lookup(&state, host, None).await.unwrap()
+        else {
+            panic!("agent b record should remain");
+        };
+        assert_eq!(response.records.len(), 1);
+        assert_eq!(response.records[0].cert, agent_b.certs[0].as_ref());
+    }
+
+    #[tokio::test]
+    async fn clear_record_is_idempotent_for_missing_fingerprint() {
+        let state = memory_state();
+        let host = "reimu.pilot.genmeta.net";
+        let agent = TestAgent::new("agent", vec![1]);
+
+        assert_eq!(
+            clear_record(&state, host, &agent).await.status(),
+            http::StatusCode::OK
+        );
+        assert!(matches!(
+            perform_lookup(&state, host, None).await.unwrap(),
+            LookupResult::NotFound
+        ));
+    }
 }

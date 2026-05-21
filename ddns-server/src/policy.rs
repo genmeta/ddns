@@ -55,6 +55,12 @@ impl DomainPolicies {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValidatedDnsPacket {
+    Records { host: String },
+    Empty,
+}
+
 // ---------------------------------------------------------------------------
 // Certificate helpers
 // ---------------------------------------------------------------------------
@@ -100,7 +106,7 @@ pub fn validate_dns_packet(
     packet: &[u8],
     require_signature: bool,
     agent: &(impl RemoteAgent + ?Sized),
-) -> Result<String, AppError> {
+) -> Result<ValidatedDnsPacket, AppError> {
     let (remaining, dns_packet) = be_packet(packet).map_err(|e| AppError::InvalidDnsPacket {
         message: e.to_string(),
     })?;
@@ -111,6 +117,11 @@ pub fn validate_dns_packet(
         answers = dns_packet.answers.len(),
         require_signature, "validating dns packet"
     );
+
+    let Some(first_answer) = dns_packet.answers.first() else {
+        debug!("dns packet has no answers");
+        return Ok(ValidatedDnsPacket::Empty);
+    };
 
     if require_signature {
         let has_signature = dns_packet
@@ -140,10 +151,42 @@ pub fn validate_dns_packet(
         }
     }
 
-    let Some(first_answer) = dns_packet.answers.first() else {
-        debug!("dns packet has no answers");
-        return Err(AppError::NoAnswersInPacket);
-    };
+    Ok(ValidatedDnsPacket::Records {
+        host: first_answer.name().to_string(),
+    })
+}
 
-    Ok(first_answer.name().to_string())
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use ddns::MdnsPacket;
+    use dhttp_identity::identity::RemoteAgent;
+    use rustls::pki_types::CertificateDer;
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct TestAgent;
+
+    impl RemoteAgent for TestAgent {
+        fn name(&self) -> &str {
+            "agent.example"
+        }
+
+        fn cert_chain(&self) -> &[CertificateDer<'static>] {
+            &[]
+        }
+    }
+
+    #[test]
+    fn validate_dns_packet_accepts_empty_packet_as_clear_operation() {
+        let hosts: HashMap<String, Vec<ddns::parser::record::endpoint::EndpointAddr>> =
+            HashMap::from([("reimu.pilot.genmeta.net".to_owned(), Vec::new())]);
+        let packet = MdnsPacket::answer(0, &hosts).to_bytes();
+
+        let validated = validate_dns_packet(&packet, true, &TestAgent).unwrap();
+
+        assert!(matches!(validated, ValidatedDnsPacket::Empty));
+    }
 }
