@@ -1,7 +1,6 @@
 use std::{convert::Infallible, fmt, io, sync::Arc, time::Duration};
 
 use dashmap::DashMap;
-use ddns_core::{MdnsPacket, parser::packet::be_packet, wire::be_multi_response};
 use dquic::{
     qbase::net::addr::EndpointAddr,
     qresolve::{Publish, PublishFuture, RecordStream, Resolve, ResolveFuture, Source},
@@ -15,6 +14,8 @@ use http_body_util::{BodyExt, Empty, Full};
 use tokio::time::Instant;
 use tracing::trace;
 use url::Url;
+
+use crate::core::{MdnsPacket, parser::packet::be_packet, wire::be_multi_response};
 
 const LOOKUP_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 const LOOKUP_REQUEST_ATTEMPTS: usize = 3;
@@ -176,7 +177,7 @@ where
             let endpoints = endpoints
                 .iter()
                 .filter_map(|ep| {
-                    ddns_core::parser::record::endpoint::EndpointAddr::try_from(*ep).ok()
+                    crate::core::parser::record::endpoint::EndpointAddr::try_from(*ep).ok()
                 })
                 .collect();
             let mut hosts = std::collections::HashMap::new();
@@ -282,7 +283,7 @@ where
     pub const EXCLUDED_DOMAINS: [&str; 2] = ["dns.genmeta.net", "download.genmeta.net"];
 
     pub async fn lookup(&self, name: &str) -> Result<RecordStream, Error<C::Error>> {
-        use ddns_core::parser::record;
+        use crate::core::parser::record;
         let server = Arc::from(self.base_url.origin().ascii_serialization());
         let source = Source::H3 { server };
 

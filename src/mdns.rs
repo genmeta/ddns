@@ -1,9 +1,9 @@
 mod if_nametoindex;
-pub mod mdns;
 mod protocol;
 pub mod resolvers;
+mod service;
 
-pub use mdns::Mdns;
 pub use resolvers::MdnsResolver;
-#[cfg(feature = "h3x-network")]
+#[cfg(feature = "mdns-resolver")]
 pub use resolvers::{MdnsBindDriver, MdnsResolvers};
+pub use service::Mdns;

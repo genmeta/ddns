@@ -1,9 +1,12 @@
+pub mod core;
+pub mod mdns;
 #[cfg(any(feature = "h3x-resolver", feature = "mdns-resolver"))]
 mod publisher;
 pub mod resolvers;
 
-pub use ddns_core::{MdnsEndpoint, MdnsPacket, parser, sign_endponit_address, wire};
-pub use gmdns::{Mdns, MdnsResolver, mdns};
+pub use core::{MdnsEndpoint, MdnsPacket, parser, sign_endponit_address, wire};
+
+pub use mdns::{Mdns, MdnsResolver};
 #[cfg(any(feature = "h3x-resolver", feature = "mdns-resolver"))]
 pub use publisher::{
     CreatePublisherError, DEFAULT_PUBLISH_INTERVAL, DEFAULT_PUBLISH_TIMEOUT, PublishOnceError,

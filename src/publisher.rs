@@ -9,10 +9,6 @@ use std::{
     time::Duration,
 };
 
-use ddns_core::{
-    MdnsPacket,
-    parser::record::endpoint::{EndpointAddr as DnsEndpointAddr, SignEndpointError},
-};
 use dhttp_identity::identity::LocalAgent;
 #[cfg(feature = "mdns-resolver")]
 use dquic::qbase::net::Family;
@@ -24,7 +20,13 @@ use dquic::{
 };
 use snafu::{ResultExt, Snafu};
 
-use crate::resolvers::Resolvers;
+use crate::{
+    core::{
+        MdnsPacket,
+        parser::record::endpoint::{EndpointAddr as DnsEndpointAddr, SignEndpointError},
+    },
+    resolvers::Resolvers,
+};
 
 pub const DEFAULT_PUBLISH_INTERVAL: Duration = Duration::from_secs(20);
 /// Upper bound for a single publish attempt in the background loop.
@@ -299,6 +301,9 @@ impl Publisher {
         resolver: &(dyn Resolve + Send + Sync),
         public_endpoints: &[EndpointAddr],
     ) -> Result<bool, PublishOnceError> {
+        #[cfg(not(any(feature = "http-resolver", feature = "h3x-resolver")))]
+        let _ = public_endpoints;
+
         let any: &dyn Any = resolver;
 
         #[cfg(feature = "http-resolver")]
@@ -616,9 +621,9 @@ mod tests {
 
         let endpoint = EndpointAddr::direct("127.0.0.1:443".parse().unwrap());
         let packet = publisher.signed_packet(&[endpoint]).await.unwrap();
-        let (_remain, packet) = ddns_core::parser::packet::be_packet(&packet).unwrap();
+        let (_remain, packet) = crate::core::parser::packet::be_packet(&packet).unwrap();
         let record = packet.answers.first().expect("endpoint answer");
-        let ddns_core::parser::record::RData::E(endpoint) = record.data() else {
+        let crate::core::parser::record::RData::E(endpoint) = record.data() else {
             panic!("expected endpoint record");
         };
 

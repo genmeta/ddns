@@ -1,23 +1,23 @@
 use std::{fmt, io, net::IpAddr};
-#[cfg(feature = "h3x-network")]
+#[cfg(feature = "mdns-resolver")]
 use std::{net::SocketAddr, sync::Arc};
 
-#[cfg(feature = "h3x-network")]
-use ddns_core::parser::packet::Packet;
-use ddns_core::parser::record::RData;
-#[cfg(feature = "h3x-network")]
+#[cfg(feature = "mdns-resolver")]
 use dquic::qresolve::RecordStream;
 use dquic::{
     qbase::net::{Family, addr::EndpointAddr as DquicEndpointAddr},
     qresolve::{Publish, PublishFuture, Resolve, ResolveFuture, Source},
 };
 use futures::{FutureExt, StreamExt, TryFutureExt, future, stream};
-#[cfg(feature = "h3x-network")]
+#[cfg(feature = "mdns-resolver")]
 use futures::{Stream, stream::FuturesUnordered};
 
+#[cfg(feature = "mdns-resolver")]
+use super::super::protocol::MdnsProtocol;
+#[cfg(feature = "mdns-resolver")]
+use crate::core::parser::packet::Packet;
+use crate::core::parser::record::RData;
 pub use crate::mdns::Mdns as MdnsResolver;
-#[cfg(feature = "h3x-network")]
-use crate::protocol::MdnsProtocol;
 
 impl MdnsResolver {
     pub fn source(&self) -> Source {
@@ -63,8 +63,8 @@ impl Resolve for MdnsResolver {
     }
 }
 
-fn endpoints_from_packet(packet: &[u8]) -> io::Result<Vec<ddns_core::MdnsEndpoint>> {
-    use ddns_core::parser::packet::be_packet;
+fn endpoints_from_packet(packet: &[u8]) -> io::Result<Vec<crate::core::MdnsEndpoint>> {
+    use crate::core::parser::packet::be_packet;
 
     be_packet(packet)
         .map(|(_, pkt)| {
@@ -79,14 +79,14 @@ fn endpoints_from_packet(packet: &[u8]) -> io::Result<Vec<ddns_core::MdnsEndpoin
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
 }
 
-#[cfg(feature = "h3x-network")]
+#[cfg(feature = "mdns-resolver")]
 pub struct MdnsBindDriver {
     iface_manager: Arc<h3x::dquic::net::InterfaceManager>,
     null_io_factory: Arc<h3x::dquic::NullIoFactory>,
     service_name: Arc<str>,
 }
 
-#[cfg(feature = "h3x-network")]
+#[cfg(feature = "mdns-resolver")]
 impl MdnsBindDriver {
     pub fn new(service_name: impl Into<Arc<str>>) -> Self {
         Self {
@@ -112,7 +112,7 @@ impl MdnsBindDriver {
         };
 
         bind_iface.with_components_mut(|components, _iface| {
-            match components.try_init_with(|| crate::Mdns::new(&self.service_name, ip, device)) {
+            match components.try_init_with(|| crate::mdns::Mdns::new(&self.service_name, ip, device)) {
                 Ok(mdns) => mdns.reinit_on(device, ip),
                 Err(error) => {
                     let report = snafu::Report::from_error(&error);
@@ -123,7 +123,7 @@ impl MdnsBindDriver {
     }
 }
 
-#[cfg(feature = "h3x-network")]
+#[cfg(feature = "mdns-resolver")]
 impl h3x::dquic::BindDriver for MdnsBindDriver {
     fn bind<'a>(
         &'a self,
@@ -153,7 +153,7 @@ impl h3x::dquic::BindDriver for MdnsBindDriver {
     }
 }
 
-#[cfg(feature = "h3x-network")]
+#[cfg(feature = "mdns-resolver")]
 pub struct MdnsResolvers {
     network: Arc<h3x::dquic::Network>,
     driver: Arc<MdnsBindDriver>,
@@ -161,7 +161,7 @@ pub struct MdnsResolvers {
     _handles: Vec<h3x::dquic::BindHandle>,
 }
 
-#[cfg(feature = "h3x-network")]
+#[cfg(feature = "mdns-resolver")]
 #[derive(Debug, Clone)]
 pub struct BoundMdnsResolver {
     pub device: String,
@@ -169,7 +169,7 @@ pub struct BoundMdnsResolver {
     pub resolver: MdnsResolver,
 }
 
-#[cfg(feature = "h3x-network")]
+#[cfg(feature = "mdns-resolver")]
 impl fmt::Debug for MdnsResolvers {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MdnsResolvers")
@@ -178,14 +178,14 @@ impl fmt::Debug for MdnsResolvers {
     }
 }
 
-#[cfg(feature = "h3x-network")]
+#[cfg(feature = "mdns-resolver")]
 impl fmt::Display for MdnsResolvers {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("mDNS resolvers")
     }
 }
 
-#[cfg(feature = "h3x-network")]
+#[cfg(feature = "mdns-resolver")]
 impl MdnsResolvers {
     pub async fn bind(
         network: Arc<h3x::dquic::Network>,
@@ -316,7 +316,7 @@ impl MdnsResolvers {
     }
 }
 
-#[cfg(feature = "h3x-network")]
+#[cfg(feature = "mdns-resolver")]
 impl Publish for MdnsResolvers {
     fn publish<'a>(&'a self, name: &'a str, packet: &'a [u8]) -> PublishFuture<'a> {
         let endpoints = match endpoints_from_packet(packet) {
@@ -332,7 +332,7 @@ impl Publish for MdnsResolvers {
     }
 }
 
-#[cfg(feature = "h3x-network")]
+#[cfg(feature = "mdns-resolver")]
 impl Resolve for MdnsResolvers {
     fn lookup<'l>(&'l self, name: &'l str) -> ResolveFuture<'l> {
         self.query(name).boxed()

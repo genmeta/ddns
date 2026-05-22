@@ -8,16 +8,16 @@ use std::{
 };
 
 use dashmap::DashMap;
-use ddns_core::parser::{
-    packet::{Packet, be_packet},
-    record::endpoint::EndpointAddr,
-};
 use futures::{Stream, StreamExt};
 use snafu::Snafu;
 use socket2::{Domain, Socket, Type};
 use tokio::{io, net::UdpSocket, task::JoinSet, time};
 
-use crate::if_nametoindex::if_nametoindex;
+use super::if_nametoindex::if_nametoindex;
+use crate::core::parser::{
+    packet::{Packet, be_packet},
+    record::endpoint::EndpointAddr,
+};
 
 #[derive(Debug)]
 pub struct MdnsSocket {
@@ -332,7 +332,7 @@ impl MdnsProtocol {
             if let Ok(Some((source, packet))) =
                 time::timeout(Duration::from_millis(300), packets.next()).await
             {
-                use ddns_core::parser::record::RData::*;
+                use crate::core::parser::record::RData::*;
                 let endpoints = packet
                     .answers
                     .iter()

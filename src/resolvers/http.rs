@@ -5,7 +5,6 @@ use std::{
 };
 
 use dashmap::DashMap;
-use ddns_core::parser::packet::be_packet;
 use dquic::{
     qbase::net::addr::EndpointAddr,
     qresolve::{Publish, PublishFuture, Resolve, ResolveFuture, Source},
@@ -13,6 +12,8 @@ use dquic::{
 use futures::{StreamExt, TryFutureExt, stream};
 use reqwest::{Client, IntoUrl, StatusCode, Url};
 use tokio::time::Instant;
+
+use crate::core::parser::packet::be_packet;
 
 #[derive(Debug)]
 struct Record {
@@ -126,7 +127,7 @@ impl Resolve for HttpResolver {
             let server = Arc::from(self.base_url.host_str().unwrap_or("<unknown server>"));
             let soource = Source::Http { server };
 
-            use ddns_core::parser::record;
+            use crate::core::parser::record;
             self.cached_records
                 .retain(|_host, Record { expire, .. }| *expire < now);
             if let Some(record) = self.cached_records.get(domain) {
