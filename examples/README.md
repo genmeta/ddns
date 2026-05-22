@@ -9,7 +9,7 @@
 First, ensure you have a Rust environment. Clone or enter the project directory, then build:
 
 ```bash
-cargo build -p ddns --features="h3x-resolver"
+cargo build --features="h3x-resolver"
 ```
 
 Note: The example programs require the `h3x-resolver` feature to enable HTTP/3 support.
@@ -55,7 +55,7 @@ Use the `publish` example to publish a DNS service record to the HTTP/3 DNS serv
 
 #### Example Run Command
 ```bash
-cargo run -p ddns --example publish --features="h3x-resolver" \
+cargo run --example publish --features="h3x-resolver" \
   --server-ca /path/to/root.crt \
   --client-name demo.example.genmeta.net \
   --client-cert /path/to/demo.example.genmeta.net.pem \
@@ -77,7 +77,7 @@ Use the `query` example to query DNS service records from the HTTP/3 DNS server.
 
 #### Example Run Command
 ```bash
-cargo run -p ddns --example query --features="h3x-resolver" \
+cargo run --example query --features="h3x-resolver" \
   --server-ca /path/to/root.crt \
   --host nat.genmeta.net
 ```
@@ -93,7 +93,7 @@ Use the `ddns-server` binary to start an HTTP/3 DNS server.
 
 #### Example Run Command
 ```bash
-cargo run -p ddns-server -- --config ddns-server/server.toml
+cargo run --bin ddns-server --features="server" -- --config server.toml
 ```
 
 After the server starts, it listens for HTTP/3 requests and handles publish and query operations.

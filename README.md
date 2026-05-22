@@ -1,15 +1,15 @@
-# DDNS / GMDNS
+# DDNS
 
-This workspace provides DNS discovery crates for the DHTTP ecosystem:
+This package provides DNS discovery for the DHTTP ecosystem. The old `ddns-core`, `gmdns`, `ddns`, and `ddns-server` crate boundaries are now modules and binaries inside one package named `ddns`.
 
-| Crate | Role |
+| Module / target | Role |
 | --- | --- |
-| `ddns-core` | DNS packet parser, endpoint `E` record, and shared wire types. |
-| `gmdns` | RFC 6762 multicast DNS transport and LAN resolver/publisher. |
-| `ddns` | Facade crate combining `ddns-core`, `gmdns`, and optional HTTP/3/HTTP resolvers. |
-| `ddns-server` | DNS-over-HTTP/3 publish/lookup server binary. |
+| `ddns::core` | DNS packet parser, endpoint `E` record, and shared wire types. |
+| `ddns::mdns` | RFC 6762 multicast DNS transport and LAN resolver/publisher. |
+| `ddns::resolvers` | Facade resolver chain plus optional HTTP/3/HTTP resolvers. |
+| `ddns-server` | DNS-over-HTTP/3 publish/lookup server binary (`server` feature). |
 
-`gmdns` is the local multicast DNS layer. `ddns` is the high-level crate to use when an application needs both LAN mDNS and remote DNS-over-HTTP/3 resolver support.
+`ddns::mdns` is the local multicast DNS layer. `ddns` is the high-level crate to use when an application needs both LAN mDNS and remote DNS-over-HTTP/3 resolver support.
 
 ## 🌟 Key Features
 
@@ -29,13 +29,6 @@ Add to your `Cargo.toml`:
 ddns = { path = "./ddns" }
 ```
 
-For mDNS-only use, depend directly on `gmdns`:
-
-```toml
-[dependencies]
-gmdns = { path = "./gmdns" }
-```
-
 For HTTP/3 resolver/publisher support, enable the `h3x-resolver` feature on `ddns`:
 
 ```toml
@@ -47,7 +40,7 @@ ddns = { path = "./ddns", features = ["h3x-resolver"] }
 
 ```rust
 use futures::StreamExt;
-use gmdns::Mdns;
+use ddns::Mdns;
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
@@ -66,7 +59,7 @@ async fn main() -> Result<(), std::io::Error> {
 ### HTTP/3 DNS Publishing Example
 
 ```rust
-// See ddns/examples/publish.rs for a complete mTLS HTTP/3 publisher.
+// See examples/publish.rs for a complete mTLS HTTP/3 publisher.
 ```
 
 ---
@@ -80,7 +73,7 @@ async fn main() -> Result<(), std::io::Error> {
 Publish DNS service records to an HTTP/3 DNS server:
 
 ```bash
-cargo run -p ddns --example publish --features="h3x-resolver" \
+cargo run --example publish --features="h3x-resolver" \
   --server-ca /path/to/root.crt \
   --client-name demo.example.genmeta.net \
   --client-cert /path/to/demo.example.genmeta.net.pem \
@@ -94,7 +87,7 @@ cargo run -p ddns --example publish --features="h3x-resolver" \
 Query DNS service records from an HTTP/3 DNS server:
 
 ```bash
-cargo run -p ddns --example query --features="h3x-resolver" \
+cargo run --example query --features="h3x-resolver" \
   --server-ca /path/to/root.crt \
   --host nat.genmeta.net
 ```
@@ -104,10 +97,10 @@ cargo run -p ddns --example query --features="h3x-resolver" \
 Start an HTTP/3 DNS server:
 
 ```bash
-cargo run -p ddns-server -- --config ddns-server/server.toml
+cargo run --bin ddns-server --features="server" -- --config server.toml
 ```
 
-For detailed parameters and HTTP packet structures, see [ddns/examples/README.md](ddns/examples/README.md).
+For detailed parameters and HTTP packet structures, see [examples/README.md](examples/README.md).
 
 ---
 
@@ -197,11 +190,12 @@ When signature is present: `Scheme (u16)` + `Length (VarInt)` + `Data (N bytes)`
 
 ## 🛠 Project Structure
 
-- `ddns-core/src/parser/`: Core protocol parsing implementation (Nom parsers).
-- `ddns-core/src/wire.rs`: Shared HTTP multi-record response wire format.
-- `gmdns/src/protocol.rs`: UDP multicast and packet routing logic.
-- `gmdns/src/mdns.rs`: High-level mDNS discovery and response API.
-- `gmdns/src/resolvers/`: LAN mDNS resolver implementation.
-- `ddns/src/resolvers/`: Facade resolver chain plus optional HTTP/3 and HTTP resolvers.
-- `ddns/examples/`: mDNS discovery/query and HTTP/3 publish/query examples.
-- `ddns-server/`: DNS-over-HTTP/3 server binary and configuration.
+- `src/core/parser/`: Core protocol parsing implementation (Nom parsers).
+- `src/core/wire.rs`: Shared HTTP multi-record response wire format.
+- `src/mdns/protocol.rs`: UDP multicast and packet routing logic.
+- `src/mdns/service.rs`: High-level mDNS discovery and response API.
+- `src/mdns/resolvers/`: LAN mDNS resolver implementation.
+- `src/resolvers/`: Facade resolver chain plus optional HTTP/3 and HTTP resolvers.
+- `examples/`: mDNS discovery/query and HTTP/3 publish/query examples.
+- `src/bin/ddns-server/`: DNS-over-HTTP/3 server binary.
+- `server.toml`: Example server configuration.

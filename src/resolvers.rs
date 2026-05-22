@@ -83,13 +83,14 @@ impl std::str::FromStr for DnsScheme {
     }
 }
 
-pub use gmdns::resolvers::MdnsResolver;
-#[cfg(feature = "mdns-resolver")]
-pub use gmdns::resolvers::MdnsResolvers;
 #[cfg(feature = "h3x-resolver")]
 pub use h3::{H3Publisher, H3Resolver};
 #[cfg(feature = "http-resolver")]
 pub use http::HttpResolver;
+
+pub use crate::mdns::resolvers::MdnsResolver;
+#[cfg(feature = "mdns-resolver")]
+pub use crate::mdns::resolvers::MdnsResolvers;
 
 type ArcResolver = Arc<dyn Resolve + Send + Sync + 'static>;
 
@@ -371,6 +372,6 @@ mod tests {
             .expect("bound interfaces");
         assert!(!ifaces.is_empty());
         assert!(ifaces[0].borrow().bound_addr().is_err());
-        assert!(ifaces[0].with_components(|components, _| components.exist::<gmdns::Mdns>()));
+        assert!(ifaces[0].with_components(|components, _| components.exist::<crate::mdns::Mdns>()));
     }
 }

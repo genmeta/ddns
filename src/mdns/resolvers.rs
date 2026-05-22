@@ -1,5 +1,5 @@
 mod mdns;
 
 pub use mdns::MdnsResolver;
-#[cfg(feature = "h3x-network")]
+#[cfg(feature = "mdns-resolver")]
 pub use mdns::{MdnsBindDriver, MdnsResolvers};

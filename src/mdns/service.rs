@@ -7,13 +7,13 @@ use std::{
     time::Duration,
 };
 
-use ddns_core::parser::{packet::Packet, record::endpoint::EndpointAddr};
 use dquic::qinterface::{Interface, component::Component, io::IO};
 use futures::{Stream, stream};
 use tokio::{task::JoinSet, time};
 use tracing::Instrument;
 
-use crate::protocol::MdnsProtocol;
+use super::protocol::MdnsProtocol;
+use crate::core::parser::{packet::Packet, record::endpoint::EndpointAddr};
 
 #[derive(Clone)]
 pub struct Mdns {
