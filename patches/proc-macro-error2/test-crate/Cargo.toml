@@ -1,0 +1,26 @@
+[package]
+name = "test-crate"
+version = "0.0.0"
+authors = [
+    "CreepySkeleton <creepy-skeleton@yandex.ru>",
+    "GnomedDev <david2005thomas@gmail.com>",
+]
+edition = "2021"
+publish = false
+
+[lib]
+path = "lib.rs"
+proc-macro = true
+
+[dependencies]
+proc-macro-error2 = { path = "../" }
+quote = "1"
+proc-macro2 = "1"
+
+[dependencies.syn]
+version = "2"
+features = ["full"]
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = { level = "allow" }

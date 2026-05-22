@@ -152,7 +152,7 @@ impl Publisher {
     }
 
     pub async fn run(&self) -> ! {
-        let mut locations = self.network.locations().subscribe();
+        let mut locations = self.network.quic().locations().subscribe();
         let interval = tokio::time::sleep(self.interval);
         tokio::pin!(interval);
         // Keep at most one publish attempt in flight. A timer tick or
@@ -376,7 +376,7 @@ impl Publisher {
         let mut endpoints = Vec::new();
         let mut seen = HashSet::new();
         for pattern in self.bind_patterns.iter() {
-            let Some(ifaces) = self.network.get_interfaces(pattern) else {
+            let Some(ifaces) = self.network.quic().get_interfaces(pattern) else {
                 tracing::trace!(?pattern, "no interfaces for bind pattern");
                 continue;
             };
@@ -393,7 +393,7 @@ impl Publisher {
     fn local_endpoints_for(&self, device: &str, family: Family) -> Vec<EndpointAddr> {
         let mut endpoints = HashSet::new();
         for pattern in self.bind_patterns.iter() {
-            let Some(ifaces) = self.network.get_interfaces(pattern) else {
+            let Some(ifaces) = self.network.quic().get_interfaces(pattern) else {
                 continue;
             };
             for iface in ifaces {
@@ -632,7 +632,7 @@ mod tests {
         let network = h3x::dquic::Network::builder().build();
         let bind_pattern: h3x::dquic::binds::BindPattern =
             "inet://127.0.0.1:0".parse().expect("valid bind pattern");
-        let _bind = network.bind(bind_pattern.clone()).await;
+        let _bind = network.quic().bind(bind_pattern.clone()).await;
         let publisher = Publisher::new(
             Arc::new(TestAgent),
             network,
@@ -716,7 +716,7 @@ mod tests {
                 let mut buf = [0_u8; 1024];
                 let _ = stream.read(&mut buf).await;
                 if current == 2 {
-                    server_network.locations().upsert(
+                    server_network.quic().locations().upsert(
                         server_bind_uri.clone(),
                         Arc::new(Ok::<std::net::SocketAddr, io::Error>(
                             "127.0.0.1:10001".parse().expect("valid socket addr"),
@@ -749,7 +749,7 @@ mod tests {
 
         wait_for_count(&publish_count, 1).await;
         tokio::time::sleep(PUBLISH_CHANGE_DEBOUNCE + Duration::from_millis(100)).await;
-        network.locations().upsert(
+        network.quic().locations().upsert(
             bind_uri,
             Arc::new(Ok::<std::net::SocketAddr, io::Error>(
                 "127.0.0.1:10000".parse().expect("valid socket addr"),
@@ -802,12 +802,17 @@ mod tests {
                 let mut buf = [0_u8; 1024];
                 let _ = stream.read(&mut buf).await;
                 server_count.fetch_add(1, Ordering::SeqCst);
-                server_network.locations().upsert::<ClientLocationData>(
-                    server_bind_uri.clone(),
-                    Arc::new(Err(dquic::qtraversal::nat::client::ArcIoError::from(
-                        io::Error::from(io::ErrorKind::NetworkUnreachable),
-                    ))),
-                );
+                server_network
+                    .quic()
+                    .locations()
+                    .upsert::<ClientLocationData>(
+                        server_bind_uri.clone(),
+                        Arc::new(Err(
+                            dquic::qtraversal::nat::client::DetectOuterAddrError::Rebinded {
+                                bind_uri: server_bind_uri.clone(),
+                            },
+                        )),
+                    );
                 let _ = stream
                     .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
                     .await;
@@ -833,7 +838,7 @@ mod tests {
         wait_for_count(&publish_count, 1).await;
         tokio::time::sleep(PUBLISH_CHANGE_DEBOUNCE + Duration::from_millis(100)).await;
 
-        network.locations().upsert(
+        network.quic().locations().upsert(
             bind_uri,
             Arc::new(Ok::<std::net::SocketAddr, io::Error>(
                 "127.0.0.1:0".parse().expect("valid socket addr"),
@@ -915,7 +920,7 @@ mod tests {
 
         wait_for_count(&publish_count, 1).await;
         tokio::time::sleep(PUBLISH_CHANGE_DEBOUNCE + Duration::from_millis(100)).await;
-        network.locations().upsert(
+        network.quic().locations().upsert(
             bind_uri,
             Arc::new(Ok::<std::net::SocketAddr, io::Error>(
                 "127.0.0.1:0".parse().expect("valid socket addr"),
@@ -1001,7 +1006,7 @@ mod tests {
             .await
             .expect("initial publish should start");
 
-        network.locations().upsert(
+        network.quic().locations().upsert(
             bind_uri,
             Arc::new(Ok::<std::net::SocketAddr, io::Error>(
                 "127.0.0.1:10000".parse().expect("valid socket addr"),
