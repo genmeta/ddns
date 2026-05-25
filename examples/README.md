@@ -43,7 +43,7 @@ Note: The example programs require the `h3x-resolver` feature to enable HTTP/3 s
 Use the `publish` example to publish a DNS service record to the HTTP/3 DNS server.
 
 #### Program Parameters
-- `--base-url <URL>`: Base URL of the DNS server (default: `https://dns.genmeta.net:4433/`).
+- `--base-url <URL>`: Base URL of the DNS server (default: build-time `DHTTP_H3_DNS_SERVER` with a trailing slash).
 - `--server-ca <PATH>`: CA certificate PEM file path for verifying the online server certificate.
 - `--client-name <NAME>`: Client identity name used for mTLS.
 - `--client-cert <PATH>`: Client certificate chain PEM file.
@@ -71,7 +71,7 @@ This command establishes an HTTP/3 connection to the server, sends a POST reques
 Use the `query` example to query DNS service records from the HTTP/3 DNS server.
 
 #### Program Parameters
-- `--base-url <URL>`: Base URL of the DNS server (default: `https://dns.genmeta.net:4433/`).
+- `--base-url <URL>`: Base URL of the DNS server (default: build-time `DHTTP_H3_DNS_SERVER` with a trailing slash).
 - `--server-ca <PATH>`: CA certificate PEM file path for verifying the online server certificate.
 - `--host <NAME>`: DNS name to query (default: `nat.genmeta.net`).
 

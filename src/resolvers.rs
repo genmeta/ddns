@@ -34,13 +34,13 @@ pub(crate) fn resolvable_name(name: &str) -> Option<&str> {
 }
 
 /// Default DNS-over-H3 server for DHTTP endpoints.
-pub const DHTTP_H3_DNS_SERVER: &str = "https://dns.genmeta.net:4433";
+pub const DHTTP_H3_DNS_SERVER: &str = crate::bootstrap::DHTTP_H3_DNS_SERVER;
 
 /// Default DNS-over-HTTP server for DHTTP endpoints.
-pub const DHTTP_HTTP_DNS_SERVER: &str = "https://dns.genmeta.net";
+pub const DHTTP_HTTP_DNS_SERVER: &str = crate::bootstrap::DHTTP_HTTP_DNS_SERVER;
 
 /// mDNS service type used by DHTTP endpoints.
-pub const DHTTP_MDNS_SERVICE: &str = "_genmeta.local";
+pub const DHTTP_MDNS_SERVICE: &str = crate::bootstrap::DHTTP_MDNS_SERVICE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum DnsScheme {
@@ -263,15 +263,30 @@ impl Resolve for Resolvers {
 mod tests {
     use std::str::FromStr;
 
+    #[cfg(feature = "mdns-resolver")]
+    use super::MdnsResolvers;
     #[cfg(any(
         feature = "h3x-resolver",
         feature = "http-resolver",
         feature = "mdns-resolver"
     ))]
     use super::Resolvers;
-    #[cfg(feature = "mdns-resolver")]
-    use super::{DHTTP_MDNS_SERVICE, MdnsResolvers};
-    use super::{DnsScheme, resolvable_name};
+    use super::{
+        DHTTP_H3_DNS_SERVER, DHTTP_HTTP_DNS_SERVER, DHTTP_MDNS_SERVICE, DnsScheme, resolvable_name,
+    };
+
+    #[test]
+    fn resolver_defaults_come_from_compile_time_environment() {
+        if let Some(expected) = option_env!("DHTTP_H3_DNS_SERVER") {
+            assert_eq!(DHTTP_H3_DNS_SERVER, expected);
+        }
+        if let Some(expected) = option_env!("DHTTP_HTTP_DNS_SERVER") {
+            assert_eq!(DHTTP_HTTP_DNS_SERVER, expected);
+        }
+        if let Some(expected) = option_env!("DHTTP_MDNS_SERVICE") {
+            assert_eq!(DHTTP_MDNS_SERVICE, expected);
+        }
+    }
 
     #[test]
     fn resolvable_name_accepts_dns_name_with_numeric_port() {

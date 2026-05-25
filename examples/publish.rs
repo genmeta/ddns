@@ -20,7 +20,7 @@ use tracing::{Level, info};
 #[command(version, about, long_about = None)]
 struct Options {
     /// Base URL of the线上 H3 DNS server.
-    #[arg(long, default_value = "https://dns.genmeta.net:4433/")]
+    #[arg(long, default_value_t = default_h3_base_url())]
     base_url: String,
 
     /// 用于校验线上服务端证书的 CA PEM 文件。
@@ -59,6 +59,10 @@ struct Options {
 
     #[arg(long, default_value_t = 1)]
     sequence: u64,
+}
+
+fn default_h3_base_url() -> String {
+    format!("{}/", ddns::DHTTP_H3_DNS_SERVER.trim_end_matches('/'))
 }
 
 fn load_root_store_from_pem(path: &Path) -> io::Result<RootCertStore> {
