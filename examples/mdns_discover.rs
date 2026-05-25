@@ -6,8 +6,6 @@ use std::{
 use clap::Parser;
 use futures::StreamExt;
 
-const SERVICE_NAME: &str = "_genmeta.local";
-
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
@@ -21,7 +19,7 @@ struct Args {
 async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
-    let mdns = ddns::Mdns::new(SERVICE_NAME, args.ip, &args.device)?;
+    let mdns = ddns::Mdns::new(ddns::DHTTP_MDNS_SERVICE, args.ip, &args.device)?;
     mdns.insert_host(
         "test.genmeta.net".to_string(),
         vec![
