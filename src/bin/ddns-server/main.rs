@@ -15,7 +15,7 @@ use std::{
 };
 
 use clap::Parser;
-use ddns::{MdnsEndpoint, MdnsPacket};
+use ddns::core::{MdnsEndpoint, MdnsPacket};
 use futures::future::BoxFuture;
 use h3x::{
     dquic::{

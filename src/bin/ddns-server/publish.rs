@@ -318,7 +318,7 @@ mod tests {
         sync::Arc,
     };
 
-    use ddns::{MdnsPacket, parser::record::endpoint::EndpointAddr};
+    use ddns::core::{MdnsPacket, parser::record::endpoint::EndpointAddr};
     use dhttp_identity::identity::RemoteAgent;
     use rustls::pki_types::CertificateDer;
 

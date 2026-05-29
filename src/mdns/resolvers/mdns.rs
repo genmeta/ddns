@@ -17,7 +17,7 @@ use super::super::protocol::MdnsProtocol;
 #[cfg(feature = "mdns-resolver")]
 use crate::core::parser::packet::Packet;
 use crate::core::parser::record::RData;
-pub use crate::mdns::Mdns as MdnsResolver;
+pub type MdnsResolver = crate::mdns::service::Mdns;
 
 impl MdnsResolver {
     pub fn source(&self) -> Source {
@@ -112,7 +112,7 @@ impl MdnsBindDriver {
         };
 
         bind_iface.with_components_mut(|components, _iface| {
-            match components.try_init_with(|| crate::mdns::Mdns::new(&self.service_name, ip, device)) {
+            match components.try_init_with(|| crate::mdns::service::Mdns::new(&self.service_name, ip, device)) {
                 Ok(mdns) => mdns.reinit_on(device, ip),
                 Err(error) => {
                     let report = snafu::Report::from_error(&error);

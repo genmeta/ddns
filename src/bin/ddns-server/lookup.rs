@@ -4,7 +4,7 @@ use std::{
     net::SocketAddr,
 };
 
-use ddns::{
+use ddns::core::{
     MdnsPacket,
     parser::{packet::be_packet, record::RData},
     wire::MultiResponse,

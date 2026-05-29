@@ -1,6 +1,6 @@
 use nom::number::streaming::be_u16;
 
-use crate::parser::name::{Name, be_name};
+use crate::core::parser::name::{Name, be_name};
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct Srv {
@@ -56,7 +56,7 @@ pub fn be_srv<'a>(input: &'a [u8], origin: &'a [u8]) -> nom::IResult<&'a [u8], S
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::parser::{
+    use crate::core::parser::{
         packet::be_packet,
         question::{QueryClass, QueryType},
         record::{Class, RData},

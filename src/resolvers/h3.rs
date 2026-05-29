@@ -411,6 +411,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use crate::resolvers::DHTTP_H3_DNS_SERVER;
+
     use super::*;
 
     #[test]
@@ -428,7 +430,7 @@ mod tests {
         let endpoint = Arc::new(h3x::endpoint::H3Endpoint::new(
             h3x::dquic::QuicEndpoint::builder().build().await,
         ));
-        let resolver = H3Resolver::from_endpoint(crate::DHTTP_H3_DNS_SERVER, endpoint).unwrap();
+        let resolver = H3Resolver::from_endpoint(DHTTP_H3_DNS_SERVER, endpoint).unwrap();
         resolver.cached_records.insert(
             "car.lab.genmeta.net".to_owned(),
             Record {
@@ -443,7 +445,7 @@ mod tests {
         assert_eq!(
             source,
             Source::H3 {
-                server: Arc::from(crate::DHTTP_H3_DNS_SERVER)
+                server: Arc::from(DHTTP_H3_DNS_SERVER)
             }
         );
         assert_eq!(
