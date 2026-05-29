@@ -4,14 +4,15 @@ use bytes::BufMut;
 
 use super::{
     header::{Header, be_header},
-    question::{QueryClass, QueryType, Question, be_question},
-    record::{Class, RData, ResourceRecord, endpoint::EndpointAddr},
-};
-use crate::parser::{
-    header::WriteHeader,
     name::{NameCompression, put_name},
-    record::{Type, be_record, endpoint::WriteEndpointAddr, srv::Srv},
+    question::{QueryClass, QueryType, Question, be_question},
+    record::{
+        Class, RData, ResourceRecord, Type, be_record,
+        endpoint::{EndpointAddr, WriteEndpointAddr},
+        srv::Srv,
+    },
 };
+use crate::core::parser::header::WriteHeader;
 
 /// Parsed DNS packet
 #[derive(Default, Clone)]
@@ -283,7 +284,7 @@ mod test {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     use super::*;
-    use crate::parser::{
+    use crate::core::parser::{
         self,
         question::{QueryClass, QueryType},
         record::{Class, RData, Type, srv::Srv},

@@ -1,4 +1,4 @@
-use crate::parser::name::{Name, be_name};
+use crate::core::parser::name::{Name, be_name};
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct Ptr(Name);

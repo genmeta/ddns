@@ -19,7 +19,7 @@ use nom::{
 use rustls::{SignatureScheme, pki_types::SubjectPublicKeyInfoDer};
 use snafu::{ResultExt, Snafu};
 
-use crate::parser::{
+use crate::core::parser::{
     sigin,
     varint::{VarInt, WriteVarInt, be_varint},
 };

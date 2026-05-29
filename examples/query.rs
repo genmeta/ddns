@@ -5,7 +5,10 @@ use std::{
 };
 
 use clap::Parser;
-use ddns::{MdnsPacket, parser::record::RData, wire::be_multi_response};
+use ddns::{
+    core::{MdnsPacket, parser::record::RData, wire::be_multi_response},
+    resolvers::DHTTP_H3_DNS_SERVER,
+};
 use h3x::{
     dquic::{
         Network, QuicEndpoint,
@@ -35,7 +38,7 @@ struct Options {
 }
 
 fn default_h3_base_url() -> String {
-    format!("{}/", ddns::DHTTP_H3_DNS_SERVER.trim_end_matches('/'))
+    format!("{}/", DHTTP_H3_DNS_SERVER.trim_end_matches('/'))
 }
 
 fn load_root_store_from_pem(path: &Path) -> io::Result<RootCertStore> {
@@ -163,7 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => println!("Source fingerprint: (no certificate)"),
             }
 
-            match ddns::parser::packet::be_packet(&record.dns) {
+            match ddns::core::parser::packet::be_packet(&record.dns) {
                 Ok((_, packet)) => {
                     print!("{}", format_packet(&packet));
 

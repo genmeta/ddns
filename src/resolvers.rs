@@ -13,9 +13,16 @@ use snafu::Report;
 use tokio::io;
 
 #[cfg(feature = "h3x-resolver")]
-mod h3;
+pub mod h3;
 #[cfg(feature = "http-resolver")]
-mod http;
+pub mod http;
+
+#[cfg(feature = "mdns-resolver")]
+use crate::mdns::resolvers::mdns::MdnsResolvers;
+#[cfg(feature = "h3x-resolver")]
+use h3::H3Resolver;
+#[cfg(feature = "http-resolver")]
+use http::HttpResolver;
 
 /// Extract and validate the DNS host from `name`, which may include a `:port`
 /// suffix. Returns `Some(host)` if the host part is a valid RFC-compliant DNS
@@ -82,15 +89,6 @@ impl std::str::FromStr for DnsScheme {
         }
     }
 }
-
-#[cfg(feature = "h3x-resolver")]
-pub use h3::{H3Publisher, H3Resolver};
-#[cfg(feature = "http-resolver")]
-pub use http::HttpResolver;
-
-pub use crate::mdns::resolvers::MdnsResolver;
-#[cfg(feature = "mdns-resolver")]
-pub use crate::mdns::resolvers::MdnsResolvers;
 
 type ArcResolver = Arc<dyn Resolve + Send + Sync + 'static>;
 
@@ -387,6 +385,9 @@ mod tests {
             .expect("bound interfaces");
         assert!(!ifaces.is_empty());
         assert!(ifaces[0].borrow().bound_addr().is_err());
-        assert!(ifaces[0].with_components(|components, _| components.exist::<crate::mdns::Mdns>()));
+        assert!(
+            ifaces[0]
+                .with_components(|components, _| components.exist::<crate::mdns::service::Mdns>())
+        );
     }
 }

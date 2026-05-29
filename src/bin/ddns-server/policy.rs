@@ -1,4 +1,4 @@
-use ddns::parser::{packet::be_packet, record::RData};
+use ddns::core::parser::{packet::be_packet, record::RData};
 use dhttp_identity::identity::RemoteAgent;
 use tracing::{debug, warn};
 
@@ -160,7 +160,7 @@ pub fn validate_dns_packet(
 mod tests {
     use std::collections::HashMap;
 
-    use ddns::MdnsPacket;
+    use ddns::core::{MdnsPacket, parser::record::endpoint::EndpointAddr};
     use dhttp_identity::identity::RemoteAgent;
     use rustls::pki_types::CertificateDer;
 
@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn validate_dns_packet_accepts_empty_packet_as_clear_operation() {
-        let hosts: HashMap<String, Vec<ddns::parser::record::endpoint::EndpointAddr>> =
+        let hosts: HashMap<String, Vec<EndpointAddr>> =
             HashMap::from([("reimu.pilot.genmeta.net".to_owned(), Vec::new())]);
         let packet = MdnsPacket::answer(0, &hosts).to_bytes();
 

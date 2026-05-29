@@ -290,7 +290,7 @@ impl Publisher {
 
         #[cfg(feature = "h3x-resolver")]
         if let Some(h3) =
-            any.downcast_ref::<crate::resolvers::H3Resolver<h3x::dquic::QuicEndpoint>>()
+            any.downcast_ref::<crate::resolvers::h3::H3Resolver<h3x::dquic::QuicEndpoint>>()
         {
             h3.clear_pool();
         }
@@ -307,21 +307,21 @@ impl Publisher {
         let any: &dyn Any = resolver;
 
         #[cfg(feature = "http-resolver")]
-        if let Some(http) = any.downcast_ref::<crate::resolvers::HttpResolver>() {
+        if let Some(http) = any.downcast_ref::<crate::resolvers::http::HttpResolver>() {
             self.publish_endpoints(http, public_endpoints).await?;
             return Ok(true);
         }
 
         #[cfg(feature = "h3x-resolver")]
         if let Some(h3) =
-            any.downcast_ref::<crate::resolvers::H3Resolver<h3x::dquic::QuicEndpoint>>()
+            any.downcast_ref::<crate::resolvers::h3::H3Resolver<h3x::dquic::QuicEndpoint>>()
         {
             self.publish_endpoints(h3, public_endpoints).await?;
             return Ok(true);
         }
 
         #[cfg(feature = "mdns-resolver")]
-        if let Some(mdns) = any.downcast_ref::<crate::resolvers::MdnsResolvers>() {
+        if let Some(mdns) = any.downcast_ref::<crate::mdns::resolvers::mdns::MdnsResolvers>() {
             let mut published = false;
             for bound in mdns.bound_resolvers() {
                 let endpoints = self.local_endpoints_for(&bound.device, bound.family);
@@ -735,7 +735,7 @@ mod tests {
         });
 
         let resolver = Arc::new(
-            crate::resolvers::HttpResolver::new(format!("http://127.0.0.1:{port}/"))
+            crate::resolvers::http::HttpResolver::new(format!("http://127.0.0.1:{port}/"))
                 .expect("valid http resolver"),
         );
         let mut publisher = Publisher::new(
@@ -825,7 +825,7 @@ mod tests {
         });
 
         let resolver = Arc::new(
-            crate::resolvers::HttpResolver::new(format!("http://127.0.0.1:{port}/"))
+            crate::resolvers::http::HttpResolver::new(format!("http://127.0.0.1:{port}/"))
                 .expect("valid http resolver"),
         );
         let publisher = Publisher::new(
@@ -905,7 +905,7 @@ mod tests {
         });
 
         let resolver = Arc::new(
-            crate::resolvers::HttpResolver::new(format!("http://127.0.0.1:{port}/"))
+            crate::resolvers::http::HttpResolver::new(format!("http://127.0.0.1:{port}/"))
                 .expect("valid http resolver"),
         );
         let mut publisher = Publisher::new(
@@ -989,7 +989,7 @@ mod tests {
         });
 
         let resolver = Arc::new(
-            crate::resolvers::HttpResolver::new(format!("http://127.0.0.1:{port}/"))
+            crate::resolvers::http::HttpResolver::new(format!("http://127.0.0.1:{port}/"))
                 .expect("valid http resolver"),
         );
         let mut publisher = Publisher::new(
