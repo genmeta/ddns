@@ -253,7 +253,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await;
     let server = Arc::new(H3Endpoint::new(quic));
     info!(listen = %config.listen, server_name = %config.server_name, "h3_server.start");
-    server.listen_owned(router).await?;
+    server.serve_owned(router).await?;
 
     Ok(())
 }

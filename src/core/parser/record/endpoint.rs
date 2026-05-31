@@ -253,14 +253,14 @@ impl EndpointAddr {
         }
     }
 
-    pub async fn sign_with_authority(
+    pub async fn sign_with_agent(
         &mut self,
-        authority: &(impl dhttp_identity::identity::LocalAuthority + ?Sized),
+        agent: &(impl dhttp_identity::identity::LocalAgent + ?Sized),
     ) -> Result<(), SignEndpointError> {
         self.set_signed(true);
         let data = self.signed_data();
-        for scheme in signature_schemes_for_algorithm(authority.sign_algorithm()) {
-            match authority.sign(scheme, &data).await {
+        for scheme in signature_schemes_for_algorithm(agent.sign_algorithm()) {
+            match agent.sign(scheme, &data).await {
                 Ok(signature) => {
                     self.signature = Some(EndpointSignature {
                         scheme: u16::from(scheme),
@@ -792,14 +792,14 @@ impl TryFrom<EndpointAddr> for DquicEndpointAddr {
 
 pub async fn sign_endponit_address(
     server_id: u8,
-    authority: Option<&(impl dhttp_identity::identity::LocalAuthority + ?Sized)>,
+    agent: Option<&(impl dhttp_identity::identity::LocalAgent + ?Sized)>,
     endpoint: DquicEndpointAddr,
 ) -> Option<EndpointAddr> {
     let mut ep: EndpointAddr = endpoint.try_into().ok()?;
     ep.set_main(server_id == 0);
     ep.set_sequence(server_id as u64);
-    if let Some(authority) = authority {
-        let _ = ep.sign_with_authority(authority).await;
+    if let Some(agent) = agent {
+        let _ = ep.sign_with_agent(agent).await;
     }
     Some(ep)
 }
@@ -1014,7 +1014,7 @@ mod tests {
             }
         }
 
-        impl dhttp_identity::identity::LocalAuthority for Ed25519Key {
+        impl dhttp_identity::identity::LocalAgent for Ed25519Key {
             fn name(&self) -> &str {
                 "authority.example"
             }
@@ -1052,7 +1052,7 @@ mod tests {
         let addr = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 5353);
         let mut ep = EndpointAddr::direct_v4(addr);
         ep.set_main(true);
-        futures::executor::block_on(ep.sign_with_authority(&key)).unwrap();
+        futures::executor::block_on(ep.sign_with_agent(&key)).unwrap();
 
         let mut buf = BytesMut::new();
         buf.put_endpoint_addr(&ep);
@@ -1078,13 +1078,13 @@ mod tests {
     }
 
     #[test]
-    fn sign_with_authority_tries_next_supported_scheme() {
+    fn sign_with_agent_tries_next_supported_scheme() {
         #[derive(Debug)]
-        struct FallbackAuthority;
+        struct FallbackAgent;
 
-        impl dhttp_identity::identity::LocalAuthority for FallbackAuthority {
+        impl dhttp_identity::identity::LocalAgent for FallbackAgent {
             fn name(&self) -> &str {
-                "authority.example"
+                "agent.example"
             }
 
             fn cert_chain(&self) -> &[rustls::pki_types::CertificateDer<'static>] {
@@ -1113,7 +1113,7 @@ mod tests {
         }
 
         let mut ep = EndpointAddr::direct_v4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 5353));
-        futures::executor::block_on(ep.sign_with_authority(&FallbackAuthority)).unwrap();
+        futures::executor::block_on(ep.sign_with_agent(&FallbackAgent)).unwrap();
 
         let signature = ep.signature().unwrap();
         assert_eq!(

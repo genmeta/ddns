@@ -13,14 +13,14 @@ use snafu::Report;
 use tokio::io;
 
 #[cfg(feature = "h3x-resolver")]
-pub mod h3;
+mod h3;
 #[cfg(feature = "http-resolver")]
 pub mod http;
 
 #[cfg(feature = "mdns-resolver")]
 use crate::mdns::resolvers::mdns::MdnsResolvers;
 #[cfg(feature = "h3x-resolver")]
-use h3::H3Resolver;
+pub use h3::{H3Publisher, H3Resolver};
 #[cfg(feature = "http-resolver")]
 use http::HttpResolver;
 
