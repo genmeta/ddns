@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use dhttp_identity::identity::LocalAgent;
+use dhttp_identity::identity::LocalAuthority;
 #[cfg(feature = "mdns-resolver")]
 use dquic::qbase::net::Family;
 use dquic::{
@@ -73,7 +73,7 @@ pub struct PublishOptions {
 }
 
 pub struct Publisher {
-    identity: Arc<dyn LocalAgent>,
+    identity: Arc<dyn LocalAuthority>,
     network: Arc<h3x::dquic::Network>,
     resolver: Arc<dyn Resolve + Send + Sync>,
     bind_patterns: Arc<Vec<h3x::dquic::binds::BindPattern>>,
@@ -96,7 +96,7 @@ impl std::fmt::Debug for Publisher {
 
 impl Publisher {
     pub fn new(
-        identity: Arc<dyn LocalAgent>,
+        identity: Arc<dyn LocalAuthority>,
         network: Arc<h3x::dquic::Network>,
         resolver: Arc<dyn Resolve + Send + Sync>,
         bind_patterns: Arc<Vec<h3x::dquic::binds::BindPattern>>,
@@ -366,7 +366,7 @@ impl Publisher {
                 endpoint.set_sequence(server_id.into());
             }
             endpoint
-                .sign_with_agent(self.identity.as_ref())
+                .sign_with_authority(self.identity.as_ref())
                 .await
                 .context(publish_once_error::SignEndpointSnafu)?;
             signed.push(endpoint);
@@ -537,11 +537,11 @@ mod tests {
     use super::*;
 
     #[derive(Debug)]
-    struct TestAgent;
+    struct TestAuthority;
 
-    impl LocalAgent for TestAgent {
+    impl LocalAuthority for TestAuthority {
         fn name(&self) -> &str {
-            "agent.example"
+            "authority.example"
         }
 
         fn cert_chain(&self) -> &[CertificateDer<'static>] {
@@ -584,7 +584,7 @@ mod tests {
     #[tokio::test]
     async fn publish_once_reports_no_publisher_resolver() {
         let publisher = Publisher::new(
-            Arc::new(TestAgent),
+            Arc::new(TestAuthority),
             h3x::dquic::Network::builder().build(),
             Arc::new(DisplayOnlyResolver),
             Arc::new(Vec::new()),
@@ -597,7 +597,7 @@ mod tests {
     #[tokio::test]
     async fn publisher_timeout_is_configurable() {
         let publisher = Publisher::new(
-            Arc::new(TestAgent),
+            Arc::new(TestAuthority),
             h3x::dquic::Network::builder().build(),
             Arc::new(DisplayOnlyResolver),
             Arc::new(Vec::new()),
@@ -612,7 +612,7 @@ mod tests {
     #[tokio::test]
     async fn signed_packet_applies_publish_options_server_id() {
         let publisher = Publisher::new(
-            Arc::new(TestAgent),
+            Arc::new(TestAuthority),
             h3x::dquic::Network::builder().build(),
             Arc::new(DisplayOnlyResolver),
             Arc::new(Vec::new()),
@@ -639,7 +639,7 @@ mod tests {
             "inet://127.0.0.1:0".parse().expect("valid bind pattern");
         let _bind = network.quic().bind(bind_pattern.clone()).await;
         let publisher = Publisher::new(
-            Arc::new(TestAgent),
+            Arc::new(TestAuthority),
             network,
             Arc::new(DisplayOnlyResolver),
             Arc::new(vec![bind_pattern]),
@@ -739,7 +739,7 @@ mod tests {
                 .expect("valid http resolver"),
         );
         let mut publisher = Publisher::new(
-            Arc::new(TestAgent),
+            Arc::new(TestAuthority),
             network.clone(),
             resolver,
             Arc::new(vec![
@@ -829,7 +829,7 @@ mod tests {
                 .expect("valid http resolver"),
         );
         let publisher = Publisher::new(
-            Arc::new(TestAgent),
+            Arc::new(TestAuthority),
             network.clone(),
             resolver,
             Arc::new(vec![
@@ -909,7 +909,7 @@ mod tests {
                 .expect("valid http resolver"),
         );
         let mut publisher = Publisher::new(
-            Arc::new(TestAgent),
+            Arc::new(TestAuthority),
             network.clone(),
             resolver,
             Arc::new(vec![
@@ -993,7 +993,7 @@ mod tests {
                 .expect("valid http resolver"),
         );
         let mut publisher = Publisher::new(
-            Arc::new(TestAgent),
+            Arc::new(TestAuthority),
             network.clone(),
             resolver,
             Arc::new(vec![
