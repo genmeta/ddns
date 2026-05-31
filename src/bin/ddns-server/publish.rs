@@ -1,7 +1,7 @@
 use std::{convert::Infallible, sync::Arc};
 
 use deadpool_redis::redis::{self, AsyncCommands};
-use dhttp_identity::identity::RemoteAgent;
+use dhttp_identity::identity::RemoteAuthority;
 use h3x::{connection::ConnectionState, quic};
 use http_body_util::BodyExt;
 use tokio::time::{Duration, Instant};
@@ -54,9 +54,9 @@ async fn publish_with_cert(state: AppState, request: Request) -> Response {
     debug!(host = %host, "publish.host");
 
     // Require a valid client certificate for all publish requests.
-    let agent = match request_connection(&request) {
-        Some(connection) => match connection.remote_agent().await {
-            Ok(Some(agent)) => agent,
+    let authority = match request_connection(&request) {
+        Some(connection) => match connection.remote_authority().await {
+            Ok(Some(authority)) => authority,
             Ok(None) => {
                 warn!("missing client certificate");
                 return write_error(AppError::MissingClientCertificate);
@@ -77,7 +77,7 @@ async fn publish_with_cert(state: AppState, request: Request) -> Response {
     // Standard policy: cert SAN must match the target host.
     // OpenMulti policy: any authenticated node may publish — skip SAN check.
     if policy == DomainPolicy::Standard {
-        let allowed = match client_allowed_host(agent.as_ref()) {
+        let allowed = match client_allowed_host(authority.as_ref()) {
             Ok(h) => h,
             Err(e) => {
                 warn!(error = %snafu::Report::from_error(&e), "client certificate domain not allowed");
@@ -108,7 +108,7 @@ async fn publish_with_cert(state: AppState, request: Request) -> Response {
         require_signature = require_sig,
         "validating publish packet"
     );
-    let packet = match validate_dns_packet(body.as_ref(), require_sig, agent.as_ref()) {
+    let packet = match validate_dns_packet(body.as_ref(), require_sig, authority.as_ref()) {
         Ok(n) => n,
         Err(e) => {
             debug!(host = %host, error = %e, "publish packet rejected");
@@ -127,9 +127,9 @@ async fn publish_with_cert(state: AppState, request: Request) -> Response {
                 return write_error(AppError::HostMismatch);
             }
 
-            publish_record(&state, &host, &body, agent.as_ref()).await
+            publish_record(&state, &host, &body, authority.as_ref()).await
         }
-        ValidatedDnsPacket::Empty => clear_record(&state, &host, agent.as_ref()).await,
+        ValidatedDnsPacket::Empty => clear_record(&state, &host, authority.as_ref()).await,
     }
 }
 
@@ -155,9 +155,9 @@ pub async fn publish_record(
     state: &AppState,
     host: &str,
     body: &bytes::Bytes,
-    agent: &(impl RemoteAgent + ?Sized),
+    authority: &(impl RemoteAuthority + ?Sized),
 ) -> Response {
-    let cert_bytes = agent
+    let cert_bytes = authority
         .cert_chain()
         .first()
         .map(|c| c.as_ref().to_vec())
@@ -258,9 +258,9 @@ pub async fn publish_record(
 pub async fn clear_record(
     state: &AppState,
     host: &str,
-    agent: &(impl RemoteAgent + ?Sized),
+    authority: &(impl RemoteAuthority + ?Sized),
 ) -> Response {
-    let cert_bytes = agent
+    let cert_bytes = authority
         .cert_chain()
         .first()
         .map(|c| c.as_ref().to_vec())
@@ -319,7 +319,7 @@ mod tests {
     };
 
     use ddns::core::{MdnsPacket, parser::record::endpoint::EndpointAddr};
-    use dhttp_identity::identity::RemoteAgent;
+    use dhttp_identity::identity::RemoteAuthority;
     use rustls::pki_types::CertificateDer;
 
     use super::*;
@@ -330,12 +330,12 @@ mod tests {
     };
 
     #[derive(Debug)]
-    struct TestAgent {
+    struct TestAuthority {
         name: &'static str,
         certs: Vec<CertificateDer<'static>>,
     }
 
-    impl TestAgent {
+    impl TestAuthority {
         fn new(name: &'static str, cert_bytes: Vec<u8>) -> Self {
             Self {
                 name,
@@ -344,7 +344,7 @@ mod tests {
         }
     }
 
-    impl RemoteAgent for TestAgent {
+    impl RemoteAuthority for TestAuthority {
         fn name(&self) -> &str {
             self.name
         }
@@ -378,45 +378,45 @@ mod tests {
     async fn clear_record_removes_only_current_certificate_fingerprint() {
         let state = memory_state();
         let host = "reimu.pilot.genmeta.net";
-        let agent_a = TestAgent::new("agent-a", vec![1]);
-        let agent_b = TestAgent::new("agent-b", vec![2]);
+        let authority_a = TestAuthority::new("authority-a", vec![1]);
+        let authority_b = TestAuthority::new("authority-b", vec![2]);
         let packet_a = packet_for(host, 1);
         let packet_b = packet_for(host, 2);
 
         assert_eq!(
-            publish_record(&state, host, &packet_a, &agent_a)
+            publish_record(&state, host, &packet_a, &authority_a)
                 .await
                 .status(),
             http::StatusCode::OK
         );
         assert_eq!(
-            publish_record(&state, host, &packet_b, &agent_b)
+            publish_record(&state, host, &packet_b, &authority_b)
                 .await
                 .status(),
             http::StatusCode::OK
         );
 
         assert_eq!(
-            clear_record(&state, host, &agent_a).await.status(),
+            clear_record(&state, host, &authority_a).await.status(),
             http::StatusCode::OK
         );
 
         let LookupResult::Multi(response) = perform_lookup(&state, host, None).await.unwrap()
         else {
-            panic!("agent b record should remain");
+            panic!("authority b record should remain");
         };
         assert_eq!(response.records.len(), 1);
-        assert_eq!(response.records[0].cert, agent_b.certs[0].as_ref());
+        assert_eq!(response.records[0].cert, authority_b.certs[0].as_ref());
     }
 
     #[tokio::test]
     async fn clear_record_is_idempotent_for_missing_fingerprint() {
         let state = memory_state();
         let host = "reimu.pilot.genmeta.net";
-        let agent = TestAgent::new("agent", vec![1]);
+        let authority = TestAuthority::new("authority", vec![1]);
 
         assert_eq!(
-            clear_record(&state, host, &agent).await.status(),
+            clear_record(&state, host, &authority).await.status(),
             http::StatusCode::OK
         );
         assert!(matches!(

@@ -45,7 +45,7 @@ use ddns::Mdns;
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
     // Create mDNS instance
-    let mdns = Mdns::new(ddns::DHTTP_MDNS_SERVICE, "127.0.0.1".parse().unwrap(), "lo0")?;
+    let mdns = Mdns::new(DHTTP_MDNS_SERVICE, "127.0.0.1".parse().unwrap(), "lo0")?;
     
     // Listen to discovery stream
     let mut stream = mdns.discover();

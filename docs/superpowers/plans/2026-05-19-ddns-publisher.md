@@ -4,35 +4,35 @@
 
 **Goal:** Add signed DNS publishing for DHTTP endpoints using async identity agents and concrete ddns publishers.
 
-**Architecture:** `dhttp-identity` owns async agent traits and signature helpers. `ddns-core` signs endpoint records through `LocalAgent`. `ddns` owns `Publisher`, discovers concrete publishers by downcasting, and publishes signed packets. `dhttp::Endpoint` provides the convenience constructor.
+**Architecture:** `dhttp-identity` owns async authority traits and signature helpers. `ddns-core` signs endpoint records through `LocalAuthority`. `ddns` owns `Publisher`, discovers concrete publishers by downcasting, and publishes signed packets. `dhttp::Endpoint` provides the convenience constructor.
 
 **Tech Stack:** Rust 2024, snafu, futures BoxFuture, dhttp-identity, ddns-core, ddns, h3x/dquic resolver traits.
 
 ---
 
-### Task 1: Move async agent traits into dhttp-identity
+### Task 1: Move async authority traits into dhttp-identity
 
 **Files:**
 - Modify: `dhttp/identity/src/identity.rs`
 - Modify: `dhttp/identity/src/lib.rs`
-- Delete: `h3x/src/quic/agent.rs`
-- Modify: h3x call sites to import `dhttp_identity::identity::{LocalAgent, RemoteAgent, SignError, VerifyError}` directly
+- Delete: `h3x/src/quic/authority.rs`
+- Modify: h3x call sites to import `dhttp_identity::identity::{LocalAuthority, RemoteAuthority, SignError, VerifyError}` directly
 
-- [ ] Add tests in `dhttp/identity/src/identity.rs` for `Identity` implementing async `LocalAgent` and sync-default `RemoteAgent` verification behavior.
-- [ ] Move `LocalAgent`, `RemoteAgent`, `extract_public_key`, `verify_signature`, and `sign_with_key` equivalents into `dhttp-identity` while preserving async signatures.
-- [ ] Delete `h3x::quic::agent`; downstream crates import the identity agent API from `dhttp_identity::identity` directly.
+- [ ] Add tests in `dhttp/identity/src/identity.rs` for `Identity` implementing async `LocalAuthority` and sync-default `RemoteAuthority` verification behavior.
+- [ ] Move `LocalAuthority`, `RemoteAuthority`, `extract_public_key`, `verify_signature`, and `sign_with_key` equivalents into `dhttp-identity` while preserving async signatures.
+- [ ] Delete `h3x::quic::authority`; downstream crates import the identity authority API from `dhttp_identity::identity` directly.
 - [ ] Run `cargo test -p dhttp-identity` and `cargo test --features dquic` in h3x.
 
-### Task 2: Replace ddns-core SigningKey signing with LocalAgent signing
+### Task 2: Replace ddns-core SigningKey signing with LocalAuthority signing
 
 **Files:**
 - Modify: `ddns/ddns-core/Cargo.toml`
 - Modify: `ddns/ddns-core/src/parser/record/endpoint.rs`
 - Modify: `ddns/ddns-core/src/parser/sigin.rs`
 
-- [ ] Add a failing async test for signing an `EndpointAddr` through a fake `LocalAgent` that rejects the first preferred compatible scheme and accepts the next one.
-- [ ] Add `EndpointAddr::sign_with_agent(&mut self, agent: &(impl LocalAgent + ?Sized)) -> impl Future<Output = Result<(), SignEndpointError>>`.
-- [ ] Keep old low-level `ddns_core::parser::sigin::sign_with_key(SigningKey, SignatureScheme, data)` helper, delete only the `EndpointAddr::sign_with(SigningKey, SignatureScheme)` convenience method, and update tests/examples to use the async agent method where endpoint records are signed.
+- [ ] Add a failing async test for signing an `EndpointAddr` through a fake `LocalAuthority` that rejects the first preferred compatible scheme and accepts the next one.
+- [ ] Add `EndpointAddr::sign_with_authority(&mut self, authority: &(impl LocalAuthority + ?Sized)) -> impl Future<Output = Result<(), SignEndpointError>>`.
+- [ ] Keep old low-level `ddns_core::parser::sigin::sign_with_key(SigningKey, SignatureScheme, data)` helper, delete only the `EndpointAddr::sign_with(SigningKey, SignatureScheme)` convenience method, and update tests/examples to use the async authority method where endpoint records are signed.
 - [ ] Keep verification logic unchanged except for imports.
 - [ ] Run `cargo test -p ddns-core`.
 

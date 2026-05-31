@@ -6,12 +6,12 @@ Add a reusable DNS publisher for DHTTP endpoints. The publisher signs endpoint r
 
 ## Decisions
 
-- `LocalAgent` and `RemoteAgent` are identity-layer concepts. Move their async trait definitions to `dhttp-identity`; `Identity` implements them without adding generics to `Identity`.
-- `LocalAgent` remains an async signing API. It is an async/remote-capable counterpart of `rustls::sign::SigningKey`, not a replacement with synchronous signing.
+- `LocalAuthority` and `RemoteAuthority` are identity-layer concepts. Move their async trait definitions to `dhttp-identity`; `Identity` implements them without adding generics to `Identity`.
+- `LocalAuthority` remains an async signing API. It is an async/remote-capable counterpart of `rustls::sign::SigningKey`, not a replacement with synchronous signing.
 - DNS publisher code lives in the `ddns` crate. `dhttp::Endpoint` only exposes a convenience method that constructs a `ddns::Publisher` from endpoint state.
 - `Endpoint::publisher()` returns `Result<ddns::Publisher, CreatePublisherError>` because anonymous endpoints cannot publish signed DNS records. `Publisher` stores a non-optional identity.
-- `EndpointAddr::sign_with(SigningKey, scheme)` is removed. Endpoint record signing uses `dhttp_identity::LocalAgent`.
-- Signature scheme selection follows the existing `pick_signature_scheme` preference order: Ed25519, ECDSA P-256, ECDSA P-384, RSA-PSS SHA-256/384/512, RSA-PKCS1 SHA-256/384/512. The async agent API is not expanded with `choose_scheme`; signing tries compatible schemes and treats `UnsupportedScheme` as a cue to try the next candidate.
+- `EndpointAddr::sign_with(SigningKey, scheme)` is removed. Endpoint record signing uses `dhttp_identity::LocalAuthority`.
+- Signature scheme selection follows the existing `pick_signature_scheme` preference order: Ed25519, ECDSA P-256, ECDSA P-384, RSA-PSS SHA-256/384/512, RSA-PKCS1 SHA-256/384/512. The async authority API is not expanded with `choose_scheme`; signing tries compatible schemes and treats `UnsupportedScheme` as a cue to try the next candidate.
 - `publish_once` returns an error for the first failed publish attempt. `run` publishes every 20 seconds, logs warnings on failures with `snafu::Report`, and does not retain failure state.
 - `NoPublisherResolver` is built at publish time when no concrete publisher can be found by downcasting.
 - There is no `Resolvers::publish`; publishing is resolver-specific and uses `Any` downcasting.
@@ -31,4 +31,4 @@ Errors are typed with `snafu`. Display messages are lower-case fragments and do 
 
 ## Testing
 
-Unit tests cover agent-based endpoint signing, signature scheme fallback, anonymous endpoint publisher construction, missing publisher reporting, and mDNS address scoping helpers. Workspace tests and clippy run before commits.
+Unit tests cover authority-based endpoint signing, signature scheme fallback, anonymous endpoint publisher construction, missing publisher reporting, and mDNS address scoping helpers. Workspace tests and clippy run before commits.
