@@ -1,7 +1,13 @@
 [package]
 name = "ddns"
+description = "DNS discovery and resolver support for DHTTP applications"
 version = "0.2.0"
 edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/genmeta/ddns"
+readme = "README.md"
+keywords = ["dhttp", "dns", "mdns", "http3", "quic"]
+categories = ["network-programming", "asynchronous"]
 autoexamples = false
 
 [dependencies]
