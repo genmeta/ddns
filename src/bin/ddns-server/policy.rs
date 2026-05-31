@@ -1,5 +1,5 @@
 use ddns::core::parser::{packet::be_packet, record::RData};
-use dhttp_identity::identity::RemoteAuthority;
+use dhttp_identity::identity::RemoteAgent;
 use tracing::{debug, warn};
 
 use crate::error::{AppError, normalize_host};
@@ -65,7 +65,7 @@ pub enum ValidatedDnsPacket {
 // Certificate helpers
 // ---------------------------------------------------------------------------
 
-pub fn extract_client_dns_sans(authority: &(impl RemoteAuthority + ?Sized)) -> Vec<String> {
+pub fn extract_client_dns_sans(authority: &(impl RemoteAgent + ?Sized)) -> Vec<String> {
     use x509_parser::prelude::*;
 
     let Some(leaf) = authority.cert_chain().first() else {
@@ -88,7 +88,7 @@ pub fn extract_client_dns_sans(authority: &(impl RemoteAuthority + ?Sized)) -> V
 }
 
 pub fn client_allowed_host(
-    authority: &(impl RemoteAuthority + ?Sized),
+    authority: &(impl RemoteAgent + ?Sized),
 ) -> Result<String, AppError> {
     let mut sans = extract_client_dns_sans(authority)
         .into_iter()
@@ -107,7 +107,7 @@ pub fn client_allowed_host(
 pub fn validate_dns_packet(
     packet: &[u8],
     require_signature: bool,
-    authority: &(impl RemoteAuthority + ?Sized),
+    authority: &(impl RemoteAgent + ?Sized),
 ) -> Result<ValidatedDnsPacket, AppError> {
     let (remaining, dns_packet) = be_packet(packet).map_err(|e| AppError::InvalidDnsPacket {
         message: e.to_string(),
@@ -163,15 +163,15 @@ mod tests {
     use std::collections::HashMap;
 
     use ddns::core::{MdnsPacket, parser::record::endpoint::EndpointAddr};
-    use dhttp_identity::identity::RemoteAuthority;
+    use dhttp_identity::identity::RemoteAgent;
     use rustls::pki_types::CertificateDer;
 
     use super::*;
 
     #[derive(Debug)]
-    struct TestAuthority;
+    struct TestAgent;
 
-    impl RemoteAuthority for TestAuthority {
+    impl RemoteAgent for TestAgent {
         fn name(&self) -> &str {
             "authority.example"
         }
@@ -187,7 +187,7 @@ mod tests {
             HashMap::from([("reimu.pilot.genmeta.net".to_owned(), Vec::new())]);
         let packet = MdnsPacket::answer(0, &hosts).to_bytes();
 
-        let validated = validate_dns_packet(&packet, true, &TestAuthority).unwrap();
+        let validated = validate_dns_packet(&packet, true, &TestAgent).unwrap();
 
         assert!(matches!(validated, ValidatedDnsPacket::Empty));
     }
