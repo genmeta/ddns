@@ -163,7 +163,7 @@ async fn main() -> io::Result<()> {
         if opt.sign {
             info!("signing endpoint");
             endpoint
-                .sign_with_authority(identity.as_ref())
+                .sign_with_agent(identity.as_ref())
                 .await
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         }

@@ -290,7 +290,7 @@ impl Publisher {
 
         #[cfg(feature = "h3x-resolver")]
         if let Some(h3) =
-            any.downcast_ref::<crate::resolvers::H3Resolver<h3x::dquic::QuicEndpoint>>()
+            any.downcast_ref::<crate::resolvers::h3::H3Resolver<h3x::dquic::QuicEndpoint>>()
         {
             h3.clear_pool();
         }
@@ -314,7 +314,7 @@ impl Publisher {
 
         #[cfg(feature = "h3x-resolver")]
         if let Some(h3) =
-            any.downcast_ref::<crate::resolvers::H3Resolver<h3x::dquic::QuicEndpoint>>()
+            any.downcast_ref::<crate::resolvers::h3::H3Resolver<h3x::dquic::QuicEndpoint>>()
         {
             self.publish_endpoints(h3, public_endpoints).await?;
             return Ok(true);

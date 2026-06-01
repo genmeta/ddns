@@ -13,16 +13,15 @@ use snafu::Report;
 use tokio::io;
 
 #[cfg(feature = "h3x-resolver")]
-mod h3;
+pub mod h3;
 #[cfg(feature = "http-resolver")]
 pub mod http;
 
-#[cfg(feature = "mdns-resolver")]
-use crate::mdns::resolvers::mdns::MdnsResolvers;
-#[cfg(feature = "h3x-resolver")]
-pub use h3::{H3Publisher, H3Resolver};
 #[cfg(feature = "http-resolver")]
 use http::HttpResolver;
+
+#[cfg(feature = "mdns-resolver")]
+use crate::mdns::resolvers::mdns::MdnsResolvers;
 
 /// Extract and validate the DNS host from `name`, which may include a `:port`
 /// suffix. Returns `Some(host)` if the host part is a valid RFC-compliant DNS
@@ -90,6 +89,9 @@ impl std::str::FromStr for DnsScheme {
     }
 }
 
+pub mod deferred;
+pub mod weak;
+
 type ArcResolver = Arc<dyn Resolve + Send + Sync + 'static>;
 
 #[derive(Default, Clone, Debug)]
@@ -140,6 +142,11 @@ pub struct ResolversBuilder {
 }
 
 impl ResolversBuilder {
+    pub fn resolver(mut self, resolver: ArcResolver) -> Self {
+        self.resolvers.push(resolver);
+        self
+    }
+
     #[cfg(feature = "mdns-resolver")]
     pub async fn mdns(
         mut self,
@@ -147,7 +154,7 @@ impl ResolversBuilder {
         patterns: Arc<Vec<h3x::dquic::binds::BindPattern>>,
     ) -> Self {
         let mdns = Arc::new(MdnsResolvers::bind(network, patterns, DHTTP_MDNS_SERVICE).await);
-        self.resolvers = self.resolvers.with(mdns);
+        self.resolvers.push(mdns);
         self
     }
 
@@ -175,8 +182,8 @@ impl ResolversBuilder {
         C::Error: Send + Sync + 'static,
         C::Connection: Send + 'static,
     {
-        let resolver = H3Resolver::from_endpoint(base_url, endpoint)?;
-        self.resolvers = self.resolvers.with(Arc::new(resolver));
+        let resolver = h3::H3Resolver::from_endpoint(base_url, endpoint)?;
+        self.resolvers.push(Arc::new(resolver));
         Ok(self)
     }
 
@@ -188,14 +195,13 @@ impl ResolversBuilder {
     #[cfg(feature = "http-resolver")]
     pub fn http_with_base_url(mut self, base_url: impl AsRef<str>) -> io::Result<Self> {
         let resolver = HttpResolver::new(base_url.as_ref())?;
-        self.resolvers = self.resolvers.with(Arc::new(resolver));
+        self.resolvers.push(Arc::new(resolver));
         Ok(self)
     }
 
     pub fn system(mut self) -> Self {
-        self.resolvers = self
-            .resolvers
-            .with(Arc::new(dquic::qresolve::SystemResolver));
+        self.resolvers
+            .push(Arc::new(dquic::qresolve::SystemResolver));
         self
     }
 
@@ -214,8 +220,12 @@ impl Resolvers {
     }
 
     pub fn with(mut self, resolver: ArcResolver) -> Self {
-        self.resolvers.push(resolver);
+        self.push(resolver);
         self
+    }
+
+    pub fn push(&mut self, resolver: ArcResolver) {
+        self.resolvers.push(resolver);
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &ArcResolver> {
