@@ -280,8 +280,6 @@ where
         unreachable!("lookup retry loop returns on the final attempt")
     }
 
-    pub const EXCLUDED_DOMAINS: [&str; 2] = ["dns.genmeta.net", "download.genmeta.net"];
-
     pub async fn lookup(&self, name: &str) -> Result<RecordStream, Error<C::Error>> {
         use crate::core::parser::record;
         let server = Arc::from(self.base_url.origin().ascii_serialization());
@@ -290,11 +288,6 @@ where
         let Some(domain) = super::resolvable_name(name) else {
             return Err(Error::NoRecordFound);
         };
-
-        // 1. Exclude certain domains from lookup
-        if Self::EXCLUDED_DOMAINS.contains(&domain) {
-            return Err(Error::NoRecordFound);
-        }
 
         let now = Instant::now();
         let positive_ttl = Duration::from_secs(10);
@@ -411,9 +404,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::resolvers::DHTTP_H3_DNS_SERVER;
-
     use super::*;
+    use crate::resolvers::DHTTP_H3_DNS_SERVER;
 
     #[test]
     fn lookup_retry_budget_leaves_external_timeout_margin() {
@@ -451,6 +443,29 @@ mod tests {
         assert_eq!(
             endpoint,
             EndpointAddr::direct("192.168.5.78:41748".parse().unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_dns_genmeta_net_record_is_returned() {
+        let endpoint = Arc::new(h3x::endpoint::H3Endpoint::new(
+            h3x::dquic::QuicEndpoint::builder().build().await,
+        ));
+        let resolver = H3Resolver::from_endpoint(DHTTP_H3_DNS_SERVER, endpoint).unwrap();
+        resolver.cached_records.insert(
+            "dns.genmeta.net".to_owned(),
+            Record {
+                addrs: vec![EndpointAddr::direct("192.0.2.53:4433".parse().unwrap())],
+                expire: Instant::now() + Duration::from_secs(60),
+            },
+        );
+
+        let mut records = resolver.lookup("dns.genmeta.net").await.unwrap();
+        let (_source, endpoint) = records.next().await.unwrap();
+
+        assert_eq!(
+            endpoint,
+            EndpointAddr::direct("192.0.2.53:4433".parse().unwrap())
         );
     }
 }

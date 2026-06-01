@@ -87,9 +87,7 @@ pub fn extract_client_dns_sans(authority: &(impl RemoteAgent + ?Sized)) -> Vec<S
     out
 }
 
-pub fn client_allowed_host(
-    authority: &(impl RemoteAgent + ?Sized),
-) -> Result<String, AppError> {
+pub fn client_allowed_host(authority: &(impl RemoteAgent + ?Sized)) -> Result<String, AppError> {
     let mut sans = extract_client_dns_sans(authority)
         .into_iter()
         .filter_map(|h| normalize_host(&h).ok())
