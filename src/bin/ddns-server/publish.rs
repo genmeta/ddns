@@ -1,7 +1,7 @@
 use std::{convert::Infallible, sync::Arc};
 
 use deadpool_redis::redis::{self, AsyncCommands};
-use dhttp_identity::identity::RemoteAgent;
+use dhttp_identity::identity::RemoteAuthority;
 use h3x::{connection::ConnectionState, quic};
 use http_body_util::BodyExt;
 use tokio::time::{Duration, Instant};
@@ -55,7 +55,7 @@ async fn publish_with_cert(state: AppState, request: Request) -> Response {
 
     // Require a valid client certificate for all publish requests.
     let authority = match request_connection(&request) {
-        Some(connection) => match connection.remote_agent().await {
+        Some(connection) => match connection.remote_authority().await {
             Ok(Some(authority)) => authority,
             Ok(None) => {
                 warn!("missing client certificate");
@@ -155,7 +155,7 @@ pub async fn publish_record(
     state: &AppState,
     host: &str,
     body: &bytes::Bytes,
-    authority: &(impl RemoteAgent + ?Sized),
+    authority: &(impl RemoteAuthority + ?Sized),
 ) -> Response {
     let cert_bytes = authority
         .cert_chain()
@@ -258,7 +258,7 @@ pub async fn publish_record(
 pub async fn clear_record(
     state: &AppState,
     host: &str,
-    authority: &(impl RemoteAgent + ?Sized),
+    authority: &(impl RemoteAuthority + ?Sized),
 ) -> Response {
     let cert_bytes = authority
         .cert_chain()
@@ -319,7 +319,7 @@ mod tests {
     };
 
     use ddns::core::{MdnsPacket, parser::record::endpoint::EndpointAddr};
-    use dhttp_identity::identity::RemoteAgent;
+    use dhttp_identity::identity::RemoteAuthority;
     use rustls::pki_types::CertificateDer;
 
     use super::*;
@@ -330,12 +330,12 @@ mod tests {
     };
 
     #[derive(Debug)]
-    struct TestAgent {
+    struct TestAuthority {
         name: &'static str,
         certs: Vec<CertificateDer<'static>>,
     }
 
-    impl TestAgent {
+    impl TestAuthority {
         fn new(name: &'static str, cert_bytes: Vec<u8>) -> Self {
             Self {
                 name,
@@ -344,7 +344,7 @@ mod tests {
         }
     }
 
-    impl RemoteAgent for TestAgent {
+    impl RemoteAuthority for TestAuthority {
         fn name(&self) -> &str {
             self.name
         }
@@ -378,8 +378,8 @@ mod tests {
     async fn clear_record_removes_only_current_certificate_fingerprint() {
         let state = memory_state();
         let host = "reimu.pilot.genmeta.net";
-        let authority_a = TestAgent::new("authority-a", vec![1]);
-        let authority_b = TestAgent::new("authority-b", vec![2]);
+        let authority_a = TestAuthority::new("authority-a", vec![1]);
+        let authority_b = TestAuthority::new("authority-b", vec![2]);
         let packet_a = packet_for(host, 1);
         let packet_b = packet_for(host, 2);
 
@@ -413,7 +413,7 @@ mod tests {
     async fn clear_record_is_idempotent_for_missing_fingerprint() {
         let state = memory_state();
         let host = "reimu.pilot.genmeta.net";
-        let authority = TestAgent::new("authority", vec![1]);
+        let authority = TestAuthority::new("authority", vec![1]);
 
         assert_eq!(
             clear_record(&state, host, &authority).await.status(),

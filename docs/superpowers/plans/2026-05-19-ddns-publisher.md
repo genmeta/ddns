@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add signed DNS publishing for DHTTP endpoints using async identity agents and concrete ddns publishers.
+**Goal:** Add signed DNS publishing for DHTTP endpoints using async identity authorities and concrete ddns publishers.
 
 **Architecture:** `dhttp-identity` owns async authority traits and signature helpers. `ddns-core` signs endpoint records through `LocalAuthority`. `ddns` owns `Publisher`, discovers concrete publishers by downcasting, and publishes signed packets. `dhttp::Endpoint` provides the convenience constructor.
 
