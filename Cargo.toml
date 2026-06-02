@@ -12,7 +12,7 @@ autoexamples = false
 
 [dependencies]
 base64 = "0.22"
-bitfield-struct = "0.10"
+bitfield-struct = "0.13"
 bytes = "1"
 dashmap = "6"
 dhttp-identity = { git = "https://github.com/genmeta/dhttp.git", branch = "main" }
@@ -27,8 +27,9 @@ rustls = { version = "0.23", default-features = false, features = [
     "logging",
     "ring",
 ] }
+rustls-native-certs = { version = "0.8", optional = true }
 rustls-pemfile = "2"
-snafu = "0.8"
+snafu = "0.9"
 socket2 = { version = "0.6", features = ["all"] }
 tokio = { version = "1", features = [
     "time",
@@ -46,12 +47,13 @@ h3x = { git = "https://github.com/genmeta/h3x.git", branch = "endpoint", default
 http = { version = "1", optional = true }
 http-body = { version = "1", optional = true }
 http-body-util = { version = "0.1", optional = true }
-reqwest = { version = "0.12", default-features = false, features = [
+reqwest = { version = "0.13", default-features = false, features = [
     "charset",
-    "rustls-tls",
     "http2",
-    "macos-system-configuration",
     "json",
+    "query",
+    "rustls-no-provider",
+    "system-proxy",
 ], optional = true }
 url = { version = "2", optional = true }
 
@@ -77,7 +79,7 @@ h3x-resolver = [
     "dep:url",
 ]
 mdns-resolver = ["dep:h3x", "h3x/dquic"]
-http-resolver = ["dep:reqwest"]
+http-resolver = ["dep:reqwest", "dep:rustls-native-certs"]
 server = [
     "h3x-resolver",
     "dep:clap",
