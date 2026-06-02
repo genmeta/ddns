@@ -1,5 +1,5 @@
 use ddns::core::parser::{packet::be_packet, record::RData};
-use dhttp_identity::identity::RemoteAgent;
+use dhttp_identity::identity::RemoteAuthority;
 use tracing::{debug, warn};
 
 use crate::error::{AppError, normalize_host};
@@ -65,7 +65,7 @@ pub enum ValidatedDnsPacket {
 // Certificate helpers
 // ---------------------------------------------------------------------------
 
-pub fn extract_client_dns_sans(authority: &(impl RemoteAgent + ?Sized)) -> Vec<String> {
+pub fn extract_client_dns_sans(authority: &(impl RemoteAuthority + ?Sized)) -> Vec<String> {
     use x509_parser::prelude::*;
 
     let Some(leaf) = authority.cert_chain().first() else {
@@ -87,7 +87,9 @@ pub fn extract_client_dns_sans(authority: &(impl RemoteAgent + ?Sized)) -> Vec<S
     out
 }
 
-pub fn client_allowed_host(authority: &(impl RemoteAgent + ?Sized)) -> Result<String, AppError> {
+pub fn client_allowed_host(
+    authority: &(impl RemoteAuthority + ?Sized),
+) -> Result<String, AppError> {
     let mut sans = extract_client_dns_sans(authority)
         .into_iter()
         .filter_map(|h| normalize_host(&h).ok())
@@ -105,7 +107,7 @@ pub fn client_allowed_host(authority: &(impl RemoteAgent + ?Sized)) -> Result<St
 pub fn validate_dns_packet(
     packet: &[u8],
     require_signature: bool,
-    authority: &(impl RemoteAgent + ?Sized),
+    authority: &(impl RemoteAuthority + ?Sized),
 ) -> Result<ValidatedDnsPacket, AppError> {
     let (remaining, dns_packet) = be_packet(packet).map_err(|e| AppError::InvalidDnsPacket {
         message: e.to_string(),
@@ -161,15 +163,15 @@ mod tests {
     use std::collections::HashMap;
 
     use ddns::core::{MdnsPacket, parser::record::endpoint::EndpointAddr};
-    use dhttp_identity::identity::RemoteAgent;
+    use dhttp_identity::identity::RemoteAuthority;
     use rustls::pki_types::CertificateDer;
 
     use super::*;
 
     #[derive(Debug)]
-    struct TestAgent;
+    struct TestAuthority;
 
-    impl RemoteAgent for TestAgent {
+    impl RemoteAuthority for TestAuthority {
         fn name(&self) -> &str {
             "authority.example"
         }
@@ -185,7 +187,7 @@ mod tests {
             HashMap::from([("reimu.pilot.genmeta.net".to_owned(), Vec::new())]);
         let packet = MdnsPacket::answer(0, &hosts).to_bytes();
 
-        let validated = validate_dns_packet(&packet, true, &TestAgent).unwrap();
+        let validated = validate_dns_packet(&packet, true, &TestAuthority).unwrap();
 
         assert!(matches!(validated, ValidatedDnsPacket::Empty));
     }
