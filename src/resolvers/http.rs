@@ -1,8 +1,4 @@
-use std::{
-    fmt::Display,
-    io,
-    sync::{Arc, LazyLock},
-};
+use std::{fmt::Display, io, sync::Arc};
 
 use dashmap::DashMap;
 use dquic::{
@@ -33,7 +29,7 @@ impl Display for HttpResolver {
         write!(
             f,
             "Http DNS({})",
-            self.base_url.host_str().expect("Cheked in constructor")
+            self.base_url.host_str().expect("checked in constructor")
         )
     }
 }
@@ -46,28 +42,48 @@ impl HttpResolver {
         base_url.host_str().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "Base URL must have a valid host",
+                "base URL must have a valid host",
             )
         })?;
 
-        static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
-            Client::builder()
-                .build()
-                // with certs?
-                .expect("Failed to build HTTP client for HttpResolver")
-        });
-
         Ok(Self {
-            http_client: HTTP_CLIENT.clone(),
+            http_client: build_http_client()?,
             base_url,
             cached_records: DashMap::new(),
         })
     }
 }
 
+fn build_http_client() -> io::Result<Client> {
+    let native_certs = rustls_native_certs::load_native_certs();
+    for error in &native_certs.errors {
+        let report = snafu::Report::from_error(error);
+        tracing::warn!(error = %report, "failed to load native root certificate");
+    }
+
+    let mut root_store = rustls::RootCertStore::empty();
+    let (valid_roots, invalid_roots) = root_store.add_parsable_certificates(native_certs.certs);
+    if invalid_roots > 0 {
+        tracing::debug!(invalid_roots, "ignored invalid native root certificates");
+    }
+    if valid_roots == 0 {
+        tracing::warn!("no native root certificates loaded for http resolver");
+    }
+
+    let mut tls = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+
+    Client::builder()
+        .use_preconfigured_tls(tls)
+        .build()
+        .map_err(io::Error::other)
+}
+
 #[derive(Debug, snafu::Snafu)]
 enum Error {
-    #[snafu(display("HTTP request failed"))]
+    #[snafu(display("http request failed"))]
     Reqwest { source: reqwest::Error },
 
     #[snafu(display("{status}"))]
@@ -99,18 +115,16 @@ impl Publish for HttpResolver {
         Box::pin(async move {
             let mut url = self.base_url.join("publish").expect("Invalid base URL");
             url.set_query(Some(&format!("host={name}")));
-            let client = reqwest::Client::new();
-            let response = client
+            let response = self
+                .http_client
                 .post(url)
                 .header("Content-Type", "application/octet-stream")
                 .body(packet.to_vec())
                 .send()
                 .await
-                .map_err(|e| io::Error::other(e.to_string()))?;
+                .map_err(io::Error::other)?;
 
-            let _response = response
-                .error_for_status()
-                .map_err(|e| io::Error::other(e.to_string()))?;
+            let _response = response.error_for_status().map_err(io::Error::other)?;
             Ok(())
         })
     }

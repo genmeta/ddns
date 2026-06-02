@@ -31,7 +31,7 @@ pub enum VerifyError {
     InvalidPem { source: std::io::Error },
     #[snafu(display("invalid base64"))]
     InvalidBase64 { source: base64::DecodeError },
-    #[snafu(display("IO error"))]
+    #[snafu(display("io error"))]
     Io { source: std::io::Error },
 }
 

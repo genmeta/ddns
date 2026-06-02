@@ -148,11 +148,6 @@ fn build_seed_records(seed_records: &[SeedRecordConfig]) -> io::Result<SeedRecor
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Install ring crypto provider
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("Failed to install ring crypto provider");
-
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
         .with(tracing_subscriber::filter::filter_fn(|metadata| {

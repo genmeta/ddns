@@ -97,11 +97,6 @@ fn expand_tilde(path: &Path) -> io::Result<PathBuf> {
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    // Install ring crypto provider
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("Failed to install ring crypto provider");
-
     tracing_subscriber::fmt()
         .with_max_level(Level::DEBUG)
         .init();
