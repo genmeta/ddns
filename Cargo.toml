@@ -21,7 +21,7 @@ flume = "0.12"
 futures = "0.3"
 libc = "0.2"
 nom = "8"
-rand = "0.9"
+rand = "0.10"
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = [
     "logging",
@@ -29,7 +29,7 @@ rustls = { version = "0.23", default-features = false, features = [
 ] }
 rustls-pemfile = "2"
 snafu = "0.8"
-socket2 = { version = "0.5.8", features = ["all"] }
+socket2 = { version = "0.6", features = ["all"] }
 tokio = { version = "1", features = [
     "time",
     "macros",
@@ -59,7 +59,7 @@ clap = { version = "4", features = ["derive"], optional = true }
 deadpool-redis = { version = "0.23", optional = true }
 idna = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
-toml = { version = "0.8", optional = true }
+toml = { version = "1", optional = true }
 tower-service = { version = "0.3", optional = true }
 tracing-subscriber = { version = "0.3", features = [
     "env-filter",
