@@ -94,10 +94,7 @@ clap = { version = "4", features = ["derive"] }
 h3x = { git = "https://github.com/genmeta/h3x.git", branch = "endpoint", default-features = false, features = [
     "dquic",
 ] }
-idna = "1"
-rustls-pki-types = "1"
 shellexpand = "3"
-tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [[bin]]
