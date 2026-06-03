@@ -1,7 +1,10 @@
 use std::{
+    any::Any,
+    cmp::Ordering,
     collections::{HashMap, HashSet},
     convert::Infallible,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
 };
 
 use ddns::core::{
@@ -10,6 +13,7 @@ use ddns::core::{
     wire::MultiResponse,
 };
 use deadpool_redis::redis::{self, AsyncCommands};
+use h3x::{connection::ConnectionState, quic};
 use h3x::message::stream::MessageStreamError;
 use http_body_util::{Full, combinators::UnsyncBoxBody};
 use tracing::debug;
@@ -71,6 +75,99 @@ fn normalize_lookup_records(records: Vec<LookupRecord>) -> Vec<LookupRecord> {
     normalized
 }
 
+fn lookup_endpoint(dns_bytes: &[u8]) -> Option<(SocketAddr, Option<f32>)> {
+    let (_, packet) = be_packet(dns_bytes).ok()?;
+    packet.answers.iter().find_map(|answer| match answer.data() {
+        RData::E(endpoint) => Some((endpoint.addr(), endpoint.load())),
+        _ => None,
+    })
+}
+
+fn common_prefix_len(source: IpAddr, target: IpAddr) -> u32 {
+    fn bytes_prefix_len(left: &[u8], right: &[u8]) -> u32 {
+        let mut matched = 0;
+        for (l, r) in left.iter().zip(right.iter()) {
+            let diff = l ^ r;
+            if diff == 0 {
+                matched += 8;
+                continue;
+            }
+            matched += (diff as u32).leading_zeros().saturating_sub(24);
+            break;
+        }
+        matched
+    }
+
+    match (source, target) {
+        (IpAddr::V4(source), IpAddr::V4(target)) => {
+            bytes_prefix_len(&source.octets(), &target.octets())
+        }
+        (IpAddr::V6(source), IpAddr::V6(target)) => {
+            bytes_prefix_len(&source.octets(), &target.octets())
+        }
+        _ => 0,
+    }
+}
+
+fn sort_lookup_records(records: Vec<LookupRecord>, source_ip: Option<IpAddr>) -> Vec<LookupRecord> {
+    let mut decorated = records
+        .into_iter()
+        .enumerate()
+        .map(|(index, record)| {
+            let sort_key = lookup_endpoint(&record.0).map(|(endpoint, load)| {
+                let (family_match, prefix_len) = match source_ip {
+                    Some(source_ip) if source_ip.is_ipv4() == endpoint.ip().is_ipv4() => {
+                        (true, common_prefix_len(source_ip, endpoint.ip()))
+                    }
+                    Some(_) => (false, 0),
+                    None => (false, 0),
+                };
+
+                (family_match, prefix_len, load)
+            });
+            (sort_key, index, record)
+        })
+        .collect::<Vec<_>>();
+
+    decorated.sort_by(|(left_key, left_index, _), (right_key, right_index, _)| {
+        match (left_key, right_key) {
+            (Some((left_family, left_prefix, left_load)), Some((right_family, right_prefix, right_load))) => right_family
+                .cmp(left_family)
+                .then_with(|| right_prefix.cmp(left_prefix))
+                .then_with(|| match (left_load, right_load) {
+                    (Some(left), Some(right)) => left.partial_cmp(right).unwrap_or(Ordering::Equal),
+                    (Some(_), None) => Ordering::Less,
+                    (None, Some(_)) => Ordering::Greater,
+                    (None, None) => Ordering::Equal,
+                }),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        }
+        .then_with(|| left_index.cmp(right_index))
+    });
+
+    decorated
+        .into_iter()
+        .map(|(_, _, record)| record)
+        .collect()
+}
+
+fn request_source_ip(request: &Request) -> Option<IpAddr> {
+    let connection = request
+        .extensions()
+        .get::<Arc<ConnectionState<dyn quic::DynConnection>>>()?
+        .clone();
+    let quic = connection.quic();
+    let dquic = (quic.as_ref() as &dyn Any).downcast_ref::<dquic::prelude::Connection>()?;
+    let ctx = dquic.path_context().ok()?;
+
+    ctx.paths::<Vec<_>>()
+        .into_iter()
+        .next()
+        .map(|(pathway, _)| pathway.remote().addr().ip())
+}
+
 // ---------------------------------------------------------------------------
 // Core lookup logic
 // ---------------------------------------------------------------------------
@@ -79,17 +176,19 @@ pub async fn perform_lookup(
     state: &AppState,
     host: &str,
     limit: Option<usize>,
+    source_ip: Option<IpAddr>,
 ) -> Result<LookupResult, AppError> {
     let host = normalize_host(host)?;
-    perform_lookup_multi(state, &host, limit).await
+    perform_lookup_multi(state, &host, limit, source_ip).await
 }
 
 async fn perform_lookup_multi(
     state: &AppState,
     host: &str,
     limit: Option<usize>,
+    source_ip: Option<IpAddr>,
 ) -> Result<LookupResult, AppError> {
-    let mut records = match &state.storage {
+    let dynamic_records = match &state.storage {
         Storage::Redis(pool) => {
             let mut conn = pool.get().await.map_err(|e| AppError::Redis {
                 message: e.to_string(),
@@ -108,10 +207,9 @@ async fn perform_lookup_multi(
                 .await
                 .unwrap_or(());
 
-            // Fetch all remaining, newest first (highest score = most recently published)
-            let count: isize = limit.map(|l| l as isize).unwrap_or(-1);
+            // Fetch all remaining active dynamic records; scheduling is applied after decode.
             let members: Vec<Vec<u8>> = conn
-                .zrevrange(&set_key, 0isize, if count < 0 { -1 } else { count - 1 })
+                .zrevrange(&set_key, 0isize, -1isize)
                 .await
                 .map_err(|e| AppError::Redis {
                     message: e.to_string(),
@@ -138,10 +236,9 @@ async fn perform_lookup_multi(
                 // Evict expired entries in-place.
                 entry.retain(|_, r| r.expire > now);
                 // Sort newest-first by published_at.
-                let take = limit.unwrap_or(entry.len()).min(entry.len());
                 let mut records: Vec<_> = entry.values().collect();
                 records.sort_by_key(|b| std::cmp::Reverse(b.published_at));
-                records[..take]
+                records
                     .iter()
                     .map(|r| (r.dns_bytes.clone(), r.cert_bytes.clone()))
                     .collect::<Vec<_>>()
@@ -151,11 +248,22 @@ async fn perform_lookup_multi(
         }
     };
 
-    if let Some(seed_records) = state.seed_records.get(host) {
-        records.extend(seed_records.iter().cloned());
+    let mut records = sort_lookup_records(normalize_lookup_records(dynamic_records), source_ip);
+
+    let should_append_seeds = records.is_empty() || limit.is_some_and(|max| records.len() < max);
+    if should_append_seeds
+        && let Some(seed_records) = state.seed_records.get(host)
+    {
+        let seeds = sort_lookup_records(seed_records.iter().cloned().collect(), source_ip);
+        records.extend(seeds);
     }
 
     let records = normalize_lookup_records(records);
+    let records = if let Some(limit) = limit {
+        records.into_iter().take(limit).collect::<Vec<_>>()
+    } else {
+        records
+    };
 
     if records.is_empty() {
         Ok(LookupResult::NotFound)
@@ -206,15 +314,16 @@ pub async fn lookup_with_cert(state: AppState, request: Request) -> Response {
     let Some(host) = params.get("host") else {
         return write_error(AppError::MissingHostParam);
     };
+    let source_ip = request_source_ip(&request);
 
     let limit: Option<usize> = params
         .get("limit")
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&n| n > 0);
 
-    debug!(host = %host, limit, "lookup.request");
+    debug!(host = %host, limit, ?source_ip, "lookup.request");
 
-    match perform_lookup(&state, host, limit).await {
+    match perform_lookup(&state, host, limit, source_ip).await {
         Ok(LookupResult::NotFound) => {
             debug!(host = %host, "lookup.not_found");
             body_response(
