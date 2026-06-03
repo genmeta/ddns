@@ -64,6 +64,14 @@ pub struct Config {
     /// Static seed records returned on lookup in addition to dynamic published records.
     #[serde(default)]
     pub seed_records: Vec<SeedRecordConfig>,
+
+    /// Path to the GeoLite2 City database.
+    #[serde(default)]
+    pub geoip_city_db: Option<PathBuf>,
+
+    /// Path to the GeoLite2 ASN database.
+    #[serde(default)]
+    pub geoip_asn_db: Option<PathBuf>,
 }
 
 impl Config {
@@ -71,6 +79,8 @@ impl Config {
         self.cert = expand_home_dir(&self.cert);
         self.key = expand_home_dir(&self.key);
         self.root_cert = expand_home_dir(&self.root_cert);
+        self.geoip_city_db = self.geoip_city_db.map(|path| expand_home_dir(&path));
+        self.geoip_asn_db = self.geoip_asn_db.map(|path| expand_home_dir(&path));
         self
     }
 

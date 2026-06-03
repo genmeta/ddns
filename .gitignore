@@ -2,3 +2,5 @@
 Cargo.lock
 *.log
 build
+/geoip
+/docs

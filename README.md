@@ -100,6 +100,22 @@ Start an HTTP/3 DNS server:
 cargo run --bin ddns-server --features="server" -- --config server.toml
 ```
 
+The server can optionally enable GEO-aware lookup ordering with local MaxMind
+GeoLite2 City and ASN databases. When both `geoip_city_db` and `geoip_asn_db`
+are configured, lookups prefer same-country and same-ASN endpoints first, then
+fall back to address family, endpoint load, and city-distance tie-breaking for
+sufficiently accurate records.
+
+To update those databases on a server, use [scripts/update-geolite-mmdb.sh](scripts/update-geolite-mmdb.sh).
+It wraps `geoipupdate` and downloads both `GeoLite2-City.mmdb` and
+`GeoLite2-ASN.mmdb` into one directory:
+
+```bash
+MAXMIND_ACCOUNT_ID=12345 \
+MAXMIND_LICENSE_KEY=your_license_key \
+./scripts/update-geolite-mmdb.sh /etc/ddns
+```
+
 For detailed parameters and HTTP packet structures, see [examples/README.md](examples/README.md).
 
 ---

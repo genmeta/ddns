@@ -24,6 +24,12 @@ ttl_secs = 30
 # If omitted, records are kept in memory only (lost on restart).
 # redis = "redis://127.0.0.1/"
 
+# Enable GEO-aware scheduling based on country / ASN.
+# When both databases are configured, city-distance tie-breaking is also enabled
+# for sufficiently accurate records.
+# geoip_city_db = "/etc/ddns/GeoLite2-City.mmdb"
+# geoip_asn_db = "/etc/ddns/GeoLite2-ASN.mmdb"
+
 # ---------------------------------------------------------------------------
 # Domain policy rules
 #

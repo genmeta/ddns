@@ -60,6 +60,7 @@ url = { version = "2", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 deadpool-redis = { version = "0.23", optional = true }
 idna = { version = "1", optional = true }
+maxminddb = { version = "0.26", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 toml = { version = "1", optional = true }
 tower-service = { version = "0.3", optional = true }
@@ -85,6 +86,7 @@ server = [
     "dep:clap",
     "dep:deadpool-redis",
     "dep:idna",
+    "dep:maxminddb",
     "dep:serde",
     "dep:toml",
     "dep:tower-service",
@@ -124,3 +126,6 @@ required-features = ["h3x-resolver"]
 
 [patch.crates-io]
 proc-macro-error2 = { path = "patches/proc-macro-error2" }
+
+[patch."https://github.com/genmeta/h3x.git"]
+h3x = { path = "../h3x-endpoint-local" }
