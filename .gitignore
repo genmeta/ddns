@@ -2,6 +2,7 @@
 Cargo.lock
 *.log
 build
-
 .DS_Store
 .vscode/
+/geoip
+/docs

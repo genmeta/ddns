@@ -1,4 +1,4 @@
-use std::{convert::Infallible, sync::Arc};
+use std::{collections::HashSet, convert::Infallible, sync::Arc};
 
 use deadpool_redis::redis::{self, AsyncCommands};
 use dhttp_identity::identity::RemoteAuthority;
@@ -13,7 +13,8 @@ use crate::{
     policy::{DomainPolicy, ValidatedDnsPacket, client_allowed_host, validate_dns_packet},
     storage::{
         AppState, Record, Storage, StoredRecord, cert_fingerprint, cert_fingerprint_hex,
-        unix_now_secs,
+        record_index_tags, redis_all_index_key, redis_asn_index_key, redis_country_index_key,
+        redis_primary_key, unix_now_secs,
     },
 };
 
@@ -180,17 +181,30 @@ pub async fn publish_record(
             let expire_ttl_secs = i64::try_from(state.ttl_secs).unwrap_or(i64::MAX);
             let now_secs = unix_now_secs();
             let expire_secs = now_secs + state.ttl_secs;
+            let index_tags = record_index_tags(body.as_ref(), state.geo.as_deref());
 
-            let fp_key = format!("{host}:fp:{fp_hex}");
-            let set_key = format!("{host}:multi");
+            let fp_key = redis_primary_key(host, &fp_hex);
+            let all_index_key = redis_all_index_key(host);
+            let mut touched_index_keys = HashSet::from([all_index_key.clone()]);
 
-            // Remove the previous entry from this source (if any) from the ZSET.
             let old_member: Option<Vec<u8>> = conn.get(&fp_key).await.unwrap_or(None);
-            if let Some(old) = old_member {
-                let _: () = conn.zrem(&set_key, &old).await.unwrap_or(());
+            if let Some(old_record) = old_member.as_deref().and_then(StoredRecord::decode) {
+                let old_tags = record_index_tags(&old_record.dns, state.geo.as_deref());
+                let _: () = conn.zrem(&all_index_key, &fp_hex).await.unwrap_or(());
+
+                for country in &old_tags.countries {
+                    let key = redis_country_index_key(host, country);
+                    touched_index_keys.insert(key.clone());
+                    let _: () = conn.zrem(&key, &fp_hex).await.unwrap_or(());
+                }
+
+                for asn in &old_tags.asns {
+                    let key = redis_asn_index_key(host, *asn);
+                    touched_index_keys.insert(key.clone());
+                    let _: () = conn.zrem(&key, &fp_hex).await.unwrap_or(());
+                }
             }
 
-            // Encode and store the new member.
             let new_member = StoredRecord {
                 expire_unix_secs: expire_secs,
                 fingerprint: fp,
@@ -209,7 +223,7 @@ pub async fn publish_record(
             }
 
             if let Err(e) = conn
-                .zadd::<_, _, _, ()>(&set_key, &new_member, now_secs as f64)
+                .zadd::<_, _, _, ()>(&all_index_key, &fp_hex, now_secs as f64)
                 .await
             {
                 return write_error(AppError::Redis {
@@ -217,21 +231,37 @@ pub async fn publish_record(
                 });
             }
 
-            // Expire the ZSET key at max(ttl_secs) from now as a safety net.
-            let _: bool = conn
-                .expire(&set_key, expire_ttl_secs)
-                .await
-                .unwrap_or(false);
+            for country in &index_tags.countries {
+                let key = redis_country_index_key(host, country);
+                touched_index_keys.insert(key.clone());
+                if let Err(e) = conn.zadd::<_, _, _, ()>(&key, &fp_hex, now_secs as f64).await {
+                    return write_error(AppError::Redis {
+                        message: e.to_string(),
+                    });
+                }
+            }
 
-            // Evict stale (score < now - ttl) entries.
+            for asn in &index_tags.asns {
+                let key = redis_asn_index_key(host, *asn);
+                touched_index_keys.insert(key.clone());
+                if let Err(e) = conn.zadd::<_, _, _, ()>(&key, &fp_hex, now_secs as f64).await {
+                    return write_error(AppError::Redis {
+                        message: e.to_string(),
+                    });
+                }
+            }
+
             let cutoff = now_secs.saturating_sub(state.ttl_secs) as f64;
-            let _: () = redis::cmd("ZREMRANGEBYSCORE")
-                .arg(&set_key)
-                .arg("-inf")
-                .arg(cutoff)
-                .query_async::<()>(&mut *conn)
-                .await
-                .unwrap_or(());
+            for key in touched_index_keys {
+                let _: bool = conn.expire(&key, expire_ttl_secs).await.unwrap_or(false);
+                let _: () = redis::cmd("ZREMRANGEBYSCORE")
+                    .arg(&key)
+                    .arg("-inf")
+                    .arg(cutoff)
+                    .query_async::<()>(&mut *conn)
+                    .await
+                    .unwrap_or(());
+            }
         }
         Storage::Memory(mem) => {
             let now = Instant::now();
@@ -240,14 +270,11 @@ pub async fn publish_record(
                 dns_bytes: body.to_vec(),
                 cert_bytes,
                 expire,
-                published_at: now,
+                index_tags: record_index_tags(body.as_ref(), state.geo.as_deref()),
             };
-            // Upsert by fingerprint: same source overwrites its own entry;
-            // different sources (different certs) coexist independently.
             let mut host_map = mem.records.entry(host.to_string()).or_default();
+            host_map.retain_active(now);
             host_map.insert(fp, record);
-            // Evict expired entries while we hold the write lock.
-            host_map.retain(|_, r| r.expire > now);
         }
     }
 
@@ -280,13 +307,23 @@ pub async fn clear_record(
                 }
             };
 
-            let fp_key = format!("{host}:fp:{fp_hex}");
-            let set_key = format!("{host}:multi");
+            let fp_key = redis_primary_key(host, &fp_hex);
+            let all_index_key = redis_all_index_key(host);
 
             let old_member: Option<Vec<u8>> = conn.get(&fp_key).await.unwrap_or(None);
-            if let Some(old) = old_member {
-                let _: () = conn.zrem(&set_key, &old).await.unwrap_or(());
+            if let Some(old_record) = old_member.as_deref().and_then(StoredRecord::decode) {
+                let old_tags = record_index_tags(&old_record.dns, state.geo.as_deref());
+                let _: () = conn.zrem(&all_index_key, &fp_hex).await.unwrap_or(());
+                for country in &old_tags.countries {
+                    let key = redis_country_index_key(host, country);
+                    let _: () = conn.zrem(&key, &fp_hex).await.unwrap_or(());
+                }
+                for asn in &old_tags.asns {
+                    let key = redis_asn_index_key(host, *asn);
+                    let _: () = conn.zrem(&key, &fp_hex).await.unwrap_or(());
+                }
             }
+
             if let Err(e) = conn.del::<_, ()>(&fp_key).await {
                 return write_error(AppError::Redis {
                     message: e.to_string(),
@@ -295,7 +332,7 @@ pub async fn clear_record(
         }
         Storage::Memory(mem) => {
             let remove_host = if let Some(mut host_map) = mem.records.get_mut(host) {
-                host_map.remove(&fp);
+                let _ = host_map.remove(&fp);
                 host_map.is_empty()
             } else {
                 false
@@ -361,6 +398,7 @@ mod tests {
             ttl_secs: 30,
             policies: Arc::new(DomainPolicies::default()),
             seed_records: SeedRecords::default(),
+            geo: None,
         }
     }
 
@@ -401,7 +439,7 @@ mod tests {
             http::StatusCode::OK
         );
 
-        let LookupResult::Multi(response) = perform_lookup(&state, host, None).await.unwrap()
+        let LookupResult::Multi(response) = perform_lookup(&state, host, None, None).await.unwrap()
         else {
             panic!("authority b record should remain");
         };
@@ -420,7 +458,7 @@ mod tests {
             http::StatusCode::OK
         );
         assert!(matches!(
-            perform_lookup(&state, host, None).await.unwrap(),
+            perform_lookup(&state, host, None, None).await.unwrap(),
             LookupResult::NotFound
         ));
     }

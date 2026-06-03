@@ -1,5 +1,6 @@
 mod config;
 mod error;
+mod geo;
 mod lookup;
 mod policy;
 mod publish;
@@ -11,6 +12,7 @@ use std::{
     net::SocketAddr,
     sync::Arc,
     task::{Context, Poll},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use clap::Parser;
@@ -26,11 +28,12 @@ use h3x::{
     hyper::TowerService,
 };
 use rustls::{RootCertStore, server::WebPkiClientVerifier};
-use tracing::{info, level_filters::LevelFilter};
+use tracing::{info, level_filters::LevelFilter, warn};
 use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
 
 use crate::{
     config::{Config, Options, PolicyKind, SeedRecordConfig},
+    geo::GeoResolver,
     lookup::LookupSvc,
     policy::{DomainPolicies, DomainPolicy, PolicyRule},
     publish::PublishSvc,
@@ -129,6 +132,61 @@ fn build_seed_records(seed_records: &[SeedRecordConfig]) -> io::Result<SeedRecor
     Ok(Arc::new(records))
 }
 
+fn log_geo_db_freshness(kind: &str, build_epoch: u64) {
+    const STALE_GEO_DB_AGE_SECS: u64 = 45 * 24 * 60 * 60;
+
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(build_epoch);
+    let age_secs = now_secs.saturating_sub(build_epoch);
+
+    if age_secs > STALE_GEO_DB_AGE_SECS {
+        warn!(kind, build_epoch, age_secs, "geo_routing.db_outdated");
+    }
+}
+
+const GEO_CITY_DISTANCE_ROUTING: bool = true;
+const GEO_MAX_ACCURACY_RADIUS_KM: u32 = 100;
+
+fn build_geo_resolver(config: &Config) -> io::Result<Option<Arc<GeoResolver>>> {
+    let Some(city_db) = config.geoip_city_db.as_deref() else {
+        return if config.geoip_asn_db.is_none() {
+            Ok(None)
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "geoip_city_db and geoip_asn_db must be configured together",
+            ))
+        };
+    };
+
+    let Some(asn_db) = config.geoip_asn_db.as_deref() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "geoip_city_db and geoip_asn_db must be configured together",
+        ));
+    };
+
+    let resolver = Arc::new(GeoResolver::open(
+        city_db,
+        asn_db,
+        GEO_CITY_DISTANCE_ROUTING,
+        GEO_MAX_ACCURACY_RADIUS_KM,
+    )?);
+    info!(
+        city_db = %city_db.display(),
+        asn_db = %asn_db.display(),
+        city_distance_routing = GEO_CITY_DISTANCE_ROUTING,
+        max_accuracy_radius_km = GEO_MAX_ACCURACY_RADIUS_KM,
+        "geo_routing.enabled"
+    );
+    log_geo_db_freshness("city", resolver.city_build_epoch());
+    log_geo_db_freshness("asn", resolver.asn_build_epoch());
+
+    Ok(Some(resolver))
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -155,6 +213,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let config = config.expand_paths();
     let seed_records = build_seed_records(&config.seed_records)?;
+    let geo = build_geo_resolver(&config)?;
 
     // Build storage backend.
     let storage = match config.redis.clone() {
@@ -201,6 +260,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ttl_secs: config.ttl_secs,
         policies,
         seed_records,
+        geo,
     };
 
     let cert_pem = std::fs::read(&config.cert)?;
@@ -238,4 +298,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     server.listen_owned(router).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{net::SocketAddr, path::PathBuf};
+
+    use super::*;
+    use crate::config::Config;
+
+    fn test_config() -> Config {
+        Config {
+            redis: None,
+            listen: Config::default_listen(),
+            server_name: Config::default_server_name(),
+            cert: Config::default_cert(),
+            key: Config::default_key(),
+            root_cert: Config::default_root_cert(),
+            require_signature: Config::default_require_signature(),
+            ttl_secs: Config::default_ttl_secs(),
+            domain_policies: Vec::new(),
+            seed_records: Vec::new(),
+            geoip_city_db: None,
+            geoip_asn_db: None,
+        }
+    }
+
+    #[test]
+    fn unspecified_ipv4_listen_uses_dual_stack_wildcard() {
+        let listen: SocketAddr = "0.0.0.0:4433".parse().unwrap();
+        let patterns = bind_patterns_for_listen(listen);
+
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].to_string(), "inet://[::]:4433");
+    }
+
+    #[test]
+    fn geo_routing_requires_city_db_path() {
+        let mut config = test_config();
+        config.geoip_asn_db = Some(PathBuf::from("/tmp/asn.mmdb"));
+
+        let err = build_geo_resolver(&config).expect_err("missing city db should fail");
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(err.to_string(), "geoip_city_db and geoip_asn_db must be configured together");
+    }
+
+    #[test]
+    fn geo_routing_requires_asn_db_path() {
+        let mut config = test_config();
+        config.geoip_city_db = Some(PathBuf::from("/tmp/city.mmdb"));
+
+        let err = build_geo_resolver(&config).expect_err("missing asn db should fail");
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(err.to_string(), "geoip_city_db and geoip_asn_db must be configured together");
+    }
 }
