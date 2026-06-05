@@ -16,50 +16,13 @@ use nom::{
     error::{ErrorKind, make_error},
     number::streaming::{be_u8, be_u16, be_u32, be_u128},
 };
-use rustls::{SignatureScheme, pki_types::SubjectPublicKeyInfoDer};
+use rustls::pki_types::SubjectPublicKeyInfoDer;
 use snafu::{ResultExt, Snafu};
 
 use crate::core::parser::{
     sigin,
     varint::{VarInt, WriteVarInt, be_varint},
 };
-
-const SIGNATURE_SCHEME_PREFERENCE: &[SignatureScheme] = &[
-    SignatureScheme::ED25519,
-    SignatureScheme::ECDSA_NISTP256_SHA256,
-    SignatureScheme::ECDSA_NISTP384_SHA384,
-    SignatureScheme::RSA_PSS_SHA256,
-    SignatureScheme::RSA_PSS_SHA384,
-    SignatureScheme::RSA_PSS_SHA512,
-    SignatureScheme::RSA_PKCS1_SHA256,
-    SignatureScheme::RSA_PKCS1_SHA384,
-    SignatureScheme::RSA_PKCS1_SHA512,
-];
-
-fn signature_schemes_for_algorithm(
-    algorithm: rustls::SignatureAlgorithm,
-) -> impl Iterator<Item = SignatureScheme> {
-    SIGNATURE_SCHEME_PREFERENCE
-        .iter()
-        .copied()
-        .filter(move |scheme| match algorithm {
-            rustls::SignatureAlgorithm::ED25519 => *scheme == SignatureScheme::ED25519,
-            rustls::SignatureAlgorithm::ECDSA => matches!(
-                scheme,
-                SignatureScheme::ECDSA_NISTP256_SHA256 | SignatureScheme::ECDSA_NISTP384_SHA384
-            ),
-            rustls::SignatureAlgorithm::RSA => matches!(
-                scheme,
-                SignatureScheme::RSA_PSS_SHA256
-                    | SignatureScheme::RSA_PSS_SHA384
-                    | SignatureScheme::RSA_PSS_SHA512
-                    | SignatureScheme::RSA_PKCS1_SHA256
-                    | SignatureScheme::RSA_PKCS1_SHA384
-                    | SignatureScheme::RSA_PKCS1_SHA512
-            ),
-            _ => true,
-        })
-}
 
 #[derive(Debug, Snafu)]
 #[snafu(module)]
@@ -68,8 +31,6 @@ pub enum SignEndpointError {
     Sign {
         source: dhttp_identity::identity::SignError,
     },
-    #[snafu(display("no supported signature scheme for endpoint address"))]
-    NoSupportedScheme,
 }
 
 /// EndpointAddress record (Type E = 266)
@@ -83,7 +44,7 @@ pub enum SignEndpointError {
 /// +-------+-----------------+--------------------+----------------+----------------------------+
 /// | flags | sequence(varint)| addr               | load(optional) | signature (optional)       |
 /// +-------+-----------------+--------------------+----------------+----------------------------+
-/// | u8    | QUIC varint     | see addr layout    | f32            | scheme(u16)+len(varint)+N  |
+/// | u8    | QUIC varint     | see addr layout    | f32            | len(varint)+N              |
 /// +-------+-----------------+--------------------+----------------+----------------------------+
 ///
 /// addr layout:
@@ -114,7 +75,6 @@ pub enum SignEndpointError {
 ///
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EndpointSignature {
-    scheme: u16,
     signature: Vec<u8>,
 }
 
@@ -259,21 +219,12 @@ impl EndpointAddr {
     ) -> Result<(), SignEndpointError> {
         self.set_signed(true);
         let data = self.signed_data();
-        for scheme in signature_schemes_for_algorithm(authority.sign_algorithm()) {
-            match authority.sign(scheme, &data).await {
-                Ok(signature) => {
-                    self.signature = Some(EndpointSignature {
-                        scheme: u16::from(scheme),
-                        signature,
-                    });
-                    return Ok(());
-                }
-                Err(dhttp_identity::identity::SignError::UnsupportedScheme { .. }) => {}
-                Err(source) => return Err(source).context(sign_endpoint_error::SignSnafu),
-            }
-        }
-
-        sign_endpoint_error::NoSupportedSchemeSnafu.fail()
+        let signature = authority
+            .sign(&data)
+            .await
+            .context(sign_endpoint_error::SignSnafu)?;
+        self.signature = Some(EndpointSignature { signature });
+        Ok(())
     }
 
     pub fn verify_signature(
@@ -284,12 +235,7 @@ impl EndpointAddr {
             return Ok(false);
         };
         let data = self.signed_data();
-        sigin::verify(
-            spki,
-            SignatureScheme::from(sig.scheme),
-            &data,
-            &sig.signature,
-        )
+        sigin::verify(spki, &data, &sig.signature)
     }
 
     pub fn verify_signature_from_der(&self, cert_der: &[u8]) -> Result<bool, sigin::VerifyError> {
@@ -381,7 +327,7 @@ impl EndpointAddr {
         {
             let sig_len =
                 VarInt::try_from(sig.signature.len() as u64).unwrap_or(VarInt::from_u32(0));
-            meta_len += 2 + sig_len.encoding_size() + sig.signature.len();
+            meta_len += sig_len.encoding_size() + sig.signature.len();
         }
 
         let addr_len = match (self.is_ipv6(), self.is_nat()) {
@@ -481,7 +427,6 @@ impl<B: BufMut> WriteEndpointAddr for B {
         if endpoint.is_signed()
             && let Some(sig) = endpoint.signature()
         {
-            self.put_u16(sig.scheme);
             let len = VarInt::try_from(sig.signature.len() as u64).unwrap_or(VarInt::from_u32(0));
             self.put_varint(len);
             self.put_slice(&sig.signature);
@@ -659,15 +604,13 @@ fn be_endpoint_signature(input: &[u8], flags: u8) -> IResult<&[u8], Option<Endpo
         return Ok((input, None));
     }
 
-    let (remain, scheme_u16) = be_u16(input)?;
-    let (remain, sig_len) = be_varint(remain)?;
+    let (remain, sig_len) = be_varint(input)?;
     let sig_len = usize::try_from(sig_len.into_inner())
         .map_err(|_| nom::Err::Error(make_error(remain, ErrorKind::TooLarge)))?;
     let (remain, sig) = take(sig_len)(remain)?;
     Ok((
         remain,
         Some(EndpointSignature {
-            scheme: scheme_u16,
             signature: sig.to_vec(),
         }),
     ))
@@ -814,7 +757,10 @@ mod tests {
     use bytes::BytesMut;
     use futures::future::BoxFuture;
     use ring::signature::KeyPair;
-    use rustls::sign::{Signer, SigningKey};
+    use rustls::{
+        SignatureScheme,
+        sign::{Signer, SigningKey},
+    };
 
     use super::*;
 
@@ -1023,16 +969,11 @@ mod tests {
                 &[]
             }
 
-            fn sign_algorithm(&self) -> rustls::SignatureAlgorithm {
-                rustls::SignatureAlgorithm::ED25519
-            }
-
             fn sign(
                 &self,
-                scheme: SignatureScheme,
                 data: &[u8],
             ) -> BoxFuture<'_, Result<Vec<u8>, dhttp_identity::identity::SignError>> {
-                let result = dhttp_identity::identity::sign_with_key(self, scheme, data);
+                let result = dhttp_identity::identity::sign_with_key(self, data);
                 Box::pin(std::future::ready(result))
             }
         }
@@ -1078,11 +1019,11 @@ mod tests {
     }
 
     #[test]
-    fn sign_with_authority_tries_next_supported_scheme() {
+    fn sign_with_authority_stores_canonical_signature() {
         #[derive(Debug)]
-        struct FallbackAuthority;
+        struct StaticAuthority;
 
-        impl dhttp_identity::identity::LocalAuthority for FallbackAuthority {
+        impl dhttp_identity::identity::LocalAuthority for StaticAuthority {
             fn name(&self) -> &str {
                 "authority.example"
             }
@@ -1091,35 +1032,18 @@ mod tests {
                 &[]
             }
 
-            fn sign_algorithm(&self) -> rustls::SignatureAlgorithm {
-                rustls::SignatureAlgorithm::ECDSA
-            }
-
             fn sign(
                 &self,
-                scheme: SignatureScheme,
                 _data: &[u8],
             ) -> BoxFuture<'_, Result<Vec<u8>, dhttp_identity::identity::SignError>> {
-                Box::pin(async move {
-                    match scheme {
-                        SignatureScheme::ECDSA_NISTP256_SHA256 => {
-                            Err(dhttp_identity::identity::SignError::UnsupportedScheme { scheme })
-                        }
-                        SignatureScheme::ECDSA_NISTP384_SHA384 => Ok(vec![1, 2, 3]),
-                        _ => Err(dhttp_identity::identity::SignError::UnsupportedScheme { scheme }),
-                    }
-                })
+                Box::pin(std::future::ready(Ok(vec![1, 2, 3])))
             }
         }
 
         let mut ep = EndpointAddr::direct_v4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 5353));
-        futures::executor::block_on(ep.sign_with_authority(&FallbackAuthority)).unwrap();
+        futures::executor::block_on(ep.sign_with_authority(&StaticAuthority)).unwrap();
 
         let signature = ep.signature().unwrap();
-        assert_eq!(
-            SignatureScheme::from(signature.scheme),
-            SignatureScheme::ECDSA_NISTP384_SHA384
-        );
         assert_eq!(signature.signature, vec![1, 2, 3]);
     }
 

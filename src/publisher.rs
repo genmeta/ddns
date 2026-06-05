@@ -531,7 +531,7 @@ mod tests {
 
     use dquic::qresolve::{ResolveFuture, Source};
     use futures::{FutureExt, StreamExt, future::BoxFuture, stream};
-    use rustls::{SignatureAlgorithm, SignatureScheme, pki_types::CertificateDer};
+    use rustls::pki_types::CertificateDer;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
@@ -548,21 +548,15 @@ mod tests {
             &[]
         }
 
-        fn sign_algorithm(&self) -> SignatureAlgorithm {
-            SignatureAlgorithm::ED25519
-        }
-
         fn sign(
             &self,
-            scheme: SignatureScheme,
             _data: &[u8],
         ) -> BoxFuture<'_, Result<Vec<u8>, dhttp_identity::identity::SignError>> {
-            Box::pin(async move {
-                match scheme {
-                    SignatureScheme::ED25519 => Ok(vec![1, 2, 3]),
-                    _ => Err(dhttp_identity::identity::SignError::UnsupportedScheme { scheme }),
-                }
-            })
+            // Match the Ed25519 signature length used by DHTTP's canonical
+            // key-to-scheme policy. Short fake signatures can collide with
+            // legacy E-record fixed RDLENGTH values during parser
+            // compatibility dispatch.
+            Box::pin(async move { Ok(vec![0x2a; 64]) })
         }
     }
 
