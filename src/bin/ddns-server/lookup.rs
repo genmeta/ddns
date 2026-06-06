@@ -10,7 +10,7 @@ use ddns::core::{
     wire::MultiResponse,
 };
 use deadpool_redis::redis::{self, AsyncCommands};
-use h3x::message::stream::MessageStreamError;
+use h3x::dhttp::message::MessageStreamError;
 use http_body_util::{Full, combinators::UnsyncBoxBody};
 use tracing::debug;
 
