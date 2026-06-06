@@ -25,7 +25,7 @@ use h3x::{
         server::ServerQuicConfig,
     },
     endpoint::H3Endpoint,
-    hyper::server::TowerService,
+    hyper::TowerService,
 };
 use rustls::{RootCertStore, server::WebPkiClientVerifier};
 use tracing::{info, level_filters::LevelFilter};

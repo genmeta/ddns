@@ -7,8 +7,7 @@ use dquic::{
 };
 use futures::{StreamExt, stream};
 use h3x::{
-    dquic::ConnectError, endpoint::H3Endpoint, hyper::client::RequestError as HyperRequestError,
-    quic,
+    dquic::ConnectError, endpoint::H3Endpoint, hyper::RequestError as HyperRequestError, quic,
 };
 use http_body_util::{BodyExt, Empty, Full};
 use tokio::time::Instant;
@@ -51,7 +50,7 @@ impl<C: quic::Connect> fmt::Display for H3Resolver<C> {
 pub enum Error<E: std::error::Error + Send + Sync + 'static = ConnectError> {
     #[snafu(display("h3 stream error"))]
     H3Stream {
-        source: h3x::endpoint::server::MessageStreamError,
+        source: h3x::dhttp::message::MessageStreamError,
     },
     #[snafu(display("failed to connect h3 endpoint"))]
     Connect { source: h3x::pool::ConnectError<E> },
@@ -130,7 +129,7 @@ where
         >,
     ) -> Result<
         http::Response<
-            impl http_body::Body<Data = bytes::Bytes, Error = h3x::endpoint::server::MessageStreamError>,
+            impl http_body::Body<Data = bytes::Bytes, Error = h3x::dhttp::message::MessageStreamError>,
         >,
         Error<C::Error>,
     > {
