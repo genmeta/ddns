@@ -467,4 +467,27 @@ mod tests {
             EndpointAddr::direct("192.0.2.53:4433".parse().unwrap())
         );
     }
+
+    #[tokio::test]
+    async fn cached_lookup_uses_e_record_port_not_input_port() {
+        let endpoint = Arc::new(h3x::endpoint::H3Endpoint::new(
+            h3x::dquic::QuicEndpoint::builder().build().await,
+        ));
+        let resolver = H3Resolver::from_endpoint(DHTTP_H3_DNS_SERVER, endpoint).unwrap();
+        resolver.cached_records.insert(
+            "nat.genmeta.net".to_owned(),
+            Record {
+                addrs: vec![EndpointAddr::direct("192.0.2.10:21000".parse().unwrap())],
+                expire: Instant::now() + Duration::from_secs(60),
+            },
+        );
+
+        let mut records = resolver.lookup("nat.genmeta.net:20004").await.unwrap();
+        let (_source, endpoint) = records.next().await.unwrap();
+
+        assert_eq!(
+            endpoint,
+            EndpointAddr::direct("192.0.2.10:21000".parse().unwrap())
+        );
+    }
 }
