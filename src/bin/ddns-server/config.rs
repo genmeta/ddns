@@ -54,6 +54,14 @@ pub struct Config {
     #[serde(default = "Config::default_root_cert")]
     pub root_cert: PathBuf,
 
+    /// Optional issuer certificate used for OCSP requests when `cert` does not include a chain.
+    #[serde(default)]
+    pub ocsp_issuer_cert: Option<PathBuf>,
+
+    /// Optional OCSP responder base URL. Defaults to the cert-server public responder.
+    #[serde(default)]
+    pub ocsp_responder_base_url: Option<String>,
+
     /// Whether to require DNS record signatures on Standard domains.
     #[serde(default = "Config::default_require_signature")]
     pub require_signature: bool,
@@ -84,6 +92,7 @@ impl Config {
         self.cert = expand_home_dir(&self.cert);
         self.key = expand_home_dir(&self.key);
         self.root_cert = expand_home_dir(&self.root_cert);
+        self.ocsp_issuer_cert = self.ocsp_issuer_cert.map(|path| expand_home_dir(&path));
         self.geoip_city_db = self.geoip_city_db.map(|path| expand_home_dir(&path));
         self.geoip_asn_db = self.geoip_asn_db.map(|path| expand_home_dir(&path));
         self

@@ -62,6 +62,11 @@ repeated count times:
 The example prints each DNS packet, the publisher certificate fingerprint when a
 certificate is present, and endpoint signature verification status for signed
 `E` records.
+After the server starts, it listens for HTTP/3 requests and handles publish and query operations.
+If the configured server certificate includes its issuer chain, the process also
+fetches and refreshes its own stapled OCSP response from cert-server's public
+`/ocsp` endpoint. When the PEM only contains the leaf certificate, configure
+`ocsp_issuer_cert` in `server.toml`.
 
 ## DNS-over-H3 publish
 

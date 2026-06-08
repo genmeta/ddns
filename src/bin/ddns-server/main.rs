@@ -2,6 +2,7 @@ mod config;
 mod error;
 mod geo;
 mod lookup;
+mod ocsp;
 mod policy;
 mod publish;
 mod storage;
@@ -293,6 +294,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .bind(Arc::new(config.binds.clone()))
         .build()
         .await;
+    match ocsp::OcspAutoRefresh::from_config(&config, &cert_pem, &root_ca_pem) {
+        Ok(ocsp_refresh) => {
+            info!(
+                responder_url = %ocsp_refresh.responder_url(),
+                refresh_in_secs = ocsp::refresh_success_delay().as_secs(),
+                "ocsp.auto_refresh.enabled"
+            );
+            let mut ocsp_quic = quic.clone();
+            let initial_delay = ocsp_refresh.refresh_once(&mut ocsp_quic).await;
+            info!(
+                next_refresh_in_secs = initial_delay.as_secs(),
+                "ocsp.auto_refresh.initialized"
+            );
+            tokio::spawn(ocsp_refresh.run(ocsp_quic));
+        }
+        Err(error) => {
+            warn!(error = %error, "ocsp.auto_refresh.disabled");
+        }
+    }
     let server = Arc::new(H3Endpoint::new(quic));
     info!(binds = ?config.binds, server_name = %config.server_name, "h3_server.start");
     server.listen_owned(router).await?;
@@ -315,6 +335,8 @@ mod tests {
             cert: Config::default_cert(),
             key: Config::default_key(),
             root_cert: Config::default_root_cert(),
+            ocsp_issuer_cert: None,
+            ocsp_responder_base_url: None,
             require_signature: Config::default_require_signature(),
             ttl_secs: Config::default_ttl_secs(),
             domain_policies: Vec::new(),
@@ -341,7 +363,10 @@ mod tests {
         let err = build_geo_resolver(&config).expect_err("missing city db should fail");
 
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-        assert_eq!(err.to_string(), "geoip_city_db and geoip_asn_db must be configured together");
+        assert_eq!(
+            err.to_string(),
+            "geoip_city_db and geoip_asn_db must be configured together"
+        );
     }
 
     #[test]
@@ -352,6 +377,9 @@ mod tests {
         let err = build_geo_resolver(&config).expect_err("missing asn db should fail");
 
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-        assert_eq!(err.to_string(), "geoip_city_db and geoip_asn_db must be configured together");
+        assert_eq!(
+            err.to_string(),
+            "geoip_city_db and geoip_asn_db must be configured together"
+        );
     }
 }

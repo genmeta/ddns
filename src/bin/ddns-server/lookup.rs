@@ -27,8 +27,8 @@ use crate::{
     error::{AppError, normalize_host, parse_query_params},
     geo::{GeoResolver, GeoTraits},
     storage::{
-        AppState, LookupRecord, Storage, StoredRecord, redis_all_index_key,
-        redis_asn_index_key, redis_country_index_key, redis_primary_key, unix_now_secs,
+        AppState, LookupRecord, Storage, StoredRecord, redis_all_index_key, redis_asn_index_key,
+        redis_country_index_key, redis_primary_key, unix_now_secs,
     },
 };
 
@@ -240,9 +240,8 @@ fn candidate_total_cap(limit: Option<usize>) -> usize {
 }
 
 fn all_candidate_cap(total_cap: usize, source_traits: Option<&GeoTraits>) -> usize {
-    let has_geo_buckets = source_traits.is_some_and(|traits| {
-        traits.asn.is_some() || traits.country.as_deref().is_some()
-    });
+    let has_geo_buckets = source_traits
+        .is_some_and(|traits| traits.asn.is_some() || traits.country.as_deref().is_some());
 
     if has_geo_buckets {
         LOOKUP_CANDIDATE_CAP_ALL.min(total_cap)
@@ -430,7 +429,11 @@ async fn perform_lookup_multi(
                 .unwrap_or(());
 
             let all_members: Vec<String> = conn
-                .zrevrange(&all_index_key, 0isize, candidate_all.saturating_sub(1) as isize)
+                .zrevrange(
+                    &all_index_key,
+                    0isize,
+                    candidate_all.saturating_sub(1) as isize,
+                )
                 .await
                 .map_err(|e| AppError::Redis {
                     message: e.to_string(),
@@ -446,11 +449,10 @@ async fn perform_lookup_multi(
             let mut records = Vec::new();
             for fingerprint in candidate_fingerprints {
                 let primary_key = redis_primary_key(host, &fingerprint);
-                let member: Option<Vec<u8>> = conn.get(&primary_key).await.map_err(|e| {
-                    AppError::Redis {
+                let member: Option<Vec<u8>> =
+                    conn.get(&primary_key).await.map_err(|e| AppError::Redis {
                         message: e.to_string(),
-                    }
-                })?;
+                    })?;
 
                 let Some(member) = member else {
                     continue;
@@ -470,7 +472,9 @@ async fn perform_lookup_multi(
             if let Some(mut entry) = mem.records.get_mut(host) {
                 entry.retain_active(now);
                 let candidate_fingerprints = entry.collect_candidates(
-                    source_traits.as_ref().and_then(|traits| traits.country.as_deref()),
+                    source_traits
+                        .as_ref()
+                        .and_then(|traits| traits.country.as_deref()),
                     source_traits.as_ref().and_then(|traits| traits.asn),
                     candidate_total,
                     LOOKUP_CANDIDATE_CAP_ASN,

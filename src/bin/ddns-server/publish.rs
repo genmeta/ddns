@@ -234,7 +234,10 @@ pub async fn publish_record(
             for country in &index_tags.countries {
                 let key = redis_country_index_key(host, country);
                 touched_index_keys.insert(key.clone());
-                if let Err(e) = conn.zadd::<_, _, _, ()>(&key, &fp_hex, now_secs as f64).await {
+                if let Err(e) = conn
+                    .zadd::<_, _, _, ()>(&key, &fp_hex, now_secs as f64)
+                    .await
+                {
                     return write_error(AppError::Redis {
                         message: e.to_string(),
                     });
@@ -244,7 +247,10 @@ pub async fn publish_record(
             for asn in &index_tags.asns {
                 let key = redis_asn_index_key(host, *asn);
                 touched_index_keys.insert(key.clone());
-                if let Err(e) = conn.zadd::<_, _, _, ()>(&key, &fp_hex, now_secs as f64).await {
+                if let Err(e) = conn
+                    .zadd::<_, _, _, ()>(&key, &fp_hex, now_secs as f64)
+                    .await
+                {
                     return write_error(AppError::Redis {
                         message: e.to_string(),
                     });

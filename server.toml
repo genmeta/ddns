@@ -14,6 +14,16 @@ key = "~/Downloads/ssl/dns.genmeta.net/dns.genmeta.net.key"
 # Root CA that signed the client certificates (PEM format).
 root_cert = "~/Downloads/ssl/root.crt"
 
+# Optional issuer certificate used to build OCSP requests when `cert` only
+# contains the leaf certificate. If `cert` already contains the full chain,
+# this can be omitted.
+# ocsp_issuer_cert = "~/Downloads/ssl/intermediate.crt"
+
+# Public cert-server OCSP responder. The server refreshes its stapled OCSP
+# response immediately on startup and then every 2h55m (cert-server TTL is 3h,
+# refreshed 5 minutes early).
+# ocsp_responder_base_url = "https://license.genmeta.net"
+
 # Whether to require a valid DNS record signature on Standard domains.
 require_signature = true
 
