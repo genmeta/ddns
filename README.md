@@ -132,6 +132,13 @@ Start the server with the `server` feature:
 cargo run --bin ddns-server --features server -- --config server.toml
 ```
 
+When the configured TLS certificate includes its issuer certificate, `ddns-server`
+now pulls its own stapled OCSP response from cert-server's public `POST /ocsp`
+responder during startup and refreshes it every 2h55m. If the PEM only contains
+the leaf certificate, set `ocsp_issuer_cert` in [server.toml](server.toml). You
+can override the responder origin with `ocsp_responder_base_url`; by default it
+uses `https://license.genmeta.net`.
+
 The server can optionally enable GEO-aware lookup ordering with local MaxMind
 GeoLite2 City and ASN databases. When both `geoip_city_db` and `geoip_asn_db`
 are configured, lookups prefer same-country and same-ASN endpoints first, then

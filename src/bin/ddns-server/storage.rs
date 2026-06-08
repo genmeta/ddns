@@ -6,8 +6,8 @@ use std::{
 
 use bytes::BufMut;
 use dashmap::DashMap;
-use deadpool_redis::Pool;
 use ddns::core::parser::{packet::be_packet, record::RData};
+use deadpool_redis::Pool;
 use nom::{
     IResult,
     bytes::streaming::take,
