@@ -153,6 +153,29 @@ impl Publisher {
         Ok(())
     }
 
+    pub async fn publish_once_for(
+        &self,
+        host: &str,
+        endpoints: &[EndpointAddr],
+    ) -> Result<(), PublishOnceError> {
+        let mut published = false;
+        tracing::debug!(
+            host,
+            endpoint_count = endpoints.len(),
+            endpoints = ?endpoints,
+            "publishing explicit endpoints"
+        );
+        published |= self
+            .publish_supplied_endpoints_to_resolver(self.resolver.as_ref(), host, endpoints)
+            .await?;
+
+        if !published {
+            return publish_once_error::NoPublisherResolverSnafu.fail();
+        }
+
+        Ok(())
+    }
+
     pub async fn run(&self) -> ! {
         let mut locations = self.network.quic().locations().subscribe();
         let interval = tokio::time::sleep(self.interval);
@@ -275,6 +298,28 @@ impl Publisher {
             .await
     }
 
+    async fn publish_supplied_endpoints_to_resolver(
+        &self,
+        resolver: &(dyn Resolve + Send + Sync),
+        host: &str,
+        endpoints: &[EndpointAddr],
+    ) -> Result<bool, PublishOnceError> {
+        let any: &dyn Any = resolver;
+
+        if let Some(resolvers) = any.downcast_ref::<Resolvers>() {
+            let mut published = false;
+            for resolver in resolvers.iter() {
+                published |= self
+                    .publish_single_resolver_for(resolver.as_ref(), host, endpoints)
+                    .await?;
+            }
+            return Ok(published);
+        }
+
+        self.publish_single_resolver_for(resolver, host, endpoints)
+            .await
+    }
+
     fn clear_publish_state(&self) {
         Self::clear_resolver_publish_state(self.resolver.as_ref());
     }
@@ -334,29 +379,94 @@ impl Publisher {
         Ok(false)
     }
 
+    async fn publish_single_resolver_for(
+        &self,
+        resolver: &(dyn Resolve + Send + Sync),
+        host: &str,
+        endpoints: &[EndpointAddr],
+    ) -> Result<bool, PublishOnceError> {
+        #[cfg(not(any(
+            feature = "http-resolver",
+            feature = "h3x-resolver",
+            feature = "mdns-resolver"
+        )))]
+        {
+            let _ = host;
+            let _ = endpoints;
+        }
+
+        let any: &dyn Any = resolver;
+
+        #[cfg(feature = "http-resolver")]
+        if let Some(http) = any.downcast_ref::<crate::resolvers::http::HttpResolver>() {
+            self.publish_endpoints_for(http, host, endpoints).await?;
+            return Ok(true);
+        }
+
+        #[cfg(feature = "h3x-resolver")]
+        if let Some(h3) =
+            any.downcast_ref::<crate::resolvers::h3::H3Resolver<h3x::dquic::QuicEndpoint>>()
+        {
+            self.publish_endpoints_for(h3, host, endpoints).await?;
+            return Ok(true);
+        }
+
+        #[cfg(feature = "mdns-resolver")]
+        if let Some(mdns) = any.downcast_ref::<crate::mdns::resolvers::mdns::MdnsResolvers>() {
+            let mut published = false;
+            for bound in mdns.bound_resolvers() {
+                self.publish_endpoints_for(&bound.resolver, host, endpoints)
+                    .await?;
+                published = true;
+            }
+            return Ok(published);
+        }
+
+        Ok(false)
+    }
+
     async fn publish_endpoints(
         &self,
         publisher: &(dyn Publish + Send + Sync),
         endpoints: &[EndpointAddr],
     ) -> Result<(), PublishOnceError> {
-        let packet = self.signed_packet(endpoints).await?;
-        let name = self.identity.name();
+        self.publish_endpoints_for(publisher, self.identity.name(), endpoints)
+            .await
+    }
+
+    async fn publish_endpoints_for(
+        &self,
+        publisher: &(dyn Publish + Send + Sync),
+        host: &str,
+        endpoints: &[EndpointAddr],
+    ) -> Result<(), PublishOnceError> {
+        let packet = self.signed_packet_for(host, endpoints).await?;
         tracing::debug!(
             publisher = %publisher,
-            name,
+            host,
             endpoint_count = endpoints.len(),
             packet_len = packet.len(),
             "publishing dns packet"
         );
         publisher
-            .publish(name, &packet)
+            .publish(host, &packet)
             .await
             .context(publish_once_error::PublishSnafu {
                 publisher: publisher.to_string(),
             })
     }
 
+    #[cfg(test)]
     async fn signed_packet(&self, endpoints: &[EndpointAddr]) -> Result<Vec<u8>, PublishOnceError> {
+        self.signed_packet_for(self.identity.name(), endpoints)
+            .await
+    }
+
+    async fn signed_packet_for(
+        &self,
+        host: &str,
+        endpoints: &[EndpointAddr],
+    ) -> Result<Vec<u8>, PublishOnceError> {
         let mut signed = Vec::with_capacity(endpoints.len());
         for endpoint in endpoints {
             let mut endpoint = DnsEndpointAddr::try_from(*endpoint)
@@ -373,7 +483,7 @@ impl Publisher {
         }
 
         let mut hosts = HashMap::new();
-        hosts.insert(self.identity.name().to_owned(), signed);
+        hosts.insert(host.to_owned(), signed);
         Ok(MdnsPacket::answer(0, &hosts).to_bytes())
     }
 
@@ -598,6 +708,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publish_once_for_reports_no_publisher_resolver() {
+        let publisher = Publisher::new(
+            Arc::new(TestAuthority),
+            h3x::dquic::Network::builder().build(),
+            Arc::new(DisplayOnlyResolver),
+            Arc::new(Vec::new()),
+        );
+        let endpoint = EndpointAddr::direct("127.0.0.1:443".parse().unwrap());
+
+        let error = publisher
+            .publish_once_for("nat.genmeta.net", &[endpoint])
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, PublishOnceError::NoPublisherResolver));
+    }
+
+    #[tokio::test]
     async fn publisher_timeout_is_configurable() {
         let publisher = Publisher::new(
             Arc::new(TestAuthority),
@@ -630,6 +758,33 @@ mod tests {
             panic!("expected endpoint record");
         };
 
+        assert!(!endpoint.is_main());
+        assert!(endpoint.is_clustered());
+        assert!(endpoint.is_signed());
+    }
+
+    #[tokio::test]
+    async fn signed_packet_for_uses_supplied_host_and_keeps_signature_and_options() {
+        let publisher = Publisher::new(
+            Arc::new(TestAuthority),
+            h3x::dquic::Network::builder().build(),
+            Arc::new(DisplayOnlyResolver),
+            Arc::new(Vec::new()),
+        )
+        .with_options(PublishOptions { server_id: Some(2) });
+
+        let endpoint = EndpointAddr::direct("127.0.0.1:443".parse().unwrap());
+        let packet = publisher
+            .signed_packet_for("nat.genmeta.net", &[endpoint])
+            .await
+            .unwrap();
+        let (_remain, packet) = crate::core::parser::packet::be_packet(&packet).unwrap();
+        let record = packet.answers.first().expect("endpoint answer");
+        let crate::core::parser::record::RData::E(endpoint) = record.data() else {
+            panic!("expected endpoint record");
+        };
+
+        assert_eq!(record.name().to_string(), "nat.genmeta.net");
         assert!(!endpoint.is_main());
         assert!(endpoint.is_clustered());
         assert!(endpoint.is_signed());
