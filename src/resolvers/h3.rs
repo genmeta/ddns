@@ -423,14 +423,14 @@ mod tests {
         ));
         let resolver = H3Resolver::from_endpoint(DHTTP_H3_DNS_SERVER, endpoint).unwrap();
         resolver.cached_records.insert(
-            "car.lab.genmeta.net".to_owned(),
+            "car.lab.dhttp.net".to_owned(),
             Record {
                 addrs: vec![EndpointAddr::direct("192.168.5.78:41748".parse().unwrap())],
                 expire: Instant::now() + Duration::from_secs(60),
             },
         );
 
-        let mut records = resolver.lookup("car.lab.genmeta.net").await.unwrap();
+        let mut records = resolver.lookup("car.lab.dhttp.net").await.unwrap();
         let (source, endpoint) = records.next().await.unwrap();
 
         assert_eq!(

@@ -377,7 +377,7 @@ mod tests {
     #[tokio::test]
     async fn clear_record_removes_only_current_certificate_fingerprint() {
         let state = memory_state();
-        let host = "reimu.pilot.genmeta.net";
+        let host = "reimu.pilot.dhttp.net";
         let authority_a = TestAuthority::new("authority-a", vec![1]);
         let authority_b = TestAuthority::new("authority-b", vec![2]);
         let packet_a = packet_for(host, 1);
@@ -412,7 +412,7 @@ mod tests {
     #[tokio::test]
     async fn clear_record_is_idempotent_for_missing_fingerprint() {
         let state = memory_state();
-        let host = "reimu.pilot.genmeta.net";
+        let host = "reimu.pilot.dhttp.net";
         let authority = TestAuthority::new("authority", vec![1]);
 
         assert_eq!(

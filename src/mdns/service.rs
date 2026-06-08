@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use dhttp_identity::name::DhttpName;
 use dquic::qinterface::{Interface, component::Component, io::IO};
 use futures::{Stream, stream};
 use tokio::{task::JoinSet, time};
@@ -257,8 +258,8 @@ impl Mdns {
 
     #[inline]
     fn local_name(service_name: String, name: String) -> String {
-        name.split_once("genmeta.net")
-            .map(|(prefix, _)| format!("{prefix}{service_name}"))
+        name.strip_suffix(DhttpName::SUFFIX)
+            .map(|prefix| format!("{prefix}.{service_name}"))
             .unwrap_or_else(|| name)
     }
 }
@@ -270,5 +271,21 @@ impl Component for Mdns {
 
     fn reinit(&self, iface: &Interface) {
         self.reinit(iface);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Mdns;
+
+    #[test]
+    fn local_name_uses_dhttp_identity_suffix() {
+        assert_eq!(
+            Mdns::local_name(
+                "_gensokyo.local".to_string(),
+                "reimu.pilot.dhttp.net".to_string()
+            ),
+            "reimu.pilot._gensokyo.local"
+        );
     }
 }

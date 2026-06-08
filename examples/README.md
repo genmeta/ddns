@@ -57,10 +57,10 @@ Use the `publish` example to publish a DNS service record to the HTTP/3 DNS serv
 ```bash
 cargo run --example publish --features="h3x-resolver" \
   --server-ca /path/to/root.crt \
-  --client-name demo.example.genmeta.net \
-  --client-cert /path/to/demo.example.genmeta.net.pem \
-  --client-key /path/to/demo.example.genmeta.net.key \
-  --host demo.example.genmeta.net \
+  --client-name demo.example.dhttp.net \
+  --client-cert /path/to/demo.example.dhttp.net.pem \
+  --client-key /path/to/demo.example.dhttp.net.key \
+  --host demo.example.dhttp.net \
   --addr 192.168.1.100:8080,192.168.1.101:8080
 ```
 

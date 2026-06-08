@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn validate_dns_packet_accepts_empty_packet_as_clear_operation() {
         let hosts: HashMap<String, Vec<EndpointAddr>> =
-            HashMap::from([("reimu.pilot.genmeta.net".to_owned(), Vec::new())]);
+            HashMap::from([("reimu.pilot.dhttp.net".to_owned(), Vec::new())]);
         let packet = MdnsPacket::answer(0, &hosts).to_bytes();
 
         let validated = validate_dns_packet(&packet, true, &TestAuthority).unwrap();

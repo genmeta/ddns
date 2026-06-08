@@ -22,7 +22,7 @@ async fn main() -> Result<(), Error> {
     let args = Args::parse();
     let mdns = Mdns::new(DHTTP_MDNS_SERVICE, args.ip, &args.device)?;
     mdns.insert_host(
-        "test.genmeta.net".to_string(),
+        "test.dhttp.net".to_string(),
         vec![
             {
                 let addr: SocketAddr = "192.168.1.7:7000".parse().unwrap();
@@ -44,7 +44,7 @@ async fn main() -> Result<(), Error> {
     );
 
     mdns.insert_host(
-        "mdns.test.genmeta.net".to_string(),
+        "mdns.test.dhttp.net".to_string(),
         vec![
             {
                 let addr: SocketAddr = "192.168.1.7:7001".parse().unwrap();

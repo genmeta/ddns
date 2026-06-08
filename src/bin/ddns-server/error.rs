@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use dhttp_identity::name::DhttpName;
+
 #[derive(Debug, snafu::Snafu)]
 pub enum AppError {
     #[snafu(display("missing host parameter"))]
@@ -68,8 +70,8 @@ pub fn normalize_host(host: &str) -> Result<String, AppError> {
     let host = idna::domain_to_ascii(host).map_err(|_| AppError::InvalidHost)?;
     let host = host.to_ascii_lowercase();
 
-    // 校验是否为 genmeta.net 域名
-    if !host.ends_with("genmeta.net") {
+    // 校验是否为 DHTTP identity 域名
+    if !host.ends_with(DhttpName::SUFFIX) {
         return Err(AppError::DomainNotAllowed);
     }
 
@@ -81,4 +83,21 @@ pub fn parse_query_params(uri: &http::Uri) -> HashMap<String, String> {
     url::form_urlencoded::parse(query.as_bytes())
         .into_owned()
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_host_uses_dhttp_identity_suffix() {
+        assert_eq!(
+            normalize_host("Reimu.Pilot.Dhttp.Net:443").unwrap(),
+            "reimu.pilot.dhttp.net"
+        );
+        assert!(matches!(
+            normalize_host("reimu.pilot.genmeta.net"),
+            Err(AppError::DomainNotAllowed)
+        ));
+    }
 }
