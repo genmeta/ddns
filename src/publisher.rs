@@ -531,13 +531,18 @@ mod tests {
 
     use dquic::qresolve::{ResolveFuture, Source};
     use futures::{FutureExt, StreamExt, future::BoxFuture, stream};
-    use rustls::pki_types::CertificateDer;
+    use rustls::pki_types::{CertificateDer, SubjectPublicKeyInfoDer};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
 
     #[derive(Debug)]
     struct TestAuthority;
+
+    const ED25519_TEST_SPKI: [u8; 44] = [
+        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
 
     impl LocalAuthority for TestAuthority {
         fn name(&self) -> &str {
@@ -546,6 +551,10 @@ mod tests {
 
         fn cert_chain(&self) -> &[CertificateDer<'static>] {
             &[]
+        }
+
+        fn public_key(&self) -> SubjectPublicKeyInfoDer<'_> {
+            SubjectPublicKeyInfoDer::from(ED25519_TEST_SPKI.as_slice())
         }
 
         fn sign(

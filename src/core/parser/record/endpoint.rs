@@ -16,7 +16,7 @@ use nom::{
     error::{ErrorKind, make_error},
     number::streaming::{be_u8, be_u16, be_u32, be_u128},
 };
-use rustls::pki_types::SubjectPublicKeyInfoDer;
+use rustls::{SignatureScheme, pki_types::SubjectPublicKeyInfoDer};
 use snafu::{ResultExt, Snafu};
 
 use crate::core::parser::{
@@ -27,6 +27,8 @@ use crate::core::parser::{
 #[derive(Debug, Snafu)]
 #[snafu(module)]
 pub enum SignEndpointError {
+    #[snafu(display("failed to determine endpoint signature scheme"))]
+    SignatureScheme { source: sigin::SignatureSchemeError },
     #[snafu(display("failed to sign endpoint address"))]
     Sign {
         source: dhttp_identity::identity::SignError,
@@ -44,7 +46,7 @@ pub enum SignEndpointError {
 /// +-------+-----------------+--------------------+----------------+----------------------------+
 /// | flags | sequence(varint)| addr               | load(optional) | signature (optional)       |
 /// +-------+-----------------+--------------------+----------------+----------------------------+
-/// | u8    | QUIC varint     | see addr layout    | f32            | len(varint)+N              |
+/// | u8    | QUIC varint     | see addr layout    | f32            | scheme(u16)+len(varint)+N |
 /// +-------+-----------------+--------------------+----------------+----------------------------+
 ///
 /// addr layout:
@@ -75,6 +77,7 @@ pub enum SignEndpointError {
 ///
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EndpointSignature {
+    scheme: u16,
     signature: Vec<u8>,
 }
 
@@ -219,11 +222,16 @@ impl EndpointAddr {
     ) -> Result<(), SignEndpointError> {
         self.set_signed(true);
         let data = self.signed_data();
+        let scheme = sigin::signature_scheme(authority.public_key())
+            .context(sign_endpoint_error::SignatureSchemeSnafu)?;
         let signature = authority
             .sign(&data)
             .await
             .context(sign_endpoint_error::SignSnafu)?;
-        self.signature = Some(EndpointSignature { signature });
+        self.signature = Some(EndpointSignature {
+            scheme: u16::from(scheme),
+            signature,
+        });
         Ok(())
     }
 
@@ -235,7 +243,12 @@ impl EndpointAddr {
             return Ok(false);
         };
         let data = self.signed_data();
-        sigin::verify(spki, &data, &sig.signature)
+        sigin::verify(
+            spki,
+            SignatureScheme::from(sig.scheme),
+            &data,
+            &sig.signature,
+        )
     }
 
     pub fn verify_signature_from_der(&self, cert_der: &[u8]) -> Result<bool, sigin::VerifyError> {
@@ -327,7 +340,7 @@ impl EndpointAddr {
         {
             let sig_len =
                 VarInt::try_from(sig.signature.len() as u64).unwrap_or(VarInt::from_u32(0));
-            meta_len += sig_len.encoding_size() + sig.signature.len();
+            meta_len += 2 + sig_len.encoding_size() + sig.signature.len();
         }
 
         let addr_len = match (self.is_ipv6(), self.is_nat()) {
@@ -427,6 +440,7 @@ impl<B: BufMut> WriteEndpointAddr for B {
         if endpoint.is_signed()
             && let Some(sig) = endpoint.signature()
         {
+            self.put_u16(sig.scheme);
             let len = VarInt::try_from(sig.signature.len() as u64).unwrap_or(VarInt::from_u32(0));
             self.put_varint(len);
             self.put_slice(&sig.signature);
@@ -604,13 +618,15 @@ fn be_endpoint_signature(input: &[u8], flags: u8) -> IResult<&[u8], Option<Endpo
         return Ok((input, None));
     }
 
-    let (remain, sig_len) = be_varint(input)?;
+    let (remain, scheme_u16) = be_u16(input)?;
+    let (remain, sig_len) = be_varint(remain)?;
     let sig_len = usize::try_from(sig_len.into_inner())
         .map_err(|_| nom::Err::Error(make_error(remain, ErrorKind::TooLarge)))?;
     let (remain, sig) = take(sig_len)(remain)?;
     Ok((
         remain,
         Some(EndpointSignature {
+            scheme: scheme_u16,
             signature: sig.to_vec(),
         }),
     ))
@@ -763,6 +779,15 @@ mod tests {
     };
 
     use super::*;
+
+    fn ed25519_spki(public_key: &[u8]) -> Vec<u8> {
+        let mut spki = Vec::with_capacity(44);
+        spki.extend_from_slice(&[
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ]);
+        spki.extend_from_slice(public_key);
+        spki
+    }
 
     #[test]
     fn legacy_endpoint_v4_direct_without_meta() {
@@ -931,9 +956,49 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_signature_roundtrip_and_verify() {
+    fn signed_endpoint_accepts_scheme_inclusive_signature() {
+        let addr = SocketAddrV4::new(Ipv4Addr::new(10, 10, 0, 7), 20004);
+        let scheme = u16::from(SignatureScheme::ED25519);
+        let signature = vec![0xaa; 64];
+        let sig_len = VarInt::try_from(signature.len() as u64).unwrap();
+
+        let mut buf = BytesMut::new();
+        buf.put_u8(EndpointAddr::FLAG_SIGNED);
+        buf.put_socket_addr_v4(&addr);
+        buf.put_u16(scheme);
+        buf.put_varint(sig_len);
+        buf.extend_from_slice(&signature);
+
+        let (remain, decoded) = be_endpoint_addr(&buf).unwrap();
+
+        assert!(remain.is_empty());
+        assert!(decoded.is_signed());
+        assert_eq!(decoded.addr(), SocketAddr::V4(addr));
+        assert_eq!(decoded.signature().unwrap().signature, signature);
+    }
+
+    #[test]
+    fn signed_endpoint_rejects_signature_without_scheme() {
+        let addr = SocketAddrV4::new(Ipv4Addr::new(10, 10, 0, 7), 20004);
+        let signature = vec![0xaa; 64];
+        let sig_len = VarInt::try_from(signature.len() as u64).unwrap();
+
+        let mut buf = BytesMut::new();
+        buf.put_u8(EndpointAddr::FLAG_SIGNED);
+        buf.put_socket_addr_v4(&addr);
+        buf.put_varint(sig_len);
+        buf.extend_from_slice(&signature);
+
+        assert!(be_endpoint_addr(&buf).is_err());
+    }
+
+    #[test]
+    fn signed_endpoint_writes_actual_scheme_before_signature_length() {
         #[derive(Debug)]
-        struct Ed25519Key(Arc<ring::signature::Ed25519KeyPair>);
+        struct Ed25519Key {
+            keypair: Arc<ring::signature::Ed25519KeyPair>,
+            spki: Vec<u8>,
+        }
 
         #[derive(Debug)]
         struct Ed25519Signer(Arc<ring::signature::Ed25519KeyPair>);
@@ -952,7 +1017,7 @@ mod tests {
             fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
                 offered
                     .contains(&SignatureScheme::ED25519)
-                    .then(|| Box::new(Ed25519Signer(self.0.clone())) as Box<dyn Signer>)
+                    .then(|| Box::new(Ed25519Signer(self.keypair.clone())) as Box<dyn Signer>)
             }
 
             fn algorithm(&self) -> rustls::SignatureAlgorithm {
@@ -969,6 +1034,10 @@ mod tests {
                 &[]
             }
 
+            fn public_key(&self) -> SubjectPublicKeyInfoDer<'_> {
+                SubjectPublicKeyInfoDer::from(self.spki.as_slice())
+            }
+
             fn sign(
                 &self,
                 data: &[u8],
@@ -982,13 +1051,84 @@ mod tests {
         let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
         let keypair =
             Arc::new(ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap());
-        let key = Ed25519Key(keypair.clone());
+        let spki = ed25519_spki(keypair.public_key().as_ref());
+        let key = Ed25519Key { keypair, spki };
 
-        let mut spki = Vec::with_capacity(44);
-        spki.extend_from_slice(&[
-            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
-        ]);
-        spki.extend_from_slice(keypair.public_key().as_ref());
+        let mut ep = EndpointAddr::direct_v4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 5353));
+        futures::executor::block_on(ep.sign_with_authority(&key)).unwrap();
+
+        let mut buf = BytesMut::new();
+        buf.put_endpoint_addr(&ep);
+
+        let scheme_offset = 1 + 2 + 4;
+        let encoded_scheme = u16::from_be_bytes([buf[scheme_offset], buf[scheme_offset + 1]]);
+        assert_eq!(encoded_scheme, u16::from(SignatureScheme::ED25519));
+    }
+
+    #[test]
+    fn endpoint_signature_roundtrip_and_verify() {
+        #[derive(Debug)]
+        struct Ed25519Key {
+            keypair: Arc<ring::signature::Ed25519KeyPair>,
+            spki: Vec<u8>,
+        }
+
+        #[derive(Debug)]
+        struct Ed25519Signer(Arc<ring::signature::Ed25519KeyPair>);
+
+        impl Signer for Ed25519Signer {
+            fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rustls::Error> {
+                Ok(self.0.sign(message).as_ref().to_vec())
+            }
+
+            fn scheme(&self) -> SignatureScheme {
+                SignatureScheme::ED25519
+            }
+        }
+
+        impl SigningKey for Ed25519Key {
+            fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
+                offered
+                    .contains(&SignatureScheme::ED25519)
+                    .then(|| Box::new(Ed25519Signer(self.keypair.clone())) as Box<dyn Signer>)
+            }
+
+            fn algorithm(&self) -> rustls::SignatureAlgorithm {
+                rustls::SignatureAlgorithm::ED25519
+            }
+        }
+
+        impl dhttp_identity::identity::LocalAuthority for Ed25519Key {
+            fn name(&self) -> &str {
+                "authority.example"
+            }
+
+            fn cert_chain(&self) -> &[rustls::pki_types::CertificateDer<'static>] {
+                &[]
+            }
+
+            fn public_key(&self) -> SubjectPublicKeyInfoDer<'_> {
+                SubjectPublicKeyInfoDer::from(self.spki.as_slice())
+            }
+
+            fn sign(
+                &self,
+                data: &[u8],
+            ) -> BoxFuture<'_, Result<Vec<u8>, dhttp_identity::identity::SignError>> {
+                let result = dhttp_identity::identity::sign_with_key(self, data);
+                Box::pin(std::future::ready(result))
+            }
+        }
+
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let keypair =
+            Arc::new(ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap());
+        let spki = ed25519_spki(keypair.public_key().as_ref());
+        let key = Ed25519Key {
+            keypair: keypair.clone(),
+            spki: spki.clone(),
+        };
 
         let addr = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 5353);
         let mut ep = EndpointAddr::direct_v4(addr);
@@ -1021,7 +1161,9 @@ mod tests {
     #[test]
     fn sign_with_authority_stores_canonical_signature() {
         #[derive(Debug)]
-        struct StaticAuthority;
+        struct StaticAuthority {
+            spki: Vec<u8>,
+        }
 
         impl dhttp_identity::identity::LocalAuthority for StaticAuthority {
             fn name(&self) -> &str {
@@ -1030,6 +1172,10 @@ mod tests {
 
             fn cert_chain(&self) -> &[rustls::pki_types::CertificateDer<'static>] {
                 &[]
+            }
+
+            fn public_key(&self) -> SubjectPublicKeyInfoDer<'_> {
+                SubjectPublicKeyInfoDer::from(self.spki.as_slice())
             }
 
             fn sign(
@@ -1041,9 +1187,13 @@ mod tests {
         }
 
         let mut ep = EndpointAddr::direct_v4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 5353));
-        futures::executor::block_on(ep.sign_with_authority(&StaticAuthority)).unwrap();
+        let authority = StaticAuthority {
+            spki: ed25519_spki(&[0; 32]),
+        };
+        futures::executor::block_on(ep.sign_with_authority(&authority)).unwrap();
 
         let signature = ep.signature().unwrap();
+        assert_eq!(signature.scheme, u16::from(SignatureScheme::ED25519));
         assert_eq!(signature.signature, vec![1, 2, 3]);
     }
 
