@@ -18,7 +18,7 @@ async fn main() -> Result<(), Error> {
     let args = Args::parse();
     let mdns = Mdns::new(DHTTP_MDNS_SERVICE, args.ip, &args.device)?;
 
-    let ret = mdns.query("publish.test.genmeta.net".to_string()).await?;
+    let ret = mdns.query("publish.test.dhttp.net".to_string()).await?;
     println!("{ret:?}\n");
     Ok(())
 }

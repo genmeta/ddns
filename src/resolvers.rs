@@ -299,8 +299,8 @@ mod tests {
     #[test]
     fn resolvable_name_accepts_dns_name_with_numeric_port() {
         assert_eq!(
-            resolvable_name("example.genmeta.net:443"),
-            Some("example.genmeta.net")
+            resolvable_name("example.dhttp.net:443"),
+            Some("example.dhttp.net")
         );
     }
 
