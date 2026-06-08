@@ -305,6 +305,14 @@ mod tests {
     }
 
     #[test]
+    fn resolvable_name_accepts_stun_authority_with_numeric_port() {
+        assert_eq!(
+            resolvable_name("nat.genmeta.net:20004"),
+            Some("nat.genmeta.net")
+        );
+    }
+
+    #[test]
     fn resolvable_name_rejects_ip_literals() {
         assert_eq!(resolvable_name("127.0.0.1:443"), None);
         assert_eq!(resolvable_name("[::1]:443"), None);
