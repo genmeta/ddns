@@ -1,61 +1,71 @@
-# DNS Server Documentation
+# DDNS examples
 
-## Introduction
+This directory contains runnable examples for the single `ddns` package.
 
-`ddns` is a Rust-implemented DNS library that supports the mDNS (Multicast DNS) protocol and interacts with DNS servers via the HTTP/3 (H3) protocol for service discovery and publishing in local and remote networks. This document introduces how to use the example programs of `ddns` to publish and query DNS services, including detailed program parameters and HTTP packet structures.
+| Example | Feature requirement | Purpose |
+| --- | --- | --- |
+| `mdns_discover` | none | Bind an mDNS service, publish sample local hosts, and print multicast packets. |
+| `mdns_query` | none | Query a DHTTP name over local mDNS. |
+| `query` | `h3x-resolver` | Query a DNS-over-H3 server and decode the multi-record response. |
+| `publish` | `h3x-resolver` | Publish signed endpoint `E` records to a DNS-over-H3 server using client mTLS. |
 
-## Building the Project
+Run all commands from the `ddns/` repository.
 
-First, ensure you have a Rust environment. Clone or enter the project directory, then build:
+## mDNS examples
+
+Bind to a local interface and print multicast traffic:
 
 ```bash
-cargo build --features="h3x-resolver"
+cargo run --example mdns_discover -- \
+  --ip 127.0.0.1 \
+  --device lo0
 ```
 
-Note: The example programs require the `h3x-resolver` feature to enable HTTP/3 support.
+Query a name over mDNS:
 
-## HTTP Packet Structure Overview
-
-`ddns` uses the HTTP/3 protocol to transmit DNS queries and responses, similar to DNS over HTTPS (DoH) but based on the QUIC protocol. The structure of HTTP requests is as follows:
-
-### URL Structure
-- **Base URL**: Default `https://localhost:4433/`, used to specify the DNS server's address.
-- **Path**: For queries, usually the root path `/`, the server parses the DNS query based on the request body.
-- **Query Parameters**: Optional, used to specify query type or options.
-
-### HTTP Headers
-- **Content-Type**: `application/dns-message` (for DNS message body) or `application/json` (if using JSON format).
-- **Accept**: `application/dns-message` or `application/json`.
-- **User-Agent**: Client identifier.
-- **Authorization**: If authentication is needed, use Bearer token or other mechanisms.
-
-### Request Body (Body)
-- DNS queries are sent in binary DNS message format (RFC 1035), containing query name, type (such as A, AAAA, SRV), and class.
-- For publishing, the request body contains the DNS record data to be published.
-
-### Response Body
-- The server returns a DNS response message containing query results or confirmation of publishing.
-
-## Usage Examples
-
-### Publishing Services (publish)
-
-Use the `publish` example to publish a DNS service record to the HTTP/3 DNS server.
-
-#### Program Parameters
-- `--base-url <URL>`: Base URL of the DNS server (default: build-time `DHTTP_H3_DNS_SERVER` with a trailing slash).
-- `--server-ca <PATH>`: CA certificate PEM file path for verifying the online server certificate.
-- `--client-name <NAME>`: Client identity name used for mTLS.
-- `--client-cert <PATH>`: Client certificate chain PEM file.
-- `--client-key <PATH>`: Client private key PEM file.
-- `--sign`: Whether to sign the Endpoint record with the client private key (default: true).
-- `--host <NAME>`: DNS name to publish, must match the SAN in the client certificate.
-- `--addr <ADDR>`: List of socket addresses to publish, separated by commas.
-- `--is-main`: Whether it is the main record (default: true).
-
-#### Example Run Command
 ```bash
-cargo run --example publish --features="h3x-resolver" \
+cargo run --example mdns_query -- \
+  --ip 192.168.5.156 \
+  --device en0
+```
+
+Replace `--ip` and `--device` with an address and interface that exist on the
+local machine. The mDNS service name defaults to the build-time
+`DHTTP_MDNS_SERVICE` constant.
+
+## DNS-over-H3 query
+
+```bash
+cargo run --example query --features h3x-resolver -- \
+  --server-ca /path/to/root.crt \
+  --host nat.genmeta.net
+```
+
+Options:
+
+| Option | Meaning |
+| --- | --- |
+| `--base-url <URL>` | DNS-over-H3 server base URL. Defaults to build-time `DHTTP_H3_DNS_SERVER` with a trailing slash. |
+| `--server-ca <PATH>` | PEM root CA used to verify the DNS server certificate. |
+| `--host <NAME>` | DNS host to query. Defaults to `nat.genmeta.net`. |
+
+The example sends `GET /lookup?host=<NAME>`. A successful server response is a
+`ddns::core::wire::MultiResponse` body with header `x-record-format: multi`:
+
+```text
+u32 count
+repeated count times:
+  u32 dns_len | dns packet bytes | u32 cert_len | DER publisher certificate bytes
+```
+
+The example prints each DNS packet, the publisher certificate fingerprint when a
+certificate is present, and endpoint signature verification status for signed
+`E` records.
+
+## DNS-over-H3 publish
+
+```bash
+cargo run --example publish --features h3x-resolver -- \
   --server-ca /path/to/root.crt \
   --client-name demo.example.dhttp.net \
   --client-cert /path/to/demo.example.dhttp.net.pem \
@@ -64,47 +74,33 @@ cargo run --example publish --features="h3x-resolver" \
   --addr 192.168.1.100:8080,192.168.1.101:8080
 ```
 
-This command establishes an HTTP/3 connection to the server, sends a POST request containing DNS records, the server verifies the signature and stores the records.
+Options:
 
-### Querying Services (query)
+| Option | Meaning |
+| --- | --- |
+| `--base-url <URL>` | DNS-over-H3 server base URL. Defaults to build-time `DHTTP_H3_DNS_SERVER` with a trailing slash. |
+| `--server-ca <PATH>` | PEM root CA used to verify the DNS server certificate. |
+| `--client-name <NAME>` | DHTTP identity name presented by the client endpoint. |
+| `--client-cert <PATH>` | Client certificate chain PEM for mTLS and endpoint signature verification. |
+| `--client-key <PATH>` | Client private key PEM. |
+| `--sign <true|false>` | Whether to sign each endpoint `E` record. Defaults to `true`. |
+| `--host <NAME>` | DNS host to publish. Standard-policy servers require this to match the client certificate DNS SAN. |
+| `--addr <ADDR[,ADDR...]>` | One or more socket addresses to publish. |
+| `--is-main <true|false>` | Whether each endpoint is marked as the main address. Defaults to `true`. |
+| `--sequence <N>` | Cluster sequence number encoded in the endpoint record; `0` disables the clustered flag. Defaults to `1`. |
 
-Use the `query` example to query DNS service records from the HTTP/3 DNS server.
+The example sends `POST /publish?host=<NAME>` with a binary DNS packet body. For
+Standard policy domains, the server requires a client certificate whose single
+DNS SAN matches `host`; when `require_signature = true`, at least one signed
+endpoint record must verify against the publisher certificate. Open-multi policy
+domains still require client mTLS but skip the host SAN and endpoint signature
+checks.
 
-#### Program Parameters
-- `--base-url <URL>`: Base URL of the DNS server (default: build-time `DHTTP_H3_DNS_SERVER` with a trailing slash).
-- `--server-ca <PATH>`: CA certificate PEM file path for verifying the online server certificate.
-- `--host <NAME>`: DNS name to query (default: `nat.genmeta.net`).
+## Running the server
 
-#### Example Run Command
 ```bash
-cargo run --example query --features="h3x-resolver" \
-  --server-ca /path/to/root.crt \
-  --host nat.genmeta.net
+cargo run --bin ddns-server --features server -- --config server.toml
 ```
 
-This command sends a GET or POST request to the server, the request body contains the DNS query message, the server returns matching records.
-
-### Running the DNS Server (server)
-
-Use the `ddns-server` binary to start an HTTP/3 DNS server.
-
-#### Program Parameters
-- `--config <PATH>`: TOML configuration file path (default: `server.toml`).
-
-#### Example Run Command
-```bash
-cargo run --bin ddns-server --features="server" -- --config server.toml
-```
-
-After the server starts, it listens for HTTP/3 requests and handles publish and query operations.
-
-## Other Examples
-
-The project also includes other example programs such as `mdns_discover.rs` and `mdns_query.rs` for pure mDNS discovery and query operations, not involving HTTP/3. Please refer to the source code for more details.
-
-## Notes
-
-- Ensure that the local network supports QUIC and HTTP/3.
-- Certificate and key files must be configured correctly, otherwise TLS handshake will fail.
-- For production environments, use valid certificates and secure key management.
-- For more configuration options, please refer to the project's main README.md file.
+`server.toml` documents the available fields: listener, TLS identity, client root
+CA, optional Redis storage, TTL, domain policies, and static seed records.
