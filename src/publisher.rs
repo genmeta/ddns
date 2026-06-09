@@ -1,32 +1,20 @@
-use std::{
-    any::{Any, TypeId},
-    collections::{HashMap, HashSet},
-    future::Future,
-    io,
-    net::SocketAddr,
-    pin::Pin,
-    sync::Arc,
-    time::Duration,
-};
+mod address;
+mod dispatch;
+mod packet;
 
-use dhttp_identity::identity::LocalAuthority;
-#[cfg(feature = "mdns-resolver")]
-use dquic::qbase::net::Family;
+use std::{any::TypeId, future::Future, io, net::SocketAddr, pin::Pin, sync::Arc, time::Duration};
+
+pub use address::{
+    AddressSelector, AddressView, AddressViewSource, EndpointBindingAddresses, FnAddressView,
+    PublishAddressGroup, PublishAddressScope, PublishAddresses,
+};
+use dhttp_identity::{identity::LocalAuthority, name::Name};
 use dquic::{
-    qbase::net::addr::EndpointAddr,
-    qinterface::component::location::AddressEvent,
-    qresolve::{Publish, Resolve},
-    qtraversal::nat::client::{ClientLocationData, NatType},
+    qinterface::component::location::AddressEvent, qresolve::Resolve,
+    qtraversal::nat::client::ClientLocationData,
 };
-use snafu::{ResultExt, Snafu};
-
-use crate::{
-    core::{
-        MdnsPacket,
-        parser::record::endpoint::{EndpointAddr as DnsEndpointAddr, SignEndpointError},
-    },
-    resolvers::Resolvers,
-};
+pub use packet::{EndpointRecordSigner, SignEndpointRecordsError};
+use snafu::Snafu;
 
 pub const DEFAULT_PUBLISH_INTERVAL: Duration = Duration::from_secs(20);
 /// Upper bound for a single publish attempt in the background loop.
@@ -51,10 +39,8 @@ pub enum CreatePublisherError {
 pub enum PublishOnceError {
     #[snafu(display("no publisher resolver available"))]
     NoPublisherResolver,
-    #[snafu(display("failed to encode endpoint address"))]
-    EncodeEndpoint,
-    #[snafu(display("failed to sign endpoint address"))]
-    SignEndpoint { source: SignEndpointError },
+    #[snafu(display("failed to sign endpoint records"))]
+    SignEndpointRecords { source: SignEndpointRecordsError },
     #[snafu(display("failed to publish dns packet with {publisher}"))]
     Publish {
         publisher: String,
@@ -72,53 +58,138 @@ pub struct PublishOptions {
     pub server_id: Option<u8>,
 }
 
-pub struct Publisher {
-    identity: Arc<dyn LocalAuthority>,
-    network: Arc<h3x::dquic::Network>,
-    resolver: Arc<dyn Resolve + Send + Sync>,
-    bind_patterns: Arc<Vec<h3x::dquic::binds::BindPattern>>,
-    interval: Duration,
-    publish_timeout: Duration,
-    options: PublishOptions,
+pub trait PublisherResolver: Send + Sync + 'static {
+    fn as_resolver(&self) -> &(dyn Resolve + Send + Sync);
 }
 
-impl std::fmt::Debug for Publisher {
+impl<T> PublisherResolver for T
+where
+    T: Resolve + Send + Sync + Sized + 'static,
+{
+    fn as_resolver(&self) -> &(dyn Resolve + Send + Sync) {
+        self
+    }
+}
+
+impl PublisherResolver for dyn Resolve + Send + Sync {
+    fn as_resolver(&self) -> &(dyn Resolve + Send + Sync) {
+        self
+    }
+}
+
+pub struct Publisher<A: ?Sized, R: ?Sized> {
+    signer: EndpointRecordSigner<A>,
+    resolver: Arc<R>,
+}
+
+impl<A, R> std::fmt::Debug for Publisher<A, R>
+where
+    A: LocalAuthority + Send + Sync + ?Sized,
+    R: PublisherResolver + ?Sized,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Publisher")
-            .field("identity", &self.identity.name())
-            .field("bind_patterns", &self.bind_patterns)
-            .field("interval", &self.interval)
-            .field("publish_timeout", &self.publish_timeout)
-            .field("options", &self.options)
-            .finish_non_exhaustive()
+            .field("signer", &self.signer)
+            .field("resolver", &self.resolver.as_resolver().to_string())
+            .finish()
     }
 }
 
-impl Publisher {
-    pub fn new(
-        identity: Arc<dyn LocalAuthority>,
-        network: Arc<h3x::dquic::Network>,
-        resolver: Arc<dyn Resolve + Send + Sync>,
-        bind_patterns: Arc<Vec<h3x::dquic::binds::BindPattern>>,
-    ) -> Self {
-        Self {
-            identity,
-            network,
-            resolver,
-            bind_patterns,
-            interval: DEFAULT_PUBLISH_INTERVAL,
-            publish_timeout: DEFAULT_PUBLISH_TIMEOUT,
-            options: PublishOptions::default(),
-        }
+pub type EndpointPublisher = Publisher<dyn LocalAuthority + Send + Sync, dyn Resolve + Send + Sync>;
+
+impl<A, R> Publisher<A, R>
+where
+    A: LocalAuthority + Send + Sync + ?Sized,
+    R: PublisherResolver + ?Sized,
+{
+    pub fn new(signer: EndpointRecordSigner<A>, resolver: Arc<R>) -> Self {
+        Self { signer, resolver }
     }
 
-    pub fn with_options(mut self, options: PublishOptions) -> Self {
-        self.options = options;
-        self
+    pub fn signer(&self) -> &EndpointRecordSigner<A> {
+        &self.signer
     }
 
     pub fn options(&self) -> PublishOptions {
-        self.options
+        self.signer.options()
+    }
+
+    pub fn resolver(&self) -> &Arc<R> {
+        &self.resolver
+    }
+
+    pub async fn publish_once<V>(
+        &self,
+        name: &Name<'_>,
+        addresses: &V,
+    ) -> Result<(), PublishOnceError>
+    where
+        V: AddressView + Sync,
+    {
+        let mut published = false;
+        published |= self
+            .publish_to_resolver(self.resolver.as_resolver(), name, addresses)
+            .await?;
+
+        if !published {
+            return publish_once_error::NoPublisherResolverSnafu.fail();
+        }
+
+        Ok(())
+    }
+}
+
+pub struct EndpointPublicationLoop<A: ?Sized, R: ?Sized, S> {
+    name: Name<'static>,
+    publisher: Publisher<A, R>,
+    source: S,
+    interval: Duration,
+    publish_timeout: Duration,
+}
+
+impl<A, R, S> std::fmt::Debug for EndpointPublicationLoop<A, R, S>
+where
+    A: LocalAuthority + Send + Sync + ?Sized,
+    R: PublisherResolver + ?Sized,
+    S: std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EndpointPublicationLoop")
+            .field("name", &self.name)
+            .field("publisher", &self.publisher)
+            .field("source", &self.source)
+            .field("interval", &self.interval)
+            .field("publish_timeout", &self.publish_timeout)
+            .finish()
+    }
+}
+
+impl<A, R, S> EndpointPublicationLoop<A, R, S>
+where
+    A: LocalAuthority + Send + Sync + ?Sized,
+    R: PublisherResolver + ?Sized,
+    S: AddressViewSource + Send + Sync,
+{
+    pub fn new(name: Name<'static>, publisher: Publisher<A, R>, source: S) -> Self {
+        Self {
+            name,
+            publisher,
+            source,
+            interval: DEFAULT_PUBLISH_INTERVAL,
+            publish_timeout: DEFAULT_PUBLISH_TIMEOUT,
+        }
+    }
+
+    pub fn name(&self) -> &Name<'static> {
+        &self.name
+    }
+
+    pub fn publisher(&self) -> &Publisher<A, R> {
+        &self.publisher
+    }
+
+    pub fn options(&self) -> PublishOptions {
+        self.publisher.options()
     }
 
     pub fn interval(&self) -> Duration {
@@ -134,50 +205,8 @@ impl Publisher {
         self
     }
 
-    pub async fn publish_once(&self) -> Result<(), PublishOnceError> {
-        let mut published = false;
-        let public_endpoints = self.public_endpoints();
-        tracing::debug!(
-            endpoint_count = public_endpoints.len(),
-            endpoints = ?public_endpoints,
-            "publishing public endpoints"
-        );
-        published |= self
-            .publish_to_resolver(self.resolver.as_ref(), &public_endpoints)
-            .await?;
-
-        if !published {
-            return publish_once_error::NoPublisherResolverSnafu.fail();
-        }
-
-        Ok(())
-    }
-
-    pub async fn publish_once_for(
-        &self,
-        host: &str,
-        endpoints: &[EndpointAddr],
-    ) -> Result<(), PublishOnceError> {
-        let mut published = false;
-        tracing::debug!(
-            host,
-            endpoint_count = endpoints.len(),
-            endpoints = ?endpoints,
-            "publishing explicit endpoints"
-        );
-        published |= self
-            .publish_supplied_endpoints_to_resolver(self.resolver.as_ref(), host, endpoints)
-            .await?;
-
-        if !published {
-            return publish_once_error::NoPublisherResolverSnafu.fail();
-        }
-
-        Ok(())
-    }
-
     pub async fn run(&self) -> ! {
-        let mut locations = self.network.quic().locations().subscribe();
+        let mut locations = self.source.subscribe();
         let interval = tokio::time::sleep(self.interval);
         tokio::pin!(interval);
         // Keep at most one publish attempt in flight. A timer tick or
@@ -200,7 +229,7 @@ impl Publisher {
                     let Some((bind_uri, event)) = event else {
                         continue;
                     };
-                    if !self.bind_patterns.iter().any(|pattern| pattern.matches(&bind_uri)) {
+                    if !self.source.observes(&bind_uri) {
                         continue;
                     }
                     if !Self::location_event_requires_publish(&event) {
@@ -230,14 +259,20 @@ impl Publisher {
             timeout_ms = self.publish_timeout.as_millis(),
             "starting dns publish attempt"
         );
-        match tokio::time::timeout(self.publish_timeout, self.publish_once()).await {
+        let addresses = self.source.address_view();
+        match tokio::time::timeout(
+            self.publish_timeout,
+            self.publisher.publish_once(&self.name, &addresses),
+        )
+        .await
+        {
             Ok(Ok(())) => {
-                tracing::info!("published resolver endpoints");
+                tracing::info!(name = %self.name, "published resolver endpoints");
                 true
             }
             Ok(Err(error)) => {
                 let report = snafu::Report::from_error(&error);
-                tracing::warn!(error = %report, "dns publish failed");
+                tracing::warn!(error = %report, name = %self.name, "dns publish failed");
                 false
             }
             Err(_elapsed) => {
@@ -248,11 +283,16 @@ impl Publisher {
                 self.clear_publish_state();
                 tracing::warn!(
                     timeout_ms = self.publish_timeout.as_millis(),
+                    name = %self.name,
                     "dns publish timed out"
                 );
                 false
             }
         }
+    }
+
+    fn clear_publish_state(&self) {
+        dispatch::clear_resolver_publish_state(self.publisher.resolver.as_resolver());
     }
 
     fn location_event_requires_publish(event: &AddressEvent) -> bool {
@@ -276,357 +316,13 @@ impl Publisher {
             AddressEvent::Closed => true,
         }
     }
-
-    async fn publish_to_resolver(
-        &self,
-        resolver: &(dyn Resolve + Send + Sync),
-        public_endpoints: &[EndpointAddr],
-    ) -> Result<bool, PublishOnceError> {
-        let any: &dyn Any = resolver;
-
-        if let Some(resolvers) = any.downcast_ref::<Resolvers>() {
-            let mut published = false;
-            for resolver in resolvers.iter() {
-                published |= self
-                    .publish_single_resolver(resolver.as_ref(), public_endpoints)
-                    .await?;
-            }
-            return Ok(published);
-        }
-
-        self.publish_single_resolver(resolver, public_endpoints)
-            .await
-    }
-
-    async fn publish_supplied_endpoints_to_resolver(
-        &self,
-        resolver: &(dyn Resolve + Send + Sync),
-        host: &str,
-        endpoints: &[EndpointAddr],
-    ) -> Result<bool, PublishOnceError> {
-        let any: &dyn Any = resolver;
-
-        if let Some(resolvers) = any.downcast_ref::<Resolvers>() {
-            let mut published = false;
-            for resolver in resolvers.iter() {
-                published |= self
-                    .publish_single_resolver_for(resolver.as_ref(), host, endpoints)
-                    .await?;
-            }
-            return Ok(published);
-        }
-
-        self.publish_single_resolver_for(resolver, host, endpoints)
-            .await
-    }
-
-    fn clear_publish_state(&self) {
-        Self::clear_resolver_publish_state(self.resolver.as_ref());
-    }
-
-    fn clear_resolver_publish_state(resolver: &(dyn Resolve + Send + Sync)) {
-        let any: &dyn Any = resolver;
-
-        if let Some(resolvers) = any.downcast_ref::<Resolvers>() {
-            for resolver in resolvers.iter() {
-                Self::clear_resolver_publish_state(resolver.as_ref());
-            }
-        }
-
-        #[cfg(feature = "h3x-resolver")]
-        if let Some(h3) =
-            any.downcast_ref::<crate::resolvers::h3::H3Resolver<h3x::dquic::QuicEndpoint>>()
-        {
-            h3.clear_pool();
-        }
-    }
-
-    async fn publish_single_resolver(
-        &self,
-        resolver: &(dyn Resolve + Send + Sync),
-        public_endpoints: &[EndpointAddr],
-    ) -> Result<bool, PublishOnceError> {
-        #[cfg(not(any(feature = "http-resolver", feature = "h3x-resolver")))]
-        let _ = public_endpoints;
-
-        let any: &dyn Any = resolver;
-
-        #[cfg(feature = "http-resolver")]
-        if let Some(http) = any.downcast_ref::<crate::resolvers::http::HttpResolver>() {
-            self.publish_endpoints(http, public_endpoints).await?;
-            return Ok(true);
-        }
-
-        #[cfg(feature = "h3x-resolver")]
-        if let Some(h3) =
-            any.downcast_ref::<crate::resolvers::h3::H3Resolver<h3x::dquic::QuicEndpoint>>()
-        {
-            self.publish_endpoints(h3, public_endpoints).await?;
-            return Ok(true);
-        }
-
-        #[cfg(feature = "mdns-resolver")]
-        if let Some(mdns) = any.downcast_ref::<crate::mdns::resolvers::mdns::MdnsResolvers>() {
-            let mut published = false;
-            for bound in mdns.bound_resolvers() {
-                let endpoints = self.local_endpoints_for(&bound.device, bound.family);
-                self.publish_endpoints(&bound.resolver, &endpoints).await?;
-                published = true;
-            }
-            return Ok(published);
-        }
-
-        Ok(false)
-    }
-
-    async fn publish_single_resolver_for(
-        &self,
-        resolver: &(dyn Resolve + Send + Sync),
-        host: &str,
-        endpoints: &[EndpointAddr],
-    ) -> Result<bool, PublishOnceError> {
-        #[cfg(not(any(
-            feature = "http-resolver",
-            feature = "h3x-resolver",
-            feature = "mdns-resolver"
-        )))]
-        {
-            let _ = host;
-            let _ = endpoints;
-        }
-
-        let any: &dyn Any = resolver;
-
-        #[cfg(feature = "http-resolver")]
-        if let Some(http) = any.downcast_ref::<crate::resolvers::http::HttpResolver>() {
-            self.publish_endpoints_for(http, host, endpoints).await?;
-            return Ok(true);
-        }
-
-        #[cfg(feature = "h3x-resolver")]
-        if let Some(h3) =
-            any.downcast_ref::<crate::resolvers::h3::H3Resolver<h3x::dquic::QuicEndpoint>>()
-        {
-            self.publish_endpoints_for(h3, host, endpoints).await?;
-            return Ok(true);
-        }
-
-        #[cfg(feature = "mdns-resolver")]
-        if let Some(mdns) = any.downcast_ref::<crate::mdns::resolvers::mdns::MdnsResolvers>() {
-            let mut published = false;
-            for bound in mdns.bound_resolvers() {
-                self.publish_endpoints_for(&bound.resolver, host, endpoints)
-                    .await?;
-                published = true;
-            }
-            return Ok(published);
-        }
-
-        Ok(false)
-    }
-
-    async fn publish_endpoints(
-        &self,
-        publisher: &(dyn Publish + Send + Sync),
-        endpoints: &[EndpointAddr],
-    ) -> Result<(), PublishOnceError> {
-        self.publish_endpoints_for(publisher, self.identity.name(), endpoints)
-            .await
-    }
-
-    async fn publish_endpoints_for(
-        &self,
-        publisher: &(dyn Publish + Send + Sync),
-        host: &str,
-        endpoints: &[EndpointAddr],
-    ) -> Result<(), PublishOnceError> {
-        let packet = self.signed_packet_for(host, endpoints).await?;
-        tracing::debug!(
-            publisher = %publisher,
-            host,
-            endpoint_count = endpoints.len(),
-            packet_len = packet.len(),
-            "publishing dns packet"
-        );
-        publisher
-            .publish(host, &packet)
-            .await
-            .context(publish_once_error::PublishSnafu {
-                publisher: publisher.to_string(),
-            })
-    }
-
-    #[cfg(test)]
-    async fn signed_packet(&self, endpoints: &[EndpointAddr]) -> Result<Vec<u8>, PublishOnceError> {
-        self.signed_packet_for(self.identity.name(), endpoints)
-            .await
-    }
-
-    async fn signed_packet_for(
-        &self,
-        host: &str,
-        endpoints: &[EndpointAddr],
-    ) -> Result<Vec<u8>, PublishOnceError> {
-        let mut signed = Vec::with_capacity(endpoints.len());
-        for endpoint in endpoints {
-            let mut endpoint = DnsEndpointAddr::try_from(*endpoint)
-                .map_err(|_| publish_once_error::EncodeEndpointSnafu.build())?;
-            if let Some(server_id) = self.options.server_id {
-                endpoint.set_main(server_id == 0);
-                endpoint.set_sequence(server_id.into());
-            }
-            endpoint
-                .sign_with_authority(self.identity.as_ref())
-                .await
-                .context(publish_once_error::SignEndpointSnafu)?;
-            signed.push(endpoint);
-        }
-
-        let mut hosts = HashMap::new();
-        hosts.insert(host.to_owned(), signed);
-        Ok(MdnsPacket::answer(0, &hosts).to_bytes())
-    }
-
-    fn public_endpoints(&self) -> Vec<EndpointAddr> {
-        let mut endpoints = Vec::new();
-        let mut seen = HashSet::new();
-        for pattern in self.bind_patterns.iter() {
-            let Some(ifaces) = self.network.quic().get_interfaces(pattern) else {
-                tracing::trace!(?pattern, "no interfaces for bind pattern");
-                continue;
-            };
-            for iface in ifaces {
-                for endpoint in public_endpoints_from_iface(&self.network, &iface) {
-                    push_unique_endpoint(&mut endpoints, &mut seen, endpoint);
-                }
-            }
-        }
-        endpoints
-    }
-
-    #[cfg(feature = "mdns-resolver")]
-    fn local_endpoints_for(&self, device: &str, family: Family) -> Vec<EndpointAddr> {
-        let mut endpoints = HashSet::new();
-        for pattern in self.bind_patterns.iter() {
-            let Some(ifaces) = self.network.quic().get_interfaces(pattern) else {
-                continue;
-            };
-            for iface in ifaces {
-                let bind_uri = iface.bind_uri();
-                let Some((iface_family, iface_device, _port)) = bind_uri.as_iface_bind_uri() else {
-                    continue;
-                };
-                if iface_family != family || iface_device != device {
-                    continue;
-                }
-                if let Some(endpoint) = local_endpoint_from_iface(&iface, family) {
-                    endpoints.insert(endpoint);
-                }
-            }
-        }
-        endpoints.into_iter().collect()
-    }
 }
 
-fn push_unique_endpoint(
-    endpoints: &mut Vec<EndpointAddr>,
-    seen: &mut HashSet<EndpointAddr>,
-    endpoint: EndpointAddr,
-) {
-    if seen.insert(endpoint) {
-        endpoints.push(endpoint);
-    }
-}
-
-fn public_endpoints_from_iface(
-    network: &h3x::dquic::Network,
-    iface: &h3x::dquic::net::BindInterface,
-) -> Vec<EndpointAddr> {
-    use h3x::dquic::{net::IO, qtraversal::nat::client::StunClientsComponent};
-
-    iface.with_components(|components, current| {
-        let bind_uri = current.bind_uri();
-        let addr = current.bound_addr().ok();
-        let mut endpoints: Vec<EndpointAddr> = components
-            .get::<StunClientsComponent>()
-            .map(|stun| {
-                stun.with_clients(|clients| {
-                    clients
-                        .values()
-                        .filter_map(|client| {
-                            let outer = client.get_outer_addr()?.ok()?;
-                            let bound = current.bound_addr().ok()?;
-                            match client.get_nat_type() {
-                                Some(Ok(nat_type)) => Some(publish_endpoint_from_stun(
-                                    bound,
-                                    client.agent_addr(),
-                                    outer,
-                                    nat_type,
-                                )),
-                                None => Some(EndpointAddr::with_agent(client.agent_addr(), outer)),
-                                Some(Err(_)) => None,
-                            }
-                        })
-                        .collect()
-                })
-            })
-            .unwrap_or_default();
-        let stun_endpoint_count = endpoints.len();
-
-        // Also publish the current default-route address. STUN-derived
-        // endpoints make the node reachable from outside the local network,
-        // while the bound address is still the shortest valid path for peers
-        // on the same link and for separate local client processes on the
-        // same host. Keep it after STUN endpoints so translated-NAT peers get
-        // the externally reachable candidate first.
-        if let Some(addr) = addr
-            && network.bound_addr_is_on_default_route(&bind_uri, addr)
-        {
-            endpoints.push(EndpointAddr::direct(addr));
-        }
-
-        tracing::trace!(
-            bind_uri = %bind_uri,
-            bound_addr = ?addr,
-            stun_endpoint_count,
-            endpoint_count = endpoints.len(),
-            endpoints = ?endpoints,
-            "collected public endpoints from interface"
-        );
-
-        endpoints
-    })
-}
-
-fn publish_endpoint_from_stun(
-    bound: SocketAddr,
-    agent: SocketAddr,
-    outer: SocketAddr,
-    nat_type: NatType,
-) -> EndpointAddr {
-    if nat_type == NatType::FullCone && bound == outer {
-        EndpointAddr::direct(outer)
-    } else {
-        EndpointAddr::with_agent(agent, outer)
-    }
-}
-
-#[cfg(feature = "mdns-resolver")]
-fn local_endpoint_from_iface(
-    iface: &h3x::dquic::net::BindInterface,
-    family: Family,
-) -> Option<EndpointAddr> {
-    use h3x::dquic::net::IO;
-
-    iface.with_components(|_components, current| {
-        let addr = current.bound_addr().ok()?;
-        match (family, addr) {
-            (Family::V4, std::net::SocketAddr::V4(_))
-            | (Family::V6, std::net::SocketAddr::V6(_)) => Some(EndpointAddr::direct(addr)),
-            _ => None,
-        }
-    })
-}
+pub type EndpointPublisherLoop = EndpointPublicationLoop<
+    dyn LocalAuthority + Send + Sync,
+    dyn Resolve + Send + Sync,
+    EndpointBindingAddresses,
+>;
 
 #[cfg(test)]
 mod tests {
@@ -690,35 +386,42 @@ mod tests {
 
     impl Resolve for DisplayOnlyResolver {
         fn lookup<'l>(&'l self, _name: &'l str) -> ResolveFuture<'l> {
-            async { Ok(stream::empty::<(Source, EndpointAddr)>().boxed()) }.boxed()
+            async { Ok(stream::empty::<(Source, dquic::qbase::net::addr::EndpointAddr)>().boxed()) }
+                .boxed()
         }
+    }
+
+    fn test_name() -> Name<'static> {
+        "authority.example".parse().unwrap()
+    }
+
+    fn test_publisher<R>(resolver: Arc<R>) -> Publisher<TestAuthority, R>
+    where
+        R: Resolve + Send + Sync,
+    {
+        let signer = EndpointRecordSigner::new(Arc::new(TestAuthority));
+        Publisher::new(signer, resolver)
+    }
+
+    fn test_source(network: Arc<h3x::dquic::Network>) -> EndpointBindingAddresses {
+        EndpointBindingAddresses::new(
+            network,
+            Arc::new(vec![
+                "inet://127.0.0.1:0".parse().expect("valid bind pattern"),
+            ]),
+        )
     }
 
     #[tokio::test]
     async fn publish_once_reports_no_publisher_resolver() {
-        let publisher = Publisher::new(
-            Arc::new(TestAuthority),
-            h3x::dquic::Network::builder().build(),
-            Arc::new(DisplayOnlyResolver),
-            Arc::new(Vec::new()),
-        );
-
-        let error = publisher.publish_once().await.unwrap_err();
-        assert!(matches!(error, PublishOnceError::NoPublisherResolver));
-    }
-
-    #[tokio::test]
-    async fn publish_once_for_reports_no_publisher_resolver() {
-        let publisher = Publisher::new(
-            Arc::new(TestAuthority),
-            h3x::dquic::Network::builder().build(),
-            Arc::new(DisplayOnlyResolver),
-            Arc::new(Vec::new()),
-        );
-        let endpoint = EndpointAddr::direct("127.0.0.1:443".parse().unwrap());
+        let publisher = test_publisher(Arc::new(DisplayOnlyResolver));
+        let addresses =
+            PublishAddresses::new().wide_area([dquic::qbase::net::addr::EndpointAddr::direct(
+                "127.0.0.1:443".parse().unwrap(),
+            )]);
 
         let error = publisher
-            .publish_once_for("nat.genmeta.net", &[endpoint])
+            .publish_once(&test_name(), &addresses)
             .await
             .unwrap_err();
 
@@ -727,31 +430,26 @@ mod tests {
 
     #[tokio::test]
     async fn publisher_timeout_is_configurable() {
-        let publisher = Publisher::new(
-            Arc::new(TestAuthority),
-            h3x::dquic::Network::builder().build(),
-            Arc::new(DisplayOnlyResolver),
-            Arc::new(Vec::new()),
-        );
-        assert_eq!(publisher.publish_timeout(), DEFAULT_PUBLISH_TIMEOUT);
+        let network = h3x::dquic::Network::builder().build();
+        let publisher = test_publisher(Arc::new(DisplayOnlyResolver));
+        let publisher_loop =
+            EndpointPublicationLoop::new(test_name(), publisher, test_source(network));
+        assert_eq!(publisher_loop.publish_timeout(), DEFAULT_PUBLISH_TIMEOUT);
 
         let timeout = Duration::from_secs(3);
-        let publisher = publisher.with_publish_timeout(timeout);
-        assert_eq!(publisher.publish_timeout(), timeout);
+        let publisher_loop = publisher_loop.with_publish_timeout(timeout);
+        assert_eq!(publisher_loop.publish_timeout(), timeout);
     }
 
     #[tokio::test]
-    async fn signed_packet_applies_publish_options_server_id() {
-        let publisher = Publisher::new(
-            Arc::new(TestAuthority),
-            h3x::dquic::Network::builder().build(),
-            Arc::new(DisplayOnlyResolver),
-            Arc::new(Vec::new()),
-        )
-        .with_options(PublishOptions { server_id: Some(2) });
+    async fn signer_applies_publish_options_server_id() {
+        let signer = EndpointRecordSigner::new(Arc::new(TestAuthority))
+            .with_options(PublishOptions { server_id: Some(2) });
+        let name: Name<'static> = "authority.example".parse().unwrap();
 
-        let endpoint = EndpointAddr::direct("127.0.0.1:443".parse().unwrap());
-        let packet = publisher.signed_packet(&[endpoint]).await.unwrap();
+        let endpoint =
+            dquic::qbase::net::addr::EndpointAddr::direct("127.0.0.1:443".parse().unwrap());
+        let packet = signer.signed_packet(&name, &[endpoint]).await.unwrap();
         let (_remain, packet) = crate::core::parser::packet::be_packet(&packet).unwrap();
         let record = packet.answers.first().expect("endpoint answer");
         let crate::core::parser::record::RData::E(endpoint) = record.data() else {
@@ -764,20 +462,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn signed_packet_for_uses_supplied_host_and_keeps_signature_and_options() {
-        let publisher = Publisher::new(
-            Arc::new(TestAuthority),
-            h3x::dquic::Network::builder().build(),
-            Arc::new(DisplayOnlyResolver),
-            Arc::new(Vec::new()),
-        )
-        .with_options(PublishOptions { server_id: Some(2) });
+    async fn signer_uses_supplied_record_owner_name() {
+        let signer = EndpointRecordSigner::new(Arc::new(TestAuthority))
+            .with_options(PublishOptions { server_id: Some(2) });
+        let name: Name<'static> = "nat.genmeta.net".parse().unwrap();
 
-        let endpoint = EndpointAddr::direct("127.0.0.1:443".parse().unwrap());
-        let packet = publisher
-            .signed_packet_for("nat.genmeta.net", &[endpoint])
-            .await
-            .unwrap();
+        let endpoint =
+            dquic::qbase::net::addr::EndpointAddr::direct("127.0.0.1:443".parse().unwrap());
+        let packet = signer.signed_packet(&name, &[endpoint]).await.unwrap();
         let (_remain, packet) = crate::core::parser::packet::be_packet(&packet).unwrap();
         let record = packet.answers.first().expect("endpoint answer");
         let crate::core::parser::record::RData::E(endpoint) = record.data() else {
@@ -791,60 +483,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn public_endpoints_do_not_fall_back_to_local_bound_addresses() {
+    async fn binding_address_view_does_not_expose_loopback_as_wide_area_without_stun() {
         let network = h3x::dquic::Network::builder().build();
         let bind_pattern: h3x::dquic::binds::BindPattern =
             "inet://127.0.0.1:0".parse().expect("valid bind pattern");
         let _bind = network.quic().bind(bind_pattern.clone()).await;
-        let publisher = Publisher::new(
-            Arc::new(TestAuthority),
-            network,
-            Arc::new(DisplayOnlyResolver),
-            Arc::new(vec![bind_pattern]),
-        );
+        let source = EndpointBindingAddresses::new(network, Arc::new(vec![bind_pattern]));
+        let view = source.address_view();
 
-        assert!(
-            publisher.public_endpoints().is_empty(),
-            "public DNS publishing must wait for STUN-derived external endpoints; local addresses are published through mDNS"
-        );
-    }
-
-    #[test]
-    fn push_unique_endpoint_preserves_first_seen_order() {
-        let agent = EndpointAddr::with_agent(
-            "10.10.0.2:20004".parse().expect("valid agent addr"),
-            "10.10.0.10:45635".parse().expect("valid outer addr"),
-        );
-        let direct = EndpointAddr::direct("10.110.0.10:45635".parse().expect("valid direct addr"));
-        let mut endpoints = Vec::new();
-        let mut seen = HashSet::new();
-
-        push_unique_endpoint(&mut endpoints, &mut seen, agent);
-        push_unique_endpoint(&mut endpoints, &mut seen, direct);
-        push_unique_endpoint(&mut endpoints, &mut seen, agent);
-
-        assert_eq!(endpoints, vec![agent, direct]);
-    }
-
-    #[test]
-    fn full_cone_nat_endpoint_preserves_agent_when_outer_differs_from_bound_addr() {
-        let bound = "10.110.0.10:45635".parse().expect("valid bound addr");
-        let agent = "10.10.0.2:20004".parse().expect("valid agent addr");
-        let outer = "10.10.0.10:45635".parse().expect("valid outer addr");
-
-        let endpoint = publish_endpoint_from_stun(bound, agent, outer, NatType::FullCone);
-
-        assert_eq!(endpoint, EndpointAddr::with_agent(agent, outer));
-    }
-
-    #[test]
-    fn full_cone_endpoint_is_direct_without_address_translation() {
-        let bound = "10.10.0.100:45635".parse().expect("valid bound addr");
-        let agent = "10.10.0.2:20004".parse().expect("valid agent addr");
-
-        let endpoint = publish_endpoint_from_stun(bound, agent, bound, NatType::FullCone);
-
-        assert_eq!(endpoint, EndpointAddr::direct(bound));
+        assert!(view.endpoints(AddressSelector::WideArea).next().is_none());
     }
 
     #[cfg(feature = "http-resolver")]
@@ -896,18 +543,13 @@ mod tests {
             crate::resolvers::http::HttpResolver::new(format!("http://127.0.0.1:{port}/"))
                 .expect("valid http resolver"),
         );
-        let mut publisher = Publisher::new(
-            Arc::new(TestAuthority),
-            network.clone(),
-            resolver,
-            Arc::new(vec![
-                "inet://127.0.0.1:0".parse().expect("valid bind pattern"),
-            ]),
-        );
-        publisher.interval = Duration::from_secs(60);
+        let publisher = test_publisher(resolver);
+        let source = test_source(network.clone());
+        let mut publisher_loop = EndpointPublicationLoop::new(test_name(), publisher, source);
+        publisher_loop.interval = Duration::from_secs(60);
 
         let publisher = tokio::spawn(async move {
-            publisher.run().await;
+            publisher_loop.run().await;
         });
 
         wait_for_count(&publish_count, 1).await;
@@ -986,16 +628,11 @@ mod tests {
             crate::resolvers::http::HttpResolver::new(format!("http://127.0.0.1:{port}/"))
                 .expect("valid http resolver"),
         );
-        let publisher = Publisher::new(
-            Arc::new(TestAuthority),
-            network.clone(),
-            resolver,
-            Arc::new(vec![
-                "inet://127.0.0.1:0".parse().expect("valid bind pattern"),
-            ]),
-        );
+        let publisher = test_publisher(resolver);
+        let source = test_source(network.clone());
+        let publisher_loop = EndpointPublicationLoop::new(test_name(), publisher, source);
         let publisher = tokio::spawn(async move {
-            publisher.run().await;
+            publisher_loop.run().await;
         });
 
         wait_for_count(&publish_count, 1).await;
@@ -1066,19 +703,14 @@ mod tests {
             crate::resolvers::http::HttpResolver::new(format!("http://127.0.0.1:{port}/"))
                 .expect("valid http resolver"),
         );
-        let mut publisher = Publisher::new(
-            Arc::new(TestAuthority),
-            network.clone(),
-            resolver,
-            Arc::new(vec![
-                "inet://127.0.0.1:0".parse().expect("valid bind pattern"),
-            ]),
-        )
-        .with_publish_timeout(Duration::from_millis(50));
-        publisher.interval = Duration::from_secs(60);
+        let publisher = test_publisher(resolver);
+        let source = test_source(network.clone());
+        let mut publisher_loop = EndpointPublicationLoop::new(test_name(), publisher, source)
+            .with_publish_timeout(Duration::from_millis(50));
+        publisher_loop.interval = Duration::from_secs(60);
 
         let publisher = tokio::spawn(async move {
-            publisher.run().await;
+            publisher_loop.run().await;
         });
 
         wait_for_count(&publish_count, 1).await;
@@ -1150,19 +782,14 @@ mod tests {
             crate::resolvers::http::HttpResolver::new(format!("http://127.0.0.1:{port}/"))
                 .expect("valid http resolver"),
         );
-        let mut publisher = Publisher::new(
-            Arc::new(TestAuthority),
-            network.clone(),
-            resolver,
-            Arc::new(vec![
-                "inet://127.0.0.1:0".parse().expect("valid bind pattern"),
-            ]),
-        )
-        .with_publish_timeout(Duration::from_secs(30));
-        publisher.interval = Duration::from_secs(60);
+        let publisher = test_publisher(resolver);
+        let source = test_source(network.clone());
+        let mut publisher_loop = EndpointPublicationLoop::new(test_name(), publisher, source)
+            .with_publish_timeout(Duration::from_secs(30));
+        publisher_loop.interval = Duration::from_secs(60);
 
         let publisher = tokio::spawn(async move {
-            publisher.run().await;
+            publisher_loop.run().await;
         });
 
         tokio::time::timeout(Duration::from_secs(2), wait_for_count(&publish_count, 1))
