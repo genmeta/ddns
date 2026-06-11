@@ -398,8 +398,14 @@ impl MemoryStorage {
 }
 
 #[derive(Clone)]
+pub struct RedisStorage {
+    pub write: Pool,
+    pub read: Pool,
+}
+
+#[derive(Clone)]
 pub enum Storage {
-    Redis(Pool),
+    Redis(RedisStorage),
     Memory(MemoryStorage),
 }
 
@@ -413,6 +419,7 @@ pub type SeedRecords = Arc<HashMap<String, Vec<LookupRecord>>>;
 #[derive(Clone)]
 pub struct AppState {
     pub storage: Storage,
+    pub host_allowlist: Arc<Vec<String>>,
     pub require_signature: bool,
     pub ttl_secs: u64,
     pub policies: Arc<DomainPolicies>,

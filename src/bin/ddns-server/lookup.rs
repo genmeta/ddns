@@ -338,7 +338,7 @@ pub async fn perform_lookup(
     limit: Option<usize>,
     source_ip: Option<IpAddr>,
 ) -> Result<LookupResult, AppError> {
-    let host = normalize_host(host)?;
+    let host = normalize_host(host, state.host_allowlist.as_ref())?;
     perform_lookup_multi(state, &host, limit, source_ip).await
 }
 
@@ -353,8 +353,8 @@ async fn perform_lookup_multi(
     let candidate_all = all_candidate_cap(candidate_total, source_traits.as_ref());
 
     let dynamic_records = match &state.storage {
-        Storage::Redis(pool) => {
-            let mut conn = pool.get().await.map_err(|e| AppError::Redis {
+        Storage::Redis(redis) => {
+            let mut conn = redis.read.get().await.map_err(|e| AppError::Redis {
                 message: e.to_string(),
             })?;
 
@@ -364,20 +364,11 @@ async fn perform_lookup_multi(
             }
 
             let now_secs = unix_now_secs();
-            let cutoff_score = now_secs.saturating_sub(state.ttl_secs) as f64;
             let mut candidate_fingerprints = Vec::new();
             let mut seen_fingerprints = HashSet::new();
 
             if let Some(asn) = source_traits.as_ref().and_then(|traits| traits.asn) {
                 let index_key = redis_asn_index_key(host, asn);
-                let _: () = redis::cmd("ZREMRANGEBYSCORE")
-                    .arg(&index_key)
-                    .arg("-inf")
-                    .arg(cutoff_score)
-                    .query_async::<()>(&mut *conn)
-                    .await
-                    .unwrap_or(());
-
                 let members: Vec<String> = conn
                     .zrevrange(
                         &index_key,
@@ -402,14 +393,6 @@ async fn perform_lookup_multi(
                 .and_then(|traits| traits.country.as_deref())
             {
                 let index_key = redis_country_index_key(host, country);
-                let _: () = redis::cmd("ZREMRANGEBYSCORE")
-                    .arg(&index_key)
-                    .arg("-inf")
-                    .arg(cutoff_score)
-                    .query_async::<()>(&mut *conn)
-                    .await
-                    .unwrap_or(());
-
                 let members: Vec<String> = conn
                     .zrevrange(
                         &index_key,
@@ -430,14 +413,6 @@ async fn perform_lookup_multi(
             }
 
             let all_index_key = redis_all_index_key(host);
-            let _: () = redis::cmd("ZREMRANGEBYSCORE")
-                .arg(&all_index_key)
-                .arg("-inf")
-                .arg(cutoff_score)
-                .query_async::<()>(&mut *conn)
-                .await
-                .unwrap_or(());
-
             let all_members: Vec<String> = conn
                 .zrevrange(
                     &all_index_key,
@@ -741,6 +716,7 @@ mod tests {
         );
         let state = AppState {
             storage: Storage::Memory(MemoryStorage::with_blacklist([host.to_string()])),
+            host_allowlist: Arc::new(vec!["genmeta.net".to_string()]),
             require_signature: false,
             ttl_secs: 30,
             policies: Arc::new(crate::policy::DomainPolicies::default()),

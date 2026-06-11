@@ -28,8 +28,17 @@ pub struct Options {
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// Redis URL (e.g. "redis://127.0.0.1/"). Omit to use in-memory storage.
-    pub redis: Option<String>,
+    /// Redis write URL (e.g. "redis://primary:6379/"). Alias: `redis`.
+    #[serde(default, alias = "redis")]
+    pub redis_write_url: Option<String>,
+
+    /// Optional Redis read URL (e.g. "redis://replica:6379/").
+    #[serde(default)]
+    pub redis_read_url: Option<String>,
+
+    /// Allowed host suffixes (normalized, suffix-matched).
+    #[serde(default = "Config::default_host_allowlist")]
+    pub host_allowlist: Vec<String>,
 
     /// Bind patterns to listen on.
     #[serde(
@@ -121,6 +130,9 @@ impl Config {
     }
     pub fn default_root_cert() -> PathBuf {
         "examples/keychain/root/rootCA-ECC.crt".into()
+    }
+    pub fn default_host_allowlist() -> Vec<String> {
+        vec!["genmeta.net".into()]
     }
     pub fn default_require_signature() -> bool {
         true
