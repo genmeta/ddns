@@ -17,7 +17,7 @@ use std::{
 };
 
 use clap::Parser;
-use ddns::core::{MdnsEndpoint, MdnsPacket};
+use ddns::core::{MdnsEndpoint, MdnsPacket, wire::ResponseRecord};
 use futures::future::BoxFuture;
 use h3x::{
     dquic::{
@@ -125,7 +125,10 @@ fn build_seed_records(seed_records: &[SeedRecordConfig]) -> io::Result<SeedRecor
         records
             .entry(host.clone())
             .or_insert_with(Vec::new)
-            .push((MdnsPacket::answer(0, &hosts).to_bytes(), Vec::new()));
+            .push(ResponseRecord::unsigned(
+                MdnsPacket::answer(0, &hosts).to_bytes(),
+                Vec::new(),
+            ));
 
         info!(host = %host, endpoint_count = seed_record.endpoints.len(), "seed_records.loaded");
     }
@@ -215,15 +218,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = config.expand_paths();
     let seed_records = build_seed_records(&config.seed_records)?;
     let geo = build_geo_resolver(&config)?;
+    let memory_blacklist = config
+        .blacklist
+        .iter()
+        .filter_map(|host| match error::normalize_host(host) {
+            Ok(host) => Some(host),
+            Err(error) => {
+                warn!(host, error = %error, "blacklist.invalid_host_ignored");
+                None
+            }
+        })
+        .collect::<Vec<_>>();
 
     // Build storage backend.
     let storage = match config.redis.clone() {
         Some(url) => {
+            if !memory_blacklist.is_empty() {
+                warn!(
+                    count = memory_blacklist.len(),
+                    "blacklist.config_ignored_when_redis_enabled"
+                );
+            }
             let redis_cfg = deadpool_redis::Config::from_url(url);
             let redis_pool = redis_cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))?;
             Storage::Redis(redis_pool)
         }
-        None => Storage::Memory(MemoryStorage::new()),
+        None => Storage::Memory(MemoryStorage::with_blacklist(memory_blacklist)),
     };
 
     // Build domain-policy rules from config file.
@@ -340,6 +360,7 @@ mod tests {
             require_signature: Config::default_require_signature(),
             ttl_secs: Config::default_ttl_secs(),
             domain_policies: Vec::new(),
+            blacklist: Vec::new(),
             seed_records: Vec::new(),
             geoip_city_db: None,
             geoip_asn_db: None,

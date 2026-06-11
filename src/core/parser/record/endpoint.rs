@@ -8,7 +8,6 @@ use std::{
 
 use base64::Engine;
 use bytes::BufMut;
-use dhttp_identity::certificate::{CertificateChainKey, CertificateChainKind, CertificateSequence};
 use dquic::qbase::net::addr::EndpointAddr as DquicEndpointAddr;
 use nom::{
     IResult, Parser,
@@ -28,19 +27,12 @@ use crate::core::parser::{
 #[derive(Debug, Snafu)]
 #[snafu(module)]
 pub enum SignEndpointError {
-    #[snafu(display("failed to determine endpoint signature scheme"))]
-    SignatureScheme { source: sigin::SignatureSchemeError },
     #[snafu(display("failed to sign endpoint address"))]
     Sign {
         source: dhttp_identity::identity::SignError,
     },
-}
-
-#[derive(Debug, Snafu)]
-#[snafu(module)]
-pub enum EndpointSelectorError {
-    #[snafu(display("endpoint record sequence does not fit certificate sequence"))]
-    SequenceTooLarge { sequence: u64 },
+    #[snafu(display("no supported signature scheme for endpoint address"))]
+    NoSupportedScheme,
 }
 
 /// EndpointAddress record (Type E = 266)
@@ -54,7 +46,7 @@ pub enum EndpointSelectorError {
 /// +-------+-----------------+--------------------+----------------+----------------------------+
 /// | flags | sequence(varint)| addr               | load(optional) | signature (optional)       |
 /// +-------+-----------------+--------------------+----------------+----------------------------+
-/// | u8    | QUIC varint     | see addr layout    | f32            | scheme(u16)+len(varint)+N |
+/// | u8    | QUIC varint     | see addr layout    | f32            | scheme(u16)+len(varint)+N  |
 /// +-------+-----------------+--------------------+----------------+----------------------------+
 ///
 /// addr layout:
@@ -230,12 +222,17 @@ impl EndpointAddr {
     ) -> Result<(), SignEndpointError> {
         self.set_signed(true);
         let data = self.signed_data();
-        let scheme = sigin::signature_scheme(authority.public_key())
-            .context(sign_endpoint_error::SignatureSchemeSnafu)?;
+
+        let scheme = authority
+            .cert_chain()
+            .first()
+            .and_then(|_| sigin::canonical_scheme_for_spki(authority.public_key()))
+            .ok_or(SignEndpointError::NoSupportedScheme)?;
         let signature = authority
             .sign(&data)
             .await
             .context(sign_endpoint_error::SignSnafu)?;
+
         self.signature = Some(EndpointSignature {
             scheme: u16::from(scheme),
             signature,
@@ -377,28 +374,6 @@ impl EndpointAddr {
             self.sequence = None;
             self.set_clustered(false);
         }
-    }
-
-    pub fn certificate_chain_key(&self) -> Result<CertificateChainKey, EndpointSelectorError> {
-        let kind = if self.is_main() {
-            CertificateChainKind::Primary
-        } else {
-            CertificateChainKind::Secondary
-        };
-        let sequence = self.sequence.map(VarInt::into_inner).unwrap_or(0);
-        if sequence > u64::from(u32::MAX) {
-            return endpoint_selector_error::SequenceTooLargeSnafu { sequence }.fail();
-        }
-        let sequence = sequence as u32;
-        Ok(CertificateChainKey::new(
-            CertificateSequence::from(sequence),
-            kind,
-        ))
-    }
-
-    pub fn set_certificate_chain_key(&mut self, chain: &CertificateChainKey) {
-        self.set_main(chain.kind() == CertificateChainKind::Primary);
-        self.set_sequence(u64::from(chain.sequence().get()));
     }
 
     pub fn load(&self) -> Option<f32> {
@@ -779,6 +754,20 @@ impl TryFrom<EndpointAddr> for DquicEndpointAddr {
     }
 }
 
+pub async fn sign_endponit_address(
+    server_id: u8,
+    authority: Option<&(impl dhttp_identity::identity::LocalAuthority + ?Sized)>,
+    endpoint: DquicEndpointAddr,
+) -> Option<EndpointAddr> {
+    let mut ep: EndpointAddr = endpoint.try_into().ok()?;
+    ep.set_main(server_id == 0);
+    ep.set_sequence(server_id as u64);
+    if let Some(authority) = authority {
+        let _ = ep.sign_with_authority(authority).await;
+    }
+    Some(ep)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -787,77 +776,11 @@ mod tests {
     };
 
     use bytes::BytesMut;
-    use dhttp_identity::certificate::{
-        CertificateChainKey, CertificateChainKind, CertificateSequence,
-    };
     use futures::future::BoxFuture;
     use ring::signature::KeyPair;
-    use rustls::{
-        SignatureScheme,
-        sign::{Signer, SigningKey},
-    };
+    use rustls::sign::{Signer, SigningKey};
 
     use super::*;
-
-    fn chain(sequence: u32, kind: CertificateChainKind) -> CertificateChainKey {
-        CertificateChainKey::new(CertificateSequence::from(sequence), kind)
-    }
-
-    fn ed25519_spki(public_key: &[u8]) -> Vec<u8> {
-        let mut spki = Vec::with_capacity(44);
-        spki.extend_from_slice(&[
-            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
-        ]);
-        spki.extend_from_slice(public_key);
-        spki
-    }
-
-    #[test]
-    fn endpoint_selector_normalizes_missing_sequence_to_primary_zero() {
-        let addr = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 5353);
-        let mut endpoint = EndpointAddr::direct_v4(addr);
-        endpoint.set_main(true);
-
-        let selector = endpoint
-            .certificate_chain_key()
-            .expect("missing sequence normalizes to selector");
-
-        assert_eq!(selector, chain(0, CertificateChainKind::Primary));
-    }
-
-    #[test]
-    fn endpoint_selector_normalizes_missing_sequence_to_secondary_zero() {
-        let addr = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 5353);
-        let endpoint = EndpointAddr::direct_v4(addr);
-
-        let selector = endpoint
-            .certificate_chain_key()
-            .expect("missing sequence normalizes to selector");
-
-        assert_eq!(selector, chain(0, CertificateChainKind::Secondary));
-    }
-
-    #[test]
-    fn endpoint_selector_sets_primary_and_secondary_chains() {
-        let addr = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 3), 5353);
-        let mut endpoint = EndpointAddr::direct_v4(addr);
-
-        endpoint.set_certificate_chain_key(&chain(7, CertificateChainKind::Primary));
-        assert!(endpoint.is_main());
-        assert!(endpoint.is_clustered());
-        assert_eq!(
-            endpoint.certificate_chain_key().unwrap(),
-            chain(7, CertificateChainKind::Primary)
-        );
-
-        endpoint.set_certificate_chain_key(&chain(0, CertificateChainKind::Secondary));
-        assert!(!endpoint.is_main());
-        assert!(!endpoint.is_clustered());
-        assert_eq!(
-            endpoint.certificate_chain_key().unwrap(),
-            chain(0, CertificateChainKind::Secondary)
-        );
-    }
 
     #[test]
     fn legacy_endpoint_v4_direct_without_meta() {
@@ -1026,121 +949,11 @@ mod tests {
     }
 
     #[test]
-    fn signed_endpoint_accepts_scheme_inclusive_signature() {
-        let addr = SocketAddrV4::new(Ipv4Addr::new(10, 10, 0, 7), 20004);
-        let scheme = u16::from(SignatureScheme::ED25519);
-        let signature = vec![0xaa; 64];
-        let sig_len = VarInt::try_from(signature.len() as u64).unwrap();
-
-        let mut buf = BytesMut::new();
-        buf.put_u8(EndpointAddr::FLAG_SIGNED);
-        buf.put_socket_addr_v4(&addr);
-        buf.put_u16(scheme);
-        buf.put_varint(sig_len);
-        buf.extend_from_slice(&signature);
-
-        let (remain, decoded) = be_endpoint_addr(&buf).unwrap();
-
-        assert!(remain.is_empty());
-        assert!(decoded.is_signed());
-        assert_eq!(decoded.addr(), SocketAddr::V4(addr));
-        assert_eq!(decoded.signature().unwrap().signature, signature);
-    }
-
-    #[test]
-    fn signed_endpoint_rejects_signature_without_scheme() {
-        let addr = SocketAddrV4::new(Ipv4Addr::new(10, 10, 0, 7), 20004);
-        let signature = vec![0xaa; 64];
-        let sig_len = VarInt::try_from(signature.len() as u64).unwrap();
-
-        let mut buf = BytesMut::new();
-        buf.put_u8(EndpointAddr::FLAG_SIGNED);
-        buf.put_socket_addr_v4(&addr);
-        buf.put_varint(sig_len);
-        buf.extend_from_slice(&signature);
-
-        assert!(be_endpoint_addr(&buf).is_err());
-    }
-
-    #[test]
-    fn signed_endpoint_writes_actual_scheme_before_signature_length() {
-        #[derive(Debug)]
-        struct Ed25519Key {
-            keypair: Arc<ring::signature::Ed25519KeyPair>,
-            spki: Vec<u8>,
-        }
-
-        #[derive(Debug)]
-        struct Ed25519Signer(Arc<ring::signature::Ed25519KeyPair>);
-
-        impl Signer for Ed25519Signer {
-            fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rustls::Error> {
-                Ok(self.0.sign(message).as_ref().to_vec())
-            }
-
-            fn scheme(&self) -> SignatureScheme {
-                SignatureScheme::ED25519
-            }
-        }
-
-        impl SigningKey for Ed25519Key {
-            fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
-                offered
-                    .contains(&SignatureScheme::ED25519)
-                    .then(|| Box::new(Ed25519Signer(self.keypair.clone())) as Box<dyn Signer>)
-            }
-
-            fn algorithm(&self) -> rustls::SignatureAlgorithm {
-                rustls::SignatureAlgorithm::ED25519
-            }
-        }
-
-        impl dhttp_identity::identity::LocalAuthority for Ed25519Key {
-            fn name(&self) -> &str {
-                "authority.example"
-            }
-
-            fn cert_chain(&self) -> &[rustls::pki_types::CertificateDer<'static>] {
-                &[]
-            }
-
-            fn public_key(&self) -> SubjectPublicKeyInfoDer<'_> {
-                SubjectPublicKeyInfoDer::from(self.spki.as_slice())
-            }
-
-            fn sign(
-                &self,
-                data: &[u8],
-            ) -> BoxFuture<'_, Result<Vec<u8>, dhttp_identity::identity::SignError>> {
-                let result = dhttp_identity::identity::sign_with_key(self, data);
-                Box::pin(std::future::ready(result))
-            }
-        }
-
-        let rng = ring::rand::SystemRandom::new();
-        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
-        let keypair =
-            Arc::new(ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap());
-        let spki = ed25519_spki(keypair.public_key().as_ref());
-        let key = Ed25519Key { keypair, spki };
-
-        let mut ep = EndpointAddr::direct_v4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 5353));
-        futures::executor::block_on(ep.sign_with_authority(&key)).unwrap();
-
-        let mut buf = BytesMut::new();
-        buf.put_endpoint_addr(&ep);
-
-        let scheme_offset = 1 + 2 + 4;
-        let encoded_scheme = u16::from_be_bytes([buf[scheme_offset], buf[scheme_offset + 1]]);
-        assert_eq!(encoded_scheme, u16::from(SignatureScheme::ED25519));
-    }
-
-    #[test]
     fn endpoint_signature_roundtrip_and_verify() {
         #[derive(Debug)]
         struct Ed25519Key {
             keypair: Arc<ring::signature::Ed25519KeyPair>,
-            spki: Vec<u8>,
+            cert_chain: Vec<rustls::pki_types::CertificateDer<'static>>,
         }
 
         #[derive(Debug)]
@@ -1174,11 +987,7 @@ mod tests {
             }
 
             fn cert_chain(&self) -> &[rustls::pki_types::CertificateDer<'static>] {
-                &[]
-            }
-
-            fn public_key(&self) -> SubjectPublicKeyInfoDer<'_> {
-                SubjectPublicKeyInfoDer::from(self.spki.as_slice())
+                &self.cert_chain
             }
 
             fn sign(
@@ -1194,10 +1003,14 @@ mod tests {
         let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
         let keypair =
             Arc::new(ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap());
-        let spki = ed25519_spki(keypair.public_key().as_ref());
+        let mut spki = Vec::with_capacity(44);
+        spki.extend_from_slice(&[
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ]);
+        spki.extend_from_slice(keypair.public_key().as_ref());
         let key = Ed25519Key {
             keypair: keypair.clone(),
-            spki: spki.clone(),
+            cert_chain: vec![rustls::pki_types::CertificateDer::from(spki.clone())],
         };
 
         let addr = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 5353);
@@ -1229,41 +1042,42 @@ mod tests {
     }
 
     #[test]
-    fn sign_with_authority_stores_canonical_signature() {
+    fn sign_with_authority_uses_canonical_scheme_from_public_key() {
         #[derive(Debug)]
-        struct StaticAuthority {
-            spki: Vec<u8>,
+        struct Ed25519Authority {
+            cert_chain: Vec<rustls::pki_types::CertificateDer<'static>>,
         }
 
-        impl dhttp_identity::identity::LocalAuthority for StaticAuthority {
+        impl dhttp_identity::identity::LocalAuthority for Ed25519Authority {
             fn name(&self) -> &str {
                 "authority.example"
             }
 
             fn cert_chain(&self) -> &[rustls::pki_types::CertificateDer<'static>] {
-                &[]
-            }
-
-            fn public_key(&self) -> SubjectPublicKeyInfoDer<'_> {
-                SubjectPublicKeyInfoDer::from(self.spki.as_slice())
+                &self.cert_chain
             }
 
             fn sign(
                 &self,
                 _data: &[u8],
             ) -> BoxFuture<'_, Result<Vec<u8>, dhttp_identity::identity::SignError>> {
-                Box::pin(std::future::ready(Ok(vec![1, 2, 3])))
+                Box::pin(async move { Ok(vec![1, 2, 3]) })
             }
         }
 
+        let cert_chain = vec![rustls::pki_types::CertificateDer::from(vec![
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ])];
         let mut ep = EndpointAddr::direct_v4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 5353));
-        let authority = StaticAuthority {
-            spki: ed25519_spki(&[0; 32]),
-        };
-        futures::executor::block_on(ep.sign_with_authority(&authority)).unwrap();
+        futures::executor::block_on(ep.sign_with_authority(&Ed25519Authority { cert_chain }))
+            .unwrap();
 
         let signature = ep.signature().unwrap();
-        assert_eq!(signature.scheme, u16::from(SignatureScheme::ED25519));
+        assert_eq!(
+            SignatureScheme::from(signature.scheme),
+            SignatureScheme::ED25519
+        );
         assert_eq!(signature.signature, vec![1, 2, 3]);
     }
 

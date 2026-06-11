@@ -5,4 +5,5 @@ build
 .DS_Store
 .vscode/
 /geoip
-/docs
+/docs/superpowers
+/certs

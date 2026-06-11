@@ -62,6 +62,7 @@ repeated count times:
 The example prints each DNS packet, the publisher certificate fingerprint when a
 certificate is present, and endpoint signature verification status for signed
 `E` records.
+
 After the server starts, it listens for HTTP/3 requests and handles publish and query operations.
 If the configured server certificate includes its issuer chain, the process also
 fetches and refreshes its own stapled OCSP response from cert-server's public
@@ -112,3 +113,4 @@ cargo run --bin ddns-server --features server -- --config server.toml
 
 `server.toml` documents the available fields: listener, TLS identity, client root
 CA, optional Redis storage, TTL, domain policies, and static seed records.
+

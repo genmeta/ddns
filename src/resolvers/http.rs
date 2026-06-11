@@ -9,7 +9,11 @@ use futures::{StreamExt, TryFutureExt, stream};
 use reqwest::{Client, IntoUrl, StatusCode, Url};
 use tokio::time::Instant;
 
-use crate::core::parser::packet::be_packet;
+use crate::core::{
+    parser::packet::be_packet,
+    signature::{CONTENT_DIGEST_HEADER, SIGNATURE_HEADER, SIGNATURE_INPUT_HEADER, SignatureFields},
+    wire::be_multi_response,
+};
 
 #[derive(Debug)]
 struct Record {
@@ -51,6 +55,49 @@ impl HttpResolver {
             base_url,
             cached_records: DashMap::new(),
         })
+    }
+
+    pub async fn publish_signed(
+        &self,
+        name: &str,
+        packet: &[u8],
+        signature_fields: &SignatureFields,
+    ) -> io::Result<()> {
+        self.publish_packet_with_signature(name, packet, signature_fields)
+            .await
+            .map_err(io::Error::other)
+    }
+
+    async fn publish_packet_with_signature(
+        &self,
+        name: &str,
+        packet: &[u8],
+        signature_fields: &SignatureFields,
+    ) -> Result<(), Error> {
+        let mut url = self.base_url.join("publish").expect("Invalid base URL");
+        url.set_query(Some(&format!("host={name}")));
+        let mut request = self
+            .http_client
+            .post(url)
+            .header("Content-Type", "application/octet-stream");
+        if !signature_fields.is_empty() {
+            request = request
+                .header(
+                    CONTENT_DIGEST_HEADER,
+                    signature_fields.content_digest.as_slice(),
+                )
+                .header(
+                    SIGNATURE_INPUT_HEADER,
+                    signature_fields.signature_input.as_slice(),
+                )
+                .header(SIGNATURE_HEADER, signature_fields.signature.as_slice());
+        }
+        request
+            .body(packet.to_vec())
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
     }
 }
 
@@ -96,6 +143,9 @@ enum Error {
     ParseRecords {
         source: nom::Err<nom::error::Error<Vec<u8>>>,
     },
+
+    #[snafu(display("failed to decode multi-record response"))]
+    ParseMultiResponse,
 }
 
 impl From<reqwest::Error> for Error {
@@ -113,19 +163,9 @@ impl From<reqwest::Error> for Error {
 impl Publish for HttpResolver {
     fn publish<'a>(&'a self, name: &'a str, packet: &'a [u8]) -> PublishFuture<'a> {
         Box::pin(async move {
-            let mut url = self.base_url.join("publish").expect("Invalid base URL");
-            url.set_query(Some(&format!("host={name}")));
-            let response = self
-                .http_client
-                .post(url)
-                .header("Content-Type", "application/octet-stream")
-                .body(packet.to_vec())
-                .send()
+            self.publish_packet_with_signature(name, packet, &SignatureFields::empty())
                 .await
-                .map_err(io::Error::other)?;
-
-            let _response = response.error_for_status().map_err(io::Error::other)?;
-            Ok(())
+                .map_err(io::Error::other)
         })
     }
 }
@@ -160,22 +200,56 @@ impl Resolve for HttpResolver {
                 .await;
 
             let response = response?.error_for_status()?.bytes().await?;
+            let (remain, multi) =
+                be_multi_response(response.as_ref()).map_err(|_| Error::ParseMultiResponse)?;
+            if !remain.is_empty() {
+                return Err(Error::ParseMultiResponse);
+            }
 
-            let (_remain, packet) = be_packet(&response).map_err(|source| Error::ParseRecords {
-                source: source.to_owned(),
-            })?;
-
-            let endpoints = packet
-                .answers
-                .iter()
-                .filter_map(|answer| match answer.data() {
-                    record::RData::E(ep) => Some(ep.clone()),
-                    _ => {
-                        tracing::debug!(?answer, "ignored record");
-                        None
+            let mut addrs = Vec::new();
+            for r in multi.records {
+                if !r.signature_fields.is_empty() {
+                    match r.signature_fields.verify(&r.dns, &r.cert) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            tracing::debug!("ignored record with invalid DNS packet signature");
+                            continue;
+                        }
+                        Err(error) => {
+                            tracing::debug!(error = %snafu::Report::from_error(&error), "ignored record with malformed DNS packet signature");
+                            continue;
+                        }
                     }
-                });
-            let addrs = crate::resolvers::selector::selected_endpoint_addrs(endpoints);
+                }
+                let (_remain, packet) = be_packet(&r.dns).map_err(|source| Error::ParseRecords {
+                    source: source.to_owned(),
+                })?;
+
+                addrs.extend(
+                    packet
+                        .answers
+                        .iter()
+                        .filter_map(|answer| match answer.data() {
+                            record::RData::E(ep) => {
+                                if answer.name() != domain {
+                                    tracing::debug!(
+                                        answer_name = %answer.name(),
+                                        query = domain,
+                                        "ignored endpoint answer for different name"
+                                    );
+                                    return None;
+                                }
+                                let endpoint =
+                                    TryInto::<EndpointAddr>::try_into(ep.clone()).ok()?;
+                                Some(endpoint)
+                            }
+                            _ => {
+                                tracing::debug!(?answer, "ignored record");
+                                None
+                            }
+                        }),
+                );
+            }
             if addrs.is_empty() {
                 return Err(Error::NoRecordFound);
             }
