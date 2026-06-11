@@ -136,6 +136,3 @@ required-features = ["h3x-resolver"]
 
 [patch.crates-io]
 proc-macro-error2 = { path = "patches/proc-macro-error2" }
-
-[patch."https://github.com/genmeta/h3x.git"]
-h3x = { path = "../h3x-endpoint-local" }

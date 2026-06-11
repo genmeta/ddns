@@ -11,15 +11,10 @@ use std::{
 use ddns::core::{
     MdnsPacket,
     parser::{packet::be_packet, record::RData},
-    wire::MultiResponse,
+    wire::{MultiResponse, ResponseRecord},
 };
 use deadpool_redis::redis::{self, AsyncCommands};
-<<<<<<< HEAD
-use h3x::{connection::ConnectionState, quic};
-use h3x::dhttp::message::MessageStreamError;
-=======
-use h3x::{connection::ConnectionState, message::stream::MessageStreamError, quic};
->>>>>>> 13e6482 (feat: add GeoIP support for geo-routing)
+use h3x::{connection::ConnectionState, dhttp::message::MessageStreamError, quic};
 use http_body_util::{Full, combinators::UnsyncBoxBody};
 use tracing::debug;
 
@@ -27,8 +22,9 @@ use crate::{
     error::{AppError, normalize_host, parse_query_params},
     geo::{GeoResolver, GeoTraits},
     storage::{
-        AppState, LookupRecord, Storage, StoredRecord, redis_all_index_key, redis_asn_index_key,
-        redis_country_index_key, redis_primary_key, unix_now_secs,
+        AppState, LookupRecord, MemoryStorage, SeedRecords, Storage, StoredRecord,
+        redis_all_index_key, redis_asn_index_key, redis_blacklist_key, redis_country_index_key,
+        redis_primary_key, unix_now_secs,
     },
 };
 
@@ -68,9 +64,14 @@ fn normalize_lookup_records(records: Vec<LookupRecord>) -> Vec<LookupRecord> {
     let mut normalized = Vec::new();
     let mut seen = HashSet::new();
 
-    for (dns_bytes, cert_bytes) in records {
-        let Ok((_, packet)) = be_packet(&dns_bytes) else {
-            normalized.push((dns_bytes, cert_bytes));
+    for record in records {
+        if !record.signature_fields.is_empty() {
+            normalized.push(record);
+            continue;
+        }
+
+        let Ok((_, packet)) = be_packet(&record.dns) else {
+            normalized.push(record);
             continue;
         };
 
@@ -90,11 +91,14 @@ fn normalize_lookup_records(records: Vec<LookupRecord>) -> Vec<LookupRecord> {
 
             let mut hosts = HashMap::new();
             hosts.insert(answer.name().to_string(), vec![endpoint.clone()]);
-            normalized.push((MdnsPacket::answer(0, &hosts).to_bytes(), cert_bytes.clone()));
+            normalized.push(ResponseRecord::unsigned(
+                MdnsPacket::answer(0, &hosts).to_bytes(),
+                record.cert.clone(),
+            ));
         }
 
         if !emitted_endpoint {
-            normalized.push((dns_bytes, cert_bytes));
+            normalized.push(record);
         }
     }
 
@@ -120,7 +124,7 @@ fn sort_lookup_records(records: Vec<LookupRecord>, source_ip: Option<IpAddr>) ->
         .into_iter()
         .enumerate()
         .map(|(index, record)| {
-            let sort_key = lookup_endpoint(&record.0).map(|(endpoint, load)| {
+            let sort_key = lookup_endpoint(&record.dns).map(|(endpoint, load)| {
                 let family_match = source_ip
                     .map(|source| source.is_ipv4() == endpoint.ip().is_ipv4())
                     .unwrap_or(false);
@@ -280,7 +284,7 @@ fn sort_lookup_records_with_geo(
         .into_iter()
         .enumerate()
         .map(|(index, record)| {
-            let sort_key = lookup_endpoint_geo_traits(&record.0, geo).map(
+            let sort_key = lookup_endpoint_geo_traits(&record.dns, geo).map(
                 |(endpoint, load, endpoint_traits)| {
                     build_geo_sort_key(
                         source_ip,
@@ -353,6 +357,12 @@ async fn perform_lookup_multi(
             let mut conn = pool.get().await.map_err(|e| AppError::Redis {
                 message: e.to_string(),
             })?;
+
+            if redis_host_blacklisted(&mut *conn, host).await? {
+                debug!(host = %host, "lookup.blacklisted");
+                return Ok(LookupResult::NotFound);
+            }
+
             let now_secs = unix_now_secs();
             let cutoff_score = now_secs.saturating_sub(state.ttl_secs) as f64;
             let mut candidate_fingerprints = Vec::new();
@@ -461,13 +471,22 @@ async fn perform_lookup_multi(
                     continue;
                 };
                 if record.expire_unix_secs > now_secs {
-                    records.push((record.dns, record.cert));
+                    records.push(ResponseRecord::new(
+                        record.signature_fields,
+                        record.dns,
+                        record.cert,
+                    ));
                 }
             }
 
             records
         }
         Storage::Memory(mem) => {
+            if mem.is_blacklisted(host) {
+                debug!(host = %host, "lookup.blacklisted");
+                return Ok(LookupResult::NotFound);
+            }
+
             let now = tokio::time::Instant::now();
             if let Some(mut entry) = mem.records.get_mut(host) {
                 entry.retain_active(now);
@@ -485,10 +504,13 @@ async fn perform_lookup_multi(
                 candidate_fingerprints
                     .into_iter()
                     .filter_map(|fingerprint| {
-                        entry
-                            .records
-                            .get(&fingerprint)
-                            .map(|record| (record.dns_bytes.clone(), record.cert_bytes.clone()))
+                        entry.records.get(&fingerprint).map(|record| {
+                            ResponseRecord::new(
+                                record.signature_fields.clone(),
+                                record.dns_bytes.clone(),
+                                record.cert_bytes.clone(),
+                            )
+                        })
                     })
                     .collect::<Vec<_>>()
             } else {
@@ -526,6 +548,17 @@ async fn perform_lookup_multi(
     } else {
         Ok(LookupResult::Multi(MultiResponse::new(records)))
     }
+}
+
+async fn redis_host_blacklisted<C>(conn: &mut C, host: &str) -> Result<bool, AppError>
+where
+    C: redis::aio::ConnectionLike + Send + Sync,
+{
+    conn.sismember(redis_blacklist_key(), host)
+        .await
+        .map_err(|e| AppError::Redis {
+            message: e.to_string(),
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -620,7 +653,7 @@ mod tests {
         path::PathBuf,
     };
 
-    use ddns::core::MdnsEndpoint;
+    use ddns::core::{MdnsEndpoint, signature::SignatureFields};
 
     use super::*;
     use crate::geo::{GeoPoint, GeoResolver};
@@ -643,7 +676,101 @@ mod tests {
         let mut hosts = HashMap::new();
         hosts.insert(host.to_string(), vec![endpoint]);
 
-        (MdnsPacket::answer(0, &hosts).to_bytes(), Vec::new())
+        ResponseRecord::unsigned(MdnsPacket::answer(0, &hosts).to_bytes(), Vec::new())
+    }
+
+    struct FakeRedis {
+        response: redis::Value,
+        packed_commands: Vec<Vec<u8>>,
+    }
+
+    impl redis::aio::ConnectionLike for FakeRedis {
+        fn req_packed_command<'a>(
+            &'a mut self,
+            cmd: &'a redis::Cmd,
+        ) -> redis::RedisFuture<'a, redis::Value> {
+            self.packed_commands.push(cmd.get_packed_command());
+            let response = self.response.clone();
+            Box::pin(async move { Ok(response) })
+        }
+
+        fn req_packed_commands<'a>(
+            &'a mut self,
+            _cmd: &'a redis::Pipeline,
+            _offset: usize,
+            _count: usize,
+        ) -> redis::RedisFuture<'a, Vec<redis::Value>> {
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+
+        fn get_db(&self) -> i64 {
+            0
+        }
+    }
+
+    #[tokio::test]
+    async fn redis_host_blacklisted_queries_external_blacklist_set() {
+        let mut redis = FakeRedis {
+            response: redis::Value::Int(1),
+            packed_commands: Vec::new(),
+        };
+
+        let blacklisted = redis_host_blacklisted(&mut redis, "blocked.example.genmeta.net")
+            .await
+            .unwrap();
+
+        assert!(blacklisted);
+        assert_eq!(redis.packed_commands.len(), 1);
+        let command = String::from_utf8(redis.packed_commands.remove(0)).unwrap();
+        assert!(command.contains("SISMEMBER"));
+        assert!(command.contains(redis_blacklist_key()));
+        assert!(command.contains("blocked.example.genmeta.net"));
+    }
+
+    #[tokio::test]
+    async fn memory_blacklist_returns_not_found_before_seed_records() {
+        let host = "blocked.example.genmeta.net";
+        let mut seed_records = HashMap::new();
+        seed_records.insert(
+            host.to_string(),
+            vec![lookup_record(
+                host,
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(8, 8, 8, 8), 3478)),
+                None,
+            )],
+        );
+        let state = AppState {
+            storage: Storage::Memory(MemoryStorage::with_blacklist([host.to_string()])),
+            require_signature: false,
+            ttl_secs: 30,
+            policies: Arc::new(crate::policy::DomainPolicies::default()),
+            seed_records: SeedRecords::new(seed_records),
+            geo: None,
+        };
+
+        let result = perform_lookup(&state, host, None, None).await.unwrap();
+
+        assert!(matches!(result, LookupResult::NotFound));
+    }
+
+    #[test]
+    fn normalize_lookup_records_keeps_signed_packets_whole() {
+        let mut record = lookup_record(
+            "stun.example.com",
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(8, 8, 8, 8), 3478)),
+            None,
+        );
+        record.signature_fields = SignatureFields {
+            content_digest: b"sha-256=:abc:".to_vec(),
+            signature_input:
+                b"dns=(\"content-digest\");created=1;keyid=\"sha256:abc\";alg=\"ed25519\"".to_vec(),
+            signature: b"dns=:sig:".to_vec(),
+        };
+
+        let normalized = normalize_lookup_records(vec![record.clone()]);
+
+        assert_eq!(normalized.len(), 1);
+        assert_eq!(normalized[0], record);
     }
 
     #[test]
@@ -745,7 +872,7 @@ mod tests {
         let sorted =
             sort_lookup_records_with_geo(vec![non_matching, matching.clone()], source_ip, &geo);
 
-        let (endpoint, _) = lookup_endpoint(&sorted[0].0).expect("sorted record should decode");
+        let (endpoint, _) = lookup_endpoint(&sorted[0].dns).expect("sorted record should decode");
         assert_eq!(endpoint.ip(), IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
     }
 
@@ -768,7 +895,7 @@ mod tests {
             source_ip,
         );
 
-        let (endpoint, _) = lookup_endpoint(&sorted[0].0).expect("sorted record should decode");
+        let (endpoint, _) = lookup_endpoint(&sorted[0].dns).expect("sorted record should decode");
         assert_eq!(endpoint.ip(), IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
     }
 
@@ -806,7 +933,7 @@ mod tests {
         let ordered_ips = sorted
             .iter()
             .map(|record| {
-                lookup_endpoint(&record.0)
+                lookup_endpoint(&record.dns)
                     .expect("record should decode")
                     .0
                     .ip()
@@ -845,7 +972,7 @@ mod tests {
             &geo,
         );
 
-        let (endpoint, _) = lookup_endpoint(&sorted[0].0).expect("sorted record should decode");
+        let (endpoint, _) = lookup_endpoint(&sorted[0].dns).expect("sorted record should decode");
         assert_eq!(endpoint.ip(), IpAddr::V4(Ipv4Addr::new(223, 5, 5, 5)));
     }
 

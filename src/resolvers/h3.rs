@@ -7,14 +7,22 @@ use dquic::{
 };
 use futures::{StreamExt, stream};
 use h3x::{
-    dquic::ConnectError, endpoint::H3Endpoint, hyper::RequestError as HyperRequestError, quic,
+    dhttp::message::{MessageStreamError, hyper::client::RequestError as HyperRequestError},
+    dquic::ConnectError,
+    endpoint::H3Endpoint,
+    quic,
 };
 use http_body_util::{BodyExt, Empty, Full};
 use tokio::time::Instant;
 use tracing::trace;
 use url::Url;
 
-use crate::core::{MdnsPacket, parser::packet::be_packet, wire::be_multi_response};
+use crate::core::{
+    MdnsPacket,
+    parser::packet::be_packet,
+    signature::{CONTENT_DIGEST_HEADER, SIGNATURE_HEADER, SIGNATURE_INPUT_HEADER, SignatureFields},
+    wire::be_multi_response,
+};
 
 const LOOKUP_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 const LOOKUP_REQUEST_ATTEMPTS: usize = 3;
@@ -49,9 +57,7 @@ impl<C: quic::Connect> fmt::Display for H3Resolver<C> {
 #[derive(Debug, snafu::Snafu)]
 pub enum Error<E: std::error::Error + Send + Sync + 'static = ConnectError> {
     #[snafu(display("h3 stream error"))]
-    H3Stream {
-        source: h3x::dhttp::message::MessageStreamError,
-    },
+    H3Stream { source: MessageStreamError },
     #[snafu(display("failed to connect h3 endpoint"))]
     Connect { source: h3x::pool::ConnectError<E> },
     #[snafu(display("h3 request error"))]
@@ -127,12 +133,7 @@ where
         request: http::Request<
             impl http_body::Body<Data = bytes::Bytes, Error = Infallible> + Send + 'static,
         >,
-    ) -> Result<
-        http::Response<
-            impl http_body::Body<Data = bytes::Bytes, Error = h3x::dhttp::message::MessageStreamError>,
-        >,
-        Error<C::Error>,
-    > {
+    ) -> Result<http::Response<impl http_body::Body<Data = bytes::Bytes, Error = MessageStreamError>>, Error<C::Error>> {
         let authority = request
             .uri()
             .authority()
@@ -189,6 +190,27 @@ where
 
     /// Publish a pre-built DNS packet (with signatures already included).
     pub async fn publish_packet(&self, name: &str, packet: &[u8]) -> Result<(), Error<C::Error>> {
+        self.publish_packet_with_signature(name, packet, &SignatureFields::empty())
+            .await
+    }
+
+    pub async fn publish_signed(
+        &self,
+        name: &str,
+        packet: &[u8],
+        signature_fields: &SignatureFields,
+    ) -> io::Result<()> {
+        self.publish_packet_with_signature(name, packet, signature_fields)
+            .await
+            .map_err(io::Error::other)
+    }
+
+    async fn publish_packet_with_signature(
+        &self,
+        name: &str,
+        packet: &[u8],
+        signature_fields: &SignatureFields,
+    ) -> Result<(), Error<C::Error>> {
         let mut url = self.base_url.join("publish").expect("Invalid base URL");
         url.set_query(Some(&format!("host={name}")));
         let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
@@ -198,7 +220,20 @@ where
             url = %self.base_url,
             "h3x publishing packet"
         );
-        let request = http::Request::post(uri)
+        let mut request = http::Request::post(uri);
+        if !signature_fields.is_empty() {
+            request = request
+                .header(
+                    CONTENT_DIGEST_HEADER,
+                    signature_fields.content_digest.as_slice(),
+                )
+                .header(
+                    SIGNATURE_INPUT_HEADER,
+                    signature_fields.signature_input.as_slice(),
+                )
+                .header(SIGNATURE_HEADER, signature_fields.signature.as_slice());
+        }
+        let request = request
             .body(Full::new(bytes::Bytes::copy_from_slice(packet)))
             .expect("h3 dns publish request must be valid");
         let resp = self.execute_request(request).await?;
@@ -322,28 +357,57 @@ where
         };
 
         // Server always returns multi-record format.
-        let (_remain, multi) =
+        let (remain, multi) =
             be_multi_response(response.as_ref()).map_err(|_| Error::ParseMultiResponse)?;
-
-        let mut endpoint_records = Vec::new();
-        for r in multi.records {
-            let (_remain, packet) = be_packet(&r.dns).map_err(|source| Error::ParseRecords {
-                source: source.to_owned(),
-            })?;
-
-            endpoint_records.extend(packet.answers.iter().filter_map(
-                |answer| match answer.data() {
-                    record::RData::E(ep) => Some(ep.clone()),
-                    _ => {
-                        tracing::debug!(?answer, "ignored record");
-                        None
-                    }
-                },
-            ));
+        if !remain.is_empty() {
+            return Err(Error::ParseMultiResponse);
         }
-        let addrs = crate::resolvers::selector::selected_endpoint_addrs(endpoint_records);
-        for endpoint in &addrs {
-            trace!(?endpoint, "parsed endpoint from selected record group");
+
+            let mut addrs = Vec::new();
+            for r in multi.records {
+                if !r.signature_fields.is_empty() {
+                    match r.signature_fields.verify(&r.dns, &r.cert) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::debug!("ignored record with invalid DNS packet signature");
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::debug!(error = %snafu::Report::from_error(&error), "ignored record with malformed DNS packet signature");
+                        continue;
+                    }
+                }
+            }
+
+                let (_remain, packet) = be_packet(&r.dns).map_err(|source| Error::ParseRecords {
+                    source: source.to_owned(),
+                })?;
+
+                addrs.extend(
+                    packet
+                        .answers
+                    .iter()
+                    .filter_map(|answer| match answer.data() {
+                        record::RData::E(ep) => {
+                            if answer.name() != domain {
+                                tracing::debug!(
+                                    answer_name = %answer.name(),
+                                    query = domain,
+                                    "ignored endpoint answer for different name"
+                                );
+                                return None;
+                            }
+                            let endpoint = TryInto::<EndpointAddr>::try_into(ep.clone()).ok()?;
+                            trace!(?endpoint, "parsed endpoint from record");
+                            Some(endpoint)
+                        }
+                        _ => {
+                            tracing::debug!(?answer, "ignored record");
+                            None
+                        }
+                        }),
+                );
+            }
         }
 
         if addrs.is_empty() {
@@ -433,7 +497,7 @@ mod tests {
         assert_eq!(
             source,
             Source::H3 {
-                server: Arc::from(DHTTP_H3_DNS_SERVER)
+                server: Arc::from(resolver.base_url.origin().ascii_serialization())
             }
         );
         assert_eq!(

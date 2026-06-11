@@ -5,8 +5,12 @@ use std::{
 };
 
 use bytes::BufMut;
-use dashmap::DashMap;
-use ddns::core::parser::{packet::be_packet, record::RData};
+use dashmap::{DashMap, DashSet};
+use ddns::core::{
+    parser::{packet::be_packet, record::RData},
+    signature::SignatureFields,
+    wire::ResponseRecord,
+};
 use deadpool_redis::Pool;
 use nom::{
     IResult,
@@ -59,6 +63,10 @@ pub fn redis_asn_index_key(host: &str, asn: u32) -> String {
     format!("{host}:idx:asn:{asn}")
 }
 
+pub fn redis_blacklist_key() -> &'static str {
+    "ddns:blacklist"
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RecordIndexTags {
     pub countries: Vec<String>,
@@ -108,10 +116,10 @@ pub fn record_index_tags(dns_bytes: &[u8], geo: Option<&GeoResolver>) -> RecordI
 ///
 /// Wire layout (big-endian, contiguous):
 /// ```text
-/// +-----------+--------------+-----------+------+-----------+------+
-/// | expire    | fingerprint  | dns_len   | dns  | cert_len  | cert |
-/// | u64 BE    | 32 bytes     | u32 BE    | ...  | u32 BE    | ...  |
-/// +-----------+--------------+-----------+------+-----------+------+
+/// +-----------+--------------+---------------+--------+-----------+------+-----------+------+-----------+------+-----------+------+
+/// | expire    | fingerprint  | digest_len    | digest | input_len | input| sig_len   | sig  | dns_len   | dns  | cert_len  | cert |
+/// | u64 BE    | 32 bytes     | u32 BE        | ...    | u32 BE    | ...  | u32 BE    | ...  | u32 BE    | ...  | u32 BE    | ...  |
+/// +-----------+--------------+---------------+--------+-----------+------+-----------+------+-----------+------+-----------+------+
 /// ```
 #[derive(Debug, Clone)]
 pub struct StoredRecord {
@@ -126,24 +134,41 @@ pub struct StoredRecord {
     pub dns: Vec<u8>,
     /// DER-encoded leaf certificate of the publisher.
     pub cert: Vec<u8>,
+    /// Saved RFC-style publisher signature fields for the DNS packet.
+    pub signature_fields: SignatureFields,
 }
 
 impl StoredRecord {
     /// Encode to a byte buffer suitable for use as a Redis primary record value.
     pub fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(8 + 32 + 4 + self.dns.len() + 4 + self.cert.len());
+        let mut buf = Vec::with_capacity(
+            8 + 32
+                + 4
+                + self.signature_fields.content_digest.len()
+                + 4
+                + self.signature_fields.signature_input.len()
+                + 4
+                + self.signature_fields.signature.len()
+                + 4
+                + self.dns.len()
+                + 4
+                + self.cert.len(),
+        );
         buf.put_u64(self.expire_unix_secs);
         buf.put_slice(&self.fingerprint);
-        buf.put_u32(self.dns.len() as u32);
-        buf.put_slice(&self.dns);
-        buf.put_u32(self.cert.len() as u32);
-        buf.put_slice(&self.cert);
+        put_field(&mut buf, &self.signature_fields.content_digest);
+        put_field(&mut buf, &self.signature_fields.signature_input);
+        put_field(&mut buf, &self.signature_fields.signature);
+        put_field(&mut buf, &self.dns);
+        put_field(&mut buf, &self.cert);
         buf
     }
 
     /// Decode from a Redis primary record value. Returns `None` on malformed input.
     pub fn decode(data: &[u8]) -> Option<Self> {
-        be_stored_record(data).ok().map(|(_, r)| r)
+        be_stored_record(data)
+            .ok()
+            .and_then(|(remain, r)| remain.is_empty().then_some(r))
     }
 }
 
@@ -151,19 +176,36 @@ impl StoredRecord {
 pub fn be_stored_record(input: &[u8]) -> IResult<&[u8], StoredRecord> {
     let (input, expire_unix_secs) = be_u64(input)?;
     let (input, fp_bytes) = take(32usize)(input)?;
-    let (input, dns_len) = be_u32(input)?;
-    let (input, dns) = take(dns_len as usize)(input)?;
-    let (input, cert_len) = be_u32(input)?;
-    let (input, cert) = take(cert_len as usize)(input)?;
+    let (input, content_digest) = be_field(input)?;
+    let (input, signature_input) = be_field(input)?;
+    let (input, signature) = be_field(input)?;
+    let (input, dns) = be_field(input)?;
+    let (input, cert) = be_field(input)?;
     Ok((
         input,
         StoredRecord {
             expire_unix_secs,
             fingerprint: fp_bytes.try_into().expect("took exactly 32 bytes"),
-            dns: dns.to_vec(),
-            cert: cert.to_vec(),
+            dns,
+            cert,
+            signature_fields: SignatureFields {
+                content_digest,
+                signature_input,
+                signature,
+            },
         },
     ))
+}
+
+fn put_field(buf: &mut Vec<u8>, value: &[u8]) {
+    buf.put_u32(value.len() as u32);
+    buf.put_slice(value);
+}
+
+fn be_field(input: &[u8]) -> IResult<&[u8], Vec<u8>> {
+    let (input, len) = be_u32(input)?;
+    let (input, value) = take(len as usize)(input)?;
+    Ok((input, value.to_vec()))
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +217,7 @@ pub fn be_stored_record(input: &[u8]) -> IResult<&[u8], StoredRecord> {
 pub struct Record {
     pub dns_bytes: Vec<u8>,
     pub cert_bytes: Vec<u8>,
+    pub signature_fields: SignatureFields,
     /// Wall-clock expiry (for TTL eviction).
     pub expire: Instant,
     /// Precomputed country / ASN buckets used by the Lite indexes.
@@ -322,13 +365,35 @@ impl HostRecords {
 #[derive(Clone)]
 pub struct MemoryStorage {
     pub records: Arc<DashMap<String, HostRecords>>,
+    pub blacklist: Arc<DashSet<String>>,
 }
 
 impl MemoryStorage {
     pub fn new() -> Self {
         Self {
             records: Arc::new(DashMap::new()),
+            blacklist: Arc::new(DashSet::new()),
         }
+    }
+
+    pub fn with_blacklist(hosts: impl IntoIterator<Item = String>) -> Self {
+        let storage = Self::new();
+        for host in hosts {
+            storage.blacklist_host(host);
+        }
+        storage
+    }
+
+    pub fn blacklist_host(&self, host: impl Into<String>) {
+        self.blacklist.insert(host.into());
+    }
+
+    pub fn remove_blacklist_host(&self, host: &str) {
+        self.blacklist.remove(host);
+    }
+
+    pub fn is_blacklisted(&self, host: &str) -> bool {
+        self.blacklist.contains(host)
     }
 }
 
@@ -338,7 +403,7 @@ pub enum Storage {
     Memory(MemoryStorage),
 }
 
-pub type LookupRecord = (Vec<u8>, Vec<u8>);
+pub type LookupRecord = ResponseRecord;
 pub type SeedRecords = Arc<HashMap<String, Vec<LookupRecord>>>;
 
 // ---------------------------------------------------------------------------
@@ -367,6 +432,7 @@ mod tests {
         Record {
             dns_bytes: Vec::new(),
             cert_bytes: Vec::new(),
+            signature_fields: SignatureFields::empty(),
             expire: Instant::now() + tokio::time::Duration::from_secs(60),
             index_tags: RecordIndexTags {
                 countries: country.into_iter().map(str::to_owned).collect(),
@@ -399,5 +465,49 @@ mod tests {
         assert!(host.by_country.is_empty());
         assert!(host.by_asn.is_empty());
         assert!(host.records.is_empty());
+    }
+
+    #[test]
+    fn stored_record_roundtrips_signature_fields() {
+        let record = StoredRecord {
+            expire_unix_secs: 123,
+            fingerprint: fp(7),
+            dns: vec![1, 2, 3],
+            cert: vec![4, 5, 6],
+            signature_fields: SignatureFields {
+                content_digest: b"sha-256=:abc:".to_vec(),
+                signature_input:
+                    b"dns=(\"content-digest\");created=1;keyid=\"sha256:abc\";alg=\"ed25519\""
+                        .to_vec(),
+                signature: b"dns=:sig:".to_vec(),
+            },
+        };
+
+        let decoded = StoredRecord::decode(&record.encode()).expect("stored record decodes");
+
+        assert_eq!(decoded.expire_unix_secs, record.expire_unix_secs);
+        assert_eq!(decoded.fingerprint, record.fingerprint);
+        assert_eq!(decoded.dns, record.dns);
+        assert_eq!(decoded.cert, record.cert);
+        assert_eq!(decoded.signature_fields, record.signature_fields);
+    }
+
+    #[test]
+    fn redis_blacklist_key_is_stable() {
+        assert_eq!(redis_blacklist_key(), "ddns:blacklist");
+    }
+
+    #[test]
+    fn memory_storage_tracks_blacklisted_hosts() {
+        let storage = MemoryStorage::with_blacklist(["blocked.example".to_string()]);
+
+        assert!(storage.is_blacklisted("blocked.example"));
+        assert!(!storage.is_blacklisted("allowed.example"));
+
+        storage.blacklist_host("other.example");
+        assert!(storage.is_blacklisted("other.example"));
+
+        storage.remove_blacklist_host("blocked.example");
+        assert!(!storage.is_blacklisted("blocked.example"));
     }
 }

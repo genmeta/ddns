@@ -7,7 +7,7 @@ use std::{
 
 use clap::Parser;
 use ddns::{
-    core::parser::record::endpoint::EndpointAddr,
+    core::{parser::record::endpoint::EndpointAddr, signature::SignatureFields},
     resolvers::{DHTTP_H3_DNS_SERVER, h3::H3Publisher},
 };
 use h3x::dquic::{
@@ -42,7 +42,7 @@ struct Options {
     #[arg(long)]
     client_key: PathBuf,
 
-    /// Sign Endpoint records using the client private key.
+    /// Sign DNS packets using HTTP signature fields and the client private key.
     ///
     /// This must correspond to the client certificate presented in mTLS, because the server
     /// verifies the signature with the peer certificate's SPKI.
@@ -56,6 +56,12 @@ struct Options {
     /// 要发布的地址列表。
     #[arg(long, value_delimiter = ',', num_args = 1..)]
     addr: Vec<SocketAddr>,
+
+    #[arg(long, default_value_t = true)]
+    is_main: bool,
+
+    #[arg(long, default_value_t = 1)]
+    sequence: u64,
 }
 
 fn default_h3_base_url() -> String {
@@ -136,38 +142,38 @@ async fn main() -> io::Result<()> {
 
     info!(host = %opt.host, addrs = ?opt.addr, base_url = %opt.base_url, "publish.start");
     if opt.sign {
-        info!("publish.endpoint_signing.enabled");
+        info!("publish.packet_signing.enabled");
     } else {
-        info!("publish.endpoint_signing.disabled");
+        info!("publish.packet_signing.disabled");
     }
-    let selector = identity
-        .dhttp_subject_key_identifier()
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let chain = selector.chain();
 
     for &addr in &opt.addr {
-        info!("creating endpoint for address: {}", addr);
+        info!("Creating endpoint for address: {}", addr);
         let mut endpoint = match addr {
             SocketAddr::V4(v4) => EndpointAddr::direct_v4(v4),
             SocketAddr::V6(v6) => EndpointAddr::direct_v6(v6),
         };
-        endpoint.set_certificate_chain_key(chain);
-        if opt.sign {
-            info!("signing endpoint");
-            endpoint
-                .sign_with_authority(identity.as_ref())
-                .await
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        }
-        info!("publishing endpoint: {:?}", endpoint);
+        endpoint.set_main(opt.is_main);
+        endpoint.set_sequence(opt.sequence);
+        info!("Publishing endpoint: {:?}", endpoint);
         let mut hosts = std::collections::HashMap::new();
         hosts.insert(opt.host.clone(), vec![endpoint]);
         let packet = ddns::core::MdnsPacket::answer(0, &hosts).to_bytes();
-        resolver
-            .publish(&opt.host, &packet)
-            .await
-            .map_err(io::Error::other)?;
-        info!("successfully published endpoint for {}", addr);
+        if opt.sign {
+            info!("signing dns packet");
+            let signature_fields = SignatureFields::sign(&packet, identity.as_ref())
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            resolver
+                .publish_signed(&opt.host, &packet, &signature_fields)
+                .await?;
+        } else {
+            resolver
+                .publish(&opt.host, &packet)
+                .await
+                .map_err(io::Error::other)?;
+        }
+        info!("Successfully published endpoint for {}", addr);
     }
     info!("publish.ok");
 

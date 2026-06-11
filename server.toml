@@ -24,7 +24,11 @@ root_cert = "~/Downloads/ssl/root.crt"
 # refreshed 5 minutes early).
 # ocsp_responder_base_url = "https://license.genmeta.net"
 
-# Whether to require a valid DNS record signature on Standard domains.
+# Whether to require RFC 9421/9530-style packet signatures on Standard domains.
+# Signed publish requests keep the DNS packet as the HTTP body and provide:
+#   Content-Digest: sha-256=:...:
+#   Signature-Input: dns=("content-digest");created=...;keyid="sha256:<leaf-fp>";alg="..."
+#   Signature: dns=:...:
 require_signature = true
 
 # Default TTL (seconds) for published records.
@@ -33,6 +37,16 @@ ttl_secs = 30
 # Redis URL for persistent storage.
 # If omitted, records are kept in memory only (lost on restart).
 # redis = "redis://127.0.0.1/"
+#
+# When Redis storage is enabled, lookups check the external blacklist set
+# "ddns:blacklist". Without Redis, this file can preload an in-memory blacklist.
+# Members are normalized lowercase ASCII host names. Blacklisted lookups return
+# 404; publish/clear requests are not blocked.
+#
+#   redis-cli SADD ddns:blacklist blocked.example.genmeta.net
+#   redis-cli SREM ddns:blacklist blocked.example.genmeta.net
+#
+# blacklist = ["blocked.example.genmeta.net"]
 
 # Enable GEO-aware scheduling based on country / ASN.
 # When both databases are configured, city-distance tie-breaking is also enabled

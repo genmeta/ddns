@@ -74,7 +74,7 @@ fn format_packet(packet: &MdnsPacket) -> String {
                 RData::E(ep) => {
                     output.push_str(&format!("Name:   {}\nAddress: {}\n", rr.name(), ep));
                     if ep.is_signed() {
-                        output.push_str("Signature: present\n");
+                        output.push_str("Legacy E signature: present\n");
                     }
                 }
                 _ => {
@@ -145,12 +145,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if resp.status().is_success() {
         let bytes = resp.into_body().collect().await?.to_bytes();
 
-        let (_remain, multi) = be_multi_response(bytes.as_ref()).map_err(|e| {
+        let (remain, multi) = be_multi_response(bytes.as_ref()).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Invalid multi-record payload: {e}"),
             )
         })?;
+        if !remain.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Invalid multi-record payload: {} trailing bytes",
+                    remain.len()
+                ),
+            )
+            .into());
+        }
 
         info!(count = multi.records.len(), "lookup.ok");
         println!("Lookup Result: {} record(s)", multi.records.len());
@@ -163,27 +173,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => println!("Source fingerprint: (no certificate)"),
             }
 
+            if record.signature_fields.is_empty() {
+                println!("Packet signature: none");
+            } else if record.cert.is_empty() {
+                println!("Packet signature: present but no certificate to verify against");
+            } else {
+                match record.signature_fields.verify(&record.dns, &record.cert) {
+                    Ok(true) => println!("Packet signature: ✓ verified"),
+                    Ok(false) => println!("Packet signature: ✗ invalid"),
+                    Err(e) => println!("Packet signature: ✗ error ({e:?})"),
+                }
+            }
+
             match ddns::core::parser::packet::be_packet(&record.dns) {
                 Ok((_, packet)) => {
                     print!("{}", format_packet(&packet));
-
-                    for rr in &packet.answers {
-                        if let RData::E(ep) = rr.data() {
-                            if !ep.is_signed() {
-                                println!("Signature: none");
-                                continue;
-                            }
-                            if record.cert.is_empty() {
-                                println!("Signature: present but no certificate to verify against");
-                                continue;
-                            }
-                            match ep.verify_signature_from_der(&record.cert) {
-                                Ok(true) => println!("Signature: ✓ verified"),
-                                Ok(false) => println!("Signature: ✗ invalid"),
-                                Err(e) => println!("Signature: ✗ error ({e:?})"),
-                            }
-                        }
-                    }
                 }
                 Err(_) => {
                     println!("DNS payload: invalid ({} bytes)", record.dns.len());

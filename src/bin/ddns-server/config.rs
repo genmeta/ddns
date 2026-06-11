@@ -74,6 +74,10 @@ pub struct Config {
     #[serde(default)]
     pub domain_policies: Vec<PolicyConfig>,
 
+    /// In-memory blacklist loaded at startup when Redis storage is not configured.
+    #[serde(default)]
+    pub blacklist: Vec<String>,
+
     /// Static seed records returned on lookup in addition to dynamic published records.
     #[serde(default)]
     pub seed_records: Vec<SeedRecordConfig>,

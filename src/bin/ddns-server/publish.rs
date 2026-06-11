@@ -1,5 +1,8 @@
 use std::{collections::HashSet, convert::Infallible, sync::Arc};
 
+use ddns::core::signature::{
+    CONTENT_DIGEST_HEADER, SIGNATURE_HEADER, SIGNATURE_INPUT_HEADER, SignatureFields,
+};
 use deadpool_redis::redis::{self, AsyncCommands};
 use dhttp_identity::identity::RemoteAuthority;
 use h3x::{connection::ConnectionState, quic};
@@ -91,6 +94,8 @@ async fn publish_with_cert(state: AppState, request: Request) -> Response {
         }
     }
 
+    let signature_fields = signature_fields_from_headers(request.headers());
+
     let body = match request.into_body().collect().await {
         Ok(body) => body.to_bytes(),
         Err(e) => {
@@ -109,7 +114,13 @@ async fn publish_with_cert(state: AppState, request: Request) -> Response {
         require_signature = require_sig,
         "validating publish packet"
     );
-    let packet = match validate_dns_packet(body.as_ref(), require_sig, authority.as_ref()) {
+    let packet = match validate_dns_packet(
+        body.as_ref(),
+        require_sig,
+        authority.as_ref(),
+        &signature_fields,
+        &host,
+    ) {
         Ok(n) => n,
         Err(e) => {
             debug!(host = %host, error = %e, "publish packet rejected");
@@ -128,9 +139,24 @@ async fn publish_with_cert(state: AppState, request: Request) -> Response {
                 return write_error(AppError::HostMismatch);
             }
 
-            publish_record(&state, &host, &body, authority.as_ref()).await
+            publish_record(&state, &host, &body, authority.as_ref(), signature_fields).await
         }
         ValidatedDnsPacket::Empty => clear_record(&state, &host, authority.as_ref()).await,
+    }
+}
+
+fn signature_fields_from_headers(headers: &http::HeaderMap) -> SignatureFields {
+    let header = |name: &'static str| {
+        headers
+            .get(name)
+            .map(|value| value.as_bytes().to_vec())
+            .unwrap_or_default()
+    };
+
+    SignatureFields {
+        content_digest: header(CONTENT_DIGEST_HEADER),
+        signature_input: header(SIGNATURE_INPUT_HEADER),
+        signature: header(SIGNATURE_HEADER),
     }
 }
 
@@ -157,6 +183,7 @@ pub async fn publish_record(
     host: &str,
     body: &bytes::Bytes,
     authority: &(impl RemoteAuthority + ?Sized),
+    signature_fields: SignatureFields,
 ) -> Response {
     let cert_bytes = authority
         .cert_chain()
@@ -210,6 +237,7 @@ pub async fn publish_record(
                 fingerprint: fp,
                 dns: body.to_vec(),
                 cert: cert_bytes.clone(),
+                signature_fields: signature_fields.clone(),
             }
             .encode();
 
@@ -275,6 +303,7 @@ pub async fn publish_record(
             let record = Record {
                 dns_bytes: body.to_vec(),
                 cert_bytes,
+                signature_fields,
                 expire,
                 index_tags: record_index_tags(body.as_ref(), state.geo.as_deref()),
             };
@@ -428,15 +457,27 @@ mod tests {
         let packet_b = packet_for(host, 2);
 
         assert_eq!(
-            publish_record(&state, host, &packet_a, &authority_a)
-                .await
-                .status(),
+            publish_record(
+                &state,
+                host,
+                &packet_a,
+                &authority_a,
+                SignatureFields::empty()
+            )
+            .await
+            .status(),
             http::StatusCode::OK
         );
         assert_eq!(
-            publish_record(&state, host, &packet_b, &authority_b)
-                .await
-                .status(),
+            publish_record(
+                &state,
+                host,
+                &packet_b,
+                &authority_b,
+                SignatureFields::empty()
+            )
+            .await
+            .status(),
             http::StatusCode::OK
         );
 
