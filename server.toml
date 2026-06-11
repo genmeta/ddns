@@ -14,6 +14,9 @@ key = "~/Downloads/ssl/dns.genmeta.net/dns.genmeta.net.key"
 # Root CA that signed the client certificates (PEM format).
 root_cert = "~/Downloads/ssl/root.crt"
 
+# Allowed host suffixes. Values are normalized and suffix-matched.
+# host_allowlist = ["genmeta.net"]
+
 # Optional issuer certificate used to build OCSP requests when `cert` only
 # contains the leaf certificate. If `cert` already contains the full chain,
 # this can be omitted.
@@ -24,8 +27,10 @@ root_cert = "~/Downloads/ssl/root.crt"
 # refreshed 5 minutes early).
 # ocsp_responder_base_url = "https://license.genmeta.net"
 
-# Whether to require RFC 9421/9530-style packet signatures on Standard domains.
-# Signed publish requests keep the DNS packet as the HTTP body and provide:
+# Whether to require RFC 9530/9421-style packet signatures on Standard domains.
+# RFC 9530 defines `Content-Digest`; RFC 9421 defines `Signature-Input` and
+# `Signature`. Signed publish requests keep the DNS packet as the HTTP body and
+# provide:
 #   Content-Digest: sha-256=:...:
 #   Signature-Input: dns=("content-digest");created=...;keyid="sha256:<leaf-fp>";alg="..."
 #   Signature: dns=:...:
@@ -34,9 +39,13 @@ require_signature = true
 # Default TTL (seconds) for published records.
 ttl_secs = 30
 
-# Redis URL for persistent storage.
+# Redis primary URL for persistent storage.
 # If omitted, records are kept in memory only (lost on restart).
-# redis = "redis://127.0.0.1/"
+# redis_write_url = "redis://primary.example:6379/0"
+#
+# Optional Redis read URL for lookup traffic. Defaults to the write URL when
+# omitted, but on AWS this is usually a regional replica / reader endpoint.
+# redis_read_url = "redis://replica.example:6379/0"
 #
 # When Redis storage is enabled, lookups check the external blacklist set
 # "ddns:blacklist". Without Redis, this file can preload an in-memory blacklist.

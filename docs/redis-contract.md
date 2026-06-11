@@ -33,7 +33,7 @@
 
 Redis 里的 host 名必须先做规范化。代码实现见
 [`src/bin/ddns-server/error.rs`](/Users/lixiaofeng/code/gmdns/src/bin/ddns-server/error.rs) 的
-`normalize_host()`。
+`normalize_host(host, allowlist)`。
 
 规则如下：
 
@@ -44,13 +44,16 @@ Redis 里的 host 名必须先做规范化。代码实现见
 5. 去掉结尾的一个 `.`
 6. 用 IDNA 转成 ASCII
 7. 转成小写
-8. 最终结果必须以 `genmeta.net` 结尾
+8. 最终结果必须匹配配置里的 `host_allowlist` 后缀之一
 
 例子：
 
 - `DNS.Genmeta.Net.` -> `dns.genmeta.net`
 - `dns.genmeta.net:4433` -> `dns.genmeta.net`
 - `blocked.example.genmeta.net` -> `blocked.example.genmeta.net`
+
+`host_allowlist` 默认包含 `genmeta.net`，所以现有 `genmeta.net`
+子域名仍然可用。
 
 这条规则对所有 Redis key 都重要，尤其是黑名单成员必须写规范化之后的 host。
 
@@ -332,6 +335,8 @@ ZREMRANGEBYSCORE <index-key> -inf <now_secs - ttl_secs>
 
 1. 查询时真正可信的数据源始终是主记录 `String`，索引只是候选入口
 2. 节点会大约每 30 秒重新上报一次，同一条记录会被持续刷新
+3. lookup 只读 Redis，不再执行 `ZREMRANGEBYSCORE`；过期索引清理留在
+   publish / clear 路径，或者由 primary 侧后台 sweeper 完成
 
 这意味着：
 

@@ -75,10 +75,11 @@ pub fn extract_client_dns_sans(authority: &(impl RemoteAuthority + ?Sized)) -> V
 
 pub fn client_allowed_host(
     authority: &(impl RemoteAuthority + ?Sized),
+    allowlist: &[String],
 ) -> Result<String, AppError> {
     let mut sans = extract_client_dns_sans(authority)
         .into_iter()
-        .filter_map(|h| normalize_host(&h).ok())
+        .filter_map(|h| normalize_host(&h, allowlist).ok())
         .collect::<Vec<_>>();
 
     sans.sort();
@@ -95,6 +96,7 @@ pub fn validate_dns_packet(
     require_signature: bool,
     authority: &(impl RemoteAuthority + ?Sized),
     signature_fields: &SignatureFields,
+    allowlist: &[String],
     expected_host: &str,
 ) -> Result<ValidatedDnsPacket, AppError> {
     let (remaining, dns_packet) = be_packet(packet).map_err(|e| AppError::InvalidDnsPacket {
@@ -140,7 +142,7 @@ pub fn validate_dns_packet(
     };
 
     for answer in &dns_packet.answers {
-        let answer_host = normalize_host(&answer.name())?;
+        let answer_host = normalize_host(&answer.name(), allowlist)?;
         if answer_host != expected_host {
             return Err(AppError::HostMismatch);
         }
@@ -150,3 +152,53 @@ pub fn validate_dns_packet(
         host: first_answer.name().to_string(),
     })
 }
+<<<<<<< HEAD
+=======
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use ddns::core::{MdnsPacket, parser::record::endpoint::EndpointAddr};
+    use dhttp_identity::identity::RemoteAuthority;
+    use rustls::pki_types::CertificateDer;
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct TestAuthority;
+
+    fn allowlist() -> Vec<String> {
+        vec!["genmeta.net".to_string()]
+    }
+
+    impl RemoteAuthority for TestAuthority {
+        fn name(&self) -> &str {
+            "authority.example"
+        }
+
+        fn cert_chain(&self) -> &[CertificateDer<'static>] {
+            &[]
+        }
+    }
+
+    #[test]
+    fn validate_dns_packet_accepts_empty_packet_as_clear_operation() {
+        let hosts: HashMap<String, Vec<EndpointAddr>> =
+            HashMap::from([("reimu.pilot.genmeta.net".to_owned(), Vec::new())]);
+        let packet = MdnsPacket::answer(0, &hosts).to_bytes();
+
+        let validated = validate_dns_packet(
+            &packet,
+            false,
+            &TestAuthority,
+            &SignatureFields::empty(),
+            &allowlist(),
+            "reimu.pilot.genmeta.net",
+        )
+        .unwrap();
+
+        assert!(matches!(validated, ValidatedDnsPacket::Empty));
+    }
+}
+>>>>>>> 01498cb (Add AWS deployment and Redis read-write separation)

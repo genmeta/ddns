@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 
-use dhttp_identity::name::DhttpName;
-
 #[derive(Debug, snafu::Snafu)]
 #[snafu(module, visibility(pub(crate)))]
 pub enum AppError {
@@ -63,7 +61,29 @@ impl AppError {
     }
 }
 
-pub fn normalize_host(host: &str) -> Result<String, AppError> {
+pub fn normalize_host_allowlist(entries: &[String]) -> Result<Vec<String>, AppError> {
+    let mut allowlist = entries
+        .iter()
+        .map(|entry| normalize_host_raw(entry))
+        .collect::<Result<Vec<_>, _>>()?;
+    allowlist.sort();
+    allowlist.dedup();
+    Ok(allowlist)
+}
+
+pub fn normalize_host(host: &str, allowlist: &[String]) -> Result<String, AppError> {
+    let host = normalize_host_raw(host)?;
+    if allowlist
+        .iter()
+        .any(|suffix| host_matches_suffix(&host, suffix))
+    {
+        Ok(host)
+    } else {
+        Err(AppError::DomainNotAllowed)
+    }
+}
+
+pub fn normalize_host_raw(host: &str) -> Result<String, AppError> {
     let host = host.trim();
     if host.is_empty() {
         return Err(AppError::InvalidHost);
@@ -72,24 +92,14 @@ pub fn normalize_host(host: &str) -> Result<String, AppError> {
         return Err(AppError::ForbiddenHost);
     }
 
-    // 剥离端口号（如 "example.com:443" -> "example.com"）
     let host = match host.rsplit_once(':') {
         Some((h, port)) if port.chars().all(|c| c.is_ascii_digit()) => h,
         _ => host,
     };
-
-    // 允许末尾 '.'（FQDN 写法）
     let host = host.strip_suffix('.').unwrap_or(host);
 
     let host = idna::domain_to_ascii(host).map_err(|_| AppError::InvalidHost)?;
-    let host = host.to_ascii_lowercase();
-
-    // 校验是否为 DHTTP identity 域名
-    if !host.ends_with(DhttpName::SUFFIX) {
-        return Err(AppError::DomainNotAllowed);
-    }
-
-    Ok(host)
+    Ok(host.to_ascii_lowercase())
 }
 
 pub fn parse_query_params(uri: &http::Uri) -> HashMap<String, String> {
@@ -99,19 +109,28 @@ pub fn parse_query_params(uri: &http::Uri) -> HashMap<String, String> {
         .collect()
 }
 
+fn host_matches_suffix(host: &str, suffix: &str) -> bool {
+    host == suffix
+        || host
+            .strip_suffix(suffix)
+            .is_some_and(|prefix| prefix.ends_with('.'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn normalize_host_uses_dhttp_identity_suffix() {
-        assert_eq!(
-            normalize_host("Reimu.Pilot.Dhttp.Net:443").unwrap(),
-            "reimu.pilot.dhttp.net"
-        );
-        assert!(matches!(
-            normalize_host("reimu.pilot.genmeta.net"),
-            Err(AppError::DomainNotAllowed)
-        ));
+    fn normalize_host_accepts_allowed_suffixes() {
+        let allowlist = vec!["genmeta.net".to_string()];
+        let host = normalize_host("DNS.Genmeta.Net.", &allowlist).unwrap();
+        assert_eq!(host, "dns.genmeta.net");
+    }
+
+    #[test]
+    fn normalize_host_rejects_non_boundary_suffixes() {
+        let allowlist = vec!["genmeta.net".to_string()];
+        let err = normalize_host("evilgenmeta.net", &allowlist).unwrap_err();
+        assert!(matches!(err, AppError::DomainNotAllowed));
     }
 }

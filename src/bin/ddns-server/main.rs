@@ -38,7 +38,7 @@ use crate::{
     lookup::LookupSvc,
     policy::{DomainPolicies, DomainPolicy, PolicyRule},
     publish::PublishSvc,
-    storage::{AppState, MemoryStorage, SeedRecords, Storage},
+    storage::{AppState, MemoryStorage, RedisStorage, SeedRecords, Storage},
 };
 
 #[derive(Clone)]
@@ -99,7 +99,10 @@ fn load_root_store_from_pem(pem: &[u8]) -> io::Result<RootCertStore> {
     Ok(store)
 }
 
-fn build_seed_records(seed_records: &[SeedRecordConfig]) -> io::Result<SeedRecords> {
+fn build_seed_records(
+    seed_records: &[SeedRecordConfig],
+    allowlist: &[String],
+) -> io::Result<SeedRecords> {
     let mut records = HashMap::new();
 
     for seed_record in seed_records {
@@ -107,7 +110,7 @@ fn build_seed_records(seed_records: &[SeedRecordConfig]) -> io::Result<SeedRecor
             continue;
         }
 
-        let host = error::normalize_host(&seed_record.host)
+        let host = error::normalize_host(&seed_record.host, allowlist)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
         let endpoints = seed_record
@@ -216,32 +219,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     });
     let config = config.expand_paths();
-    let seed_records = build_seed_records(&config.seed_records)?;
+    let host_allowlist = Arc::new(error::normalize_host_allowlist(&config.host_allowlist)?);
+    if host_allowlist.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "host_allowlist must not be empty",
+        )
+        .into());
+    }
+    let seed_records = build_seed_records(&config.seed_records, host_allowlist.as_ref())?;
     let geo = build_geo_resolver(&config)?;
     let memory_blacklist = config
         .blacklist
         .iter()
-        .filter_map(|host| match error::normalize_host(host) {
-            Ok(host) => Some(host),
-            Err(error) => {
-                warn!(host, error = %error, "blacklist.invalid_host_ignored");
-                None
-            }
-        })
+        .filter_map(
+            |host| match error::normalize_host(host, host_allowlist.as_ref()) {
+                Ok(host) => Some(host),
+                Err(error) => {
+                    warn!(host, error = %error, "blacklist.invalid_host_ignored");
+                    None
+                }
+            },
+        )
         .collect::<Vec<_>>();
 
     // Build storage backend.
-    let storage = match config.redis.clone() {
-        Some(url) => {
+    let storage = match config.redis_write_url.clone() {
+        Some(write_url) => {
             if !memory_blacklist.is_empty() {
                 warn!(
                     count = memory_blacklist.len(),
                     "blacklist.config_ignored_when_redis_enabled"
                 );
             }
-            let redis_cfg = deadpool_redis::Config::from_url(url);
-            let redis_pool = redis_cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))?;
-            Storage::Redis(redis_pool)
+            let write_cfg = deadpool_redis::Config::from_url(write_url.clone());
+            let write_pool = write_cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))?;
+            let read_pool = match config.redis_read_url.clone() {
+                Some(read_url) if read_url != write_url => {
+                    deadpool_redis::Config::from_url(read_url)
+                        .create_pool(Some(deadpool_redis::Runtime::Tokio1))?
+                }
+                _ => write_pool.clone(),
+            };
+            Storage::Redis(RedisStorage {
+                write: write_pool,
+                read: read_pool,
+            })
+        }
+        None if config.redis_read_url.is_some() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "redis_read_url requires redis_write_url (or legacy redis)",
+            )
+            .into());
         }
         None => Storage::Memory(MemoryStorage::with_blacklist(memory_blacklist)),
     };
@@ -250,15 +280,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut policy_rules: Vec<(PolicyRule, DomainPolicy)> = config
         .domain_policies
         .iter()
-        .filter_map(|pc| {
-            error::normalize_host(&pc.host).ok().map(|h| {
-                let policy = match pc.policy {
-                    PolicyKind::Standard => DomainPolicy::Standard,
-                    PolicyKind::OpenMulti => DomainPolicy::OpenMulti,
-                };
-                (PolicyRule::Exact(h), policy)
-            })
-        })
+        .filter_map(
+            |pc| match error::normalize_host(&pc.host, host_allowlist.as_ref()) {
+                Ok(h) => {
+                    let policy = match pc.policy {
+                        PolicyKind::Standard => DomainPolicy::Standard,
+                        PolicyKind::OpenMulti => DomainPolicy::OpenMulti,
+                    };
+                    Some((PolicyRule::Exact(h), policy))
+                }
+                Err(error) => {
+                    warn!(host = %pc.host, error = %error, "domain_policy.invalid_host_ignored");
+                    None
+                }
+            },
+        )
         .collect();
     // Deduplicate (preserve first occurrence).
     policy_rules.dedup_by(|(ra, _), (rb, _)| {
@@ -277,6 +313,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = AppState {
         storage,
+        host_allowlist,
         require_signature: config.require_signature,
         ttl_secs: config.ttl_secs,
         policies,
@@ -349,7 +386,9 @@ mod tests {
 
     fn test_config() -> Config {
         Config {
-            redis: None,
+            redis_write_url: None,
+            redis_read_url: None,
+            host_allowlist: Config::default_host_allowlist(),
             listen: Config::default_listen(),
             server_name: Config::default_server_name(),
             cert: Config::default_cert(),

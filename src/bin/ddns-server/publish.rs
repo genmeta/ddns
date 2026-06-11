@@ -51,7 +51,7 @@ async fn publish_with_cert(state: AppState, request: Request) -> Response {
         return write_error(AppError::MissingHostParam);
     };
 
-    let host = match normalize_host(host) {
+    let host = match normalize_host(host, state.host_allowlist.as_ref()) {
         Ok(h) => h,
         Err(e) => return write_error(e),
     };
@@ -81,7 +81,7 @@ async fn publish_with_cert(state: AppState, request: Request) -> Response {
     // Standard policy: cert SAN must match the target host.
     // OpenMulti policy: any authenticated node may publish — skip SAN check.
     if policy == DomainPolicy::Standard {
-        let allowed = match client_allowed_host(authority.as_ref()) {
+        let allowed = match client_allowed_host(authority.as_ref(), state.host_allowlist.as_ref()) {
             Ok(h) => h,
             Err(e) => {
                 warn!(error = %snafu::Report::from_error(&e), "client certificate domain not allowed");
@@ -119,6 +119,7 @@ async fn publish_with_cert(state: AppState, request: Request) -> Response {
         require_sig,
         authority.as_ref(),
         &signature_fields,
+        state.host_allowlist.as_ref(),
         &host,
     ) {
         Ok(n) => n,
@@ -130,7 +131,7 @@ async fn publish_with_cert(state: AppState, request: Request) -> Response {
 
     match packet {
         ValidatedDnsPacket::Records { host: packet_name } => {
-            let packet_host = match normalize_host(&packet_name) {
+            let packet_host = match normalize_host(&packet_name, state.host_allowlist.as_ref()) {
                 Ok(h) => h,
                 Err(e) => return write_error(e),
             };
@@ -167,6 +168,26 @@ fn request_connection(request: &Request) -> Option<Arc<ConnectionState<dyn quic:
         .cloned()
 }
 
+async fn trim_expired_index_keys<C>(
+    conn: &mut C,
+    keys: impl IntoIterator<Item = String>,
+    cutoff: f64,
+    expire_ttl_secs: i64,
+) where
+    C: redis::aio::ConnectionLike + Send + Sync,
+{
+    for key in keys {
+        let _: bool = conn.expire(&key, expire_ttl_secs).await.unwrap_or(false);
+        let _: () = redis::cmd("ZREMRANGEBYSCORE")
+            .arg(&key)
+            .arg("-inf")
+            .arg(cutoff)
+            .query_async::<()>(&mut *conn)
+            .await
+            .unwrap_or(());
+    }
+}
+
 /// Unified publish handler: stores the record keyed by (host, cert-fingerprint).
 /// Both Standard and OpenMulti policies follow the same storage path;
 /// the only policy difference (SAN check) is already enforced in the caller.
@@ -195,8 +216,8 @@ pub async fn publish_record(
     let fp_hex = cert_fingerprint_hex(&cert_bytes);
 
     match &state.storage {
-        Storage::Redis(pool) => {
-            let mut conn = match pool.get().await {
+        Storage::Redis(redis) => {
+            let mut conn = match redis.write.get().await {
                 Ok(c) => c,
                 Err(e) => {
                     return write_error(AppError::Redis {
@@ -286,16 +307,7 @@ pub async fn publish_record(
             }
 
             let cutoff = now_secs.saturating_sub(state.ttl_secs) as f64;
-            for key in touched_index_keys {
-                let _: bool = conn.expire(&key, expire_ttl_secs).await.unwrap_or(false);
-                let _: () = redis::cmd("ZREMRANGEBYSCORE")
-                    .arg(&key)
-                    .arg("-inf")
-                    .arg(cutoff)
-                    .query_async::<()>(&mut *conn)
-                    .await
-                    .unwrap_or(());
-            }
+            trim_expired_index_keys(&mut *conn, touched_index_keys, cutoff, expire_ttl_secs).await;
         }
         Storage::Memory(mem) => {
             let now = Instant::now();
@@ -332,8 +344,8 @@ pub async fn clear_record(
     let fp_hex = cert_fingerprint_hex(&cert_bytes);
 
     match &state.storage {
-        Storage::Redis(pool) => {
-            let mut conn = match pool.get().await {
+        Storage::Redis(redis) => {
+            let mut conn = match redis.write.get().await {
                 Ok(c) => c,
                 Err(e) => {
                     return write_error(AppError::Redis {
@@ -344,6 +356,7 @@ pub async fn clear_record(
 
             let fp_key = redis_primary_key(host, &fp_hex);
             let all_index_key = redis_all_index_key(host);
+            let mut touched_index_keys = HashSet::from([all_index_key.clone()]);
 
             let old_member: Option<Vec<u8>> = conn.get(&fp_key).await.unwrap_or(None);
             if let Some(old_record) = old_member.as_deref().and_then(StoredRecord::decode) {
@@ -351,10 +364,12 @@ pub async fn clear_record(
                 let _: () = conn.zrem(&all_index_key, &fp_hex).await.unwrap_or(());
                 for country in &old_tags.countries {
                     let key = redis_country_index_key(host, country);
+                    touched_index_keys.insert(key.clone());
                     let _: () = conn.zrem(&key, &fp_hex).await.unwrap_or(());
                 }
                 for asn in &old_tags.asns {
                     let key = redis_asn_index_key(host, *asn);
+                    touched_index_keys.insert(key.clone());
                     let _: () = conn.zrem(&key, &fp_hex).await.unwrap_or(());
                 }
             }
@@ -364,6 +379,10 @@ pub async fn clear_record(
                     message: e.to_string(),
                 });
             }
+
+            let cutoff = unix_now_secs().saturating_sub(state.ttl_secs) as f64;
+            let expire_ttl_secs = i64::try_from(state.ttl_secs).unwrap_or(i64::MAX);
+            trim_expired_index_keys(&mut *conn, touched_index_keys, cutoff, expire_ttl_secs).await;
         }
         Storage::Memory(mem) => {
             let remove_host = if let Some(mut host_map) = mem.records.get_mut(host) {
@@ -429,6 +448,7 @@ mod tests {
     fn memory_state() -> AppState {
         AppState {
             storage: Storage::Memory(MemoryStorage::new()),
+            host_allowlist: Arc::new(vec!["genmeta.net".to_string()]),
             require_signature: true,
             ttl_secs: 30,
             policies: Arc::new(DomainPolicies::default()),
