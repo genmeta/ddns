@@ -325,28 +325,25 @@ where
         let (_remain, multi) =
             be_multi_response(response.as_ref()).map_err(|_| Error::ParseMultiResponse)?;
 
-        let mut addrs = Vec::new();
+        let mut endpoint_records = Vec::new();
         for r in multi.records {
             let (_remain, packet) = be_packet(&r.dns).map_err(|source| Error::ParseRecords {
                 source: source.to_owned(),
             })?;
 
-            addrs.extend(
-                packet
-                    .answers
-                    .iter()
-                    .filter_map(|answer| match answer.data() {
-                        record::RData::E(ep) => {
-                            let endpoint = TryInto::<EndpointAddr>::try_into(ep.clone()).ok()?;
-                            trace!(?endpoint, "parsed endpoint from record");
-                            Some(endpoint)
-                        }
-                        _ => {
-                            tracing::debug!(?answer, "ignored record");
-                            None
-                        }
-                    }),
-            );
+            endpoint_records.extend(packet.answers.iter().filter_map(
+                |answer| match answer.data() {
+                    record::RData::E(ep) => Some(ep.clone()),
+                    _ => {
+                        tracing::debug!(?answer, "ignored record");
+                        None
+                    }
+                },
+            ));
+        }
+        let addrs = crate::resolvers::selector::selected_endpoint_addrs(endpoint_records);
+        for endpoint in &addrs {
+            trace!(?endpoint, "parsed endpoint from selected record group");
         }
 
         if addrs.is_empty() {

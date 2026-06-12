@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use dhttp_identity::name::DhttpName;
 
 #[derive(Debug, snafu::Snafu)]
+#[snafu(module, visibility(pub(crate)))]
 pub enum AppError {
     #[snafu(display("missing host parameter"))]
     MissingHostParam,
@@ -20,6 +21,16 @@ pub enum AppError {
     ClientCertDomainNotAllowed,
     #[snafu(display("invalid DNS packet: {message}"))]
     InvalidDnsPacket { message: String },
+    #[snafu(display("publisher certificate selector is invalid"))]
+    PublisherCertificateSelector {
+        source: dhttp_identity::identity::ExtractDhttpSubjectKeyIdentifierError,
+    },
+    #[snafu(display("endpoint record selector is invalid"))]
+    EndpointRecordSelector {
+        source: ddns::core::parser::record::endpoint::EndpointSelectorError,
+    },
+    #[snafu(display("endpoint record selector does not match publisher certificate selector"))]
+    EndpointSelectorMismatch,
     #[snafu(display("no answers in packet"))]
     NoAnswersInPacket,
     #[snafu(display("signature required"))]
@@ -41,6 +52,9 @@ impl AppError {
             AppError::MissingClientCertificate => http::StatusCode::UNAUTHORIZED,
             AppError::ClientCertDomainNotAllowed => http::StatusCode::FORBIDDEN,
             AppError::InvalidDnsPacket { .. } => http::StatusCode::BAD_REQUEST,
+            AppError::PublisherCertificateSelector { .. } => http::StatusCode::BAD_REQUEST,
+            AppError::EndpointRecordSelector { .. } => http::StatusCode::BAD_REQUEST,
+            AppError::EndpointSelectorMismatch => http::StatusCode::BAD_REQUEST,
             AppError::NoAnswersInPacket => http::StatusCode::UNPROCESSABLE_ENTITY,
             AppError::SignatureRequired => http::StatusCode::BAD_REQUEST,
             AppError::InvalidSignature => http::StatusCode::BAD_REQUEST,

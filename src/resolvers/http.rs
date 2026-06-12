@@ -165,20 +165,17 @@ impl Resolve for HttpResolver {
                 source: source.to_owned(),
             })?;
 
-            let addrs = packet
+            let endpoints = packet
                 .answers
                 .iter()
                 .filter_map(|answer| match answer.data() {
-                    record::RData::E(ep) => {
-                        let endpoint = ep.clone().try_into().ok()?;
-                        Some(endpoint)
-                    }
+                    record::RData::E(ep) => Some(ep.clone()),
                     _ => {
                         tracing::debug!(?answer, "ignored record");
                         None
                     }
-                })
-                .collect::<Vec<_>>();
+                });
+            let addrs = crate::resolvers::selector::selected_endpoint_addrs(endpoints);
             if addrs.is_empty() {
                 return Err(Error::NoRecordFound);
             }

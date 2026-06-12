@@ -48,13 +48,12 @@ pub enum PublishOnceError {
     },
 }
 
-/// Optional metadata applied to endpoint records before signing.
+/// Deprecated compatibility options for the old endpoint publisher API.
+///
+/// `server_id` is ignored. Endpoint record selectors are derived from the
+/// publisher certificate's DHTTP subject key identifier.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PublishOptions {
-    /// Stable server identifier for names served by multiple publishers.
-    ///
-    /// `0` marks the endpoint as the main record. Non-zero values mark the
-    /// record as clustered and encode the identifier as its sequence number.
     pub server_id: Option<u8>,
 }
 
@@ -108,10 +107,6 @@ where
 
     pub fn signer(&self) -> &EndpointRecordSigner<A> {
         &self.signer
-    }
-
-    pub fn options(&self) -> PublishOptions {
-        self.signer.options()
     }
 
     pub fn resolver(&self) -> &Arc<R> {
@@ -186,10 +181,6 @@ where
 
     pub fn publisher(&self) -> &Publisher<A, R> {
         &self.publisher
-    }
-
-    pub fn options(&self) -> PublishOptions {
-        self.publisher.options()
     }
 
     pub fn interval(&self) -> Duration {
@@ -326,18 +317,14 @@ pub type EndpointPublisherLoop = EndpointPublicationLoop<
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fmt,
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
-        time::Duration,
-    };
+    #[cfg(feature = "http-resolver")]
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{fmt, sync::Arc, time::Duration};
 
     use dquic::qresolve::{ResolveFuture, Source};
     use futures::{FutureExt, StreamExt, future::BoxFuture, stream};
     use rustls::pki_types::{CertificateDer, SubjectPublicKeyInfoDer};
+    #[cfg(feature = "http-resolver")]
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
@@ -356,7 +343,13 @@ mod tests {
         }
 
         fn cert_chain(&self) -> &[CertificateDer<'static>] {
-            &[]
+            static CERTS: std::sync::LazyLock<Vec<CertificateDer<'static>>> =
+                std::sync::LazyLock::new(|| {
+                    vec![CertificateDer::from(
+                        include_bytes!("../tests/fixtures/valid.der").to_vec(),
+                    )]
+                });
+            CERTS.as_slice()
         }
 
         fn public_key(&self) -> SubjectPublicKeyInfoDer<'_> {
@@ -442,9 +435,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn signer_applies_publish_options_server_id() {
-        let signer = EndpointRecordSigner::new(Arc::new(TestAuthority))
-            .with_options(PublishOptions { server_id: Some(2) });
+    async fn signer_applies_certificate_selector_from_authority_ski() {
+        let signer = EndpointRecordSigner::new(Arc::new(TestAuthority));
         let name: Name<'static> = "authority.example".parse().unwrap();
 
         let endpoint =
@@ -456,15 +448,18 @@ mod tests {
             panic!("expected endpoint record");
         };
 
-        assert!(!endpoint.is_main());
-        assert!(endpoint.is_clustered());
+        assert!(endpoint.is_main());
+        assert!(!endpoint.is_clustered());
         assert!(endpoint.is_signed());
+        assert_eq!(
+            endpoint.certificate_chain_key().unwrap().sequence().get(),
+            0
+        );
     }
 
     #[tokio::test]
     async fn signer_uses_supplied_record_owner_name() {
-        let signer = EndpointRecordSigner::new(Arc::new(TestAuthority))
-            .with_options(PublishOptions { server_id: Some(2) });
+        let signer = EndpointRecordSigner::new(Arc::new(TestAuthority));
         let name: Name<'static> = "nat.genmeta.net".parse().unwrap();
 
         let endpoint =
@@ -477,8 +472,8 @@ mod tests {
         };
 
         assert_eq!(record.name().to_string(), "nat.genmeta.net");
-        assert!(!endpoint.is_main());
-        assert!(endpoint.is_clustered());
+        assert!(endpoint.is_main());
+        assert!(!endpoint.is_clustered());
         assert!(endpoint.is_signed());
     }
 

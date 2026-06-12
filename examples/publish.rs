@@ -56,12 +56,6 @@ struct Options {
     /// 要发布的地址列表。
     #[arg(long, value_delimiter = ',', num_args = 1..)]
     addr: Vec<SocketAddr>,
-
-    #[arg(long, default_value_t = true)]
-    is_main: bool,
-
-    #[arg(long, default_value_t = 1)]
-    sequence: u64,
 }
 
 fn default_h3_base_url() -> String {
@@ -146,15 +140,18 @@ async fn main() -> io::Result<()> {
     } else {
         info!("publish.endpoint_signing.disabled");
     }
+    let selector = identity
+        .dhttp_subject_key_identifier()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let chain = selector.chain();
 
     for &addr in &opt.addr {
-        info!("Creating endpoint for address: {}", addr);
+        info!("creating endpoint for address: {}", addr);
         let mut endpoint = match addr {
             SocketAddr::V4(v4) => EndpointAddr::direct_v4(v4),
             SocketAddr::V6(v6) => EndpointAddr::direct_v6(v6),
         };
-        endpoint.set_main(opt.is_main);
-        endpoint.set_sequence(opt.sequence);
+        endpoint.set_certificate_chain_key(chain);
         if opt.sign {
             info!("signing endpoint");
             endpoint
@@ -162,7 +159,7 @@ async fn main() -> io::Result<()> {
                 .await
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         }
-        info!("Publishing endpoint: {:?}", endpoint);
+        info!("publishing endpoint: {:?}", endpoint);
         let mut hosts = std::collections::HashMap::new();
         hosts.insert(opt.host.clone(), vec![endpoint]);
         let packet = ddns::core::MdnsPacket::answer(0, &hosts).to_bytes();
@@ -170,7 +167,7 @@ async fn main() -> io::Result<()> {
             .publish(&opt.host, &packet)
             .await
             .map_err(io::Error::other)?;
-        info!("Successfully published endpoint for {}", addr);
+        info!("successfully published endpoint for {}", addr);
     }
     info!("publish.ok");
 
