@@ -48,15 +48,6 @@ pub enum PublishOnceError {
     },
 }
 
-/// Deprecated compatibility options for the old endpoint publisher API.
-///
-/// `server_id` is ignored. Endpoint record selectors are derived from the
-/// publisher certificate's DHTTP subject key identifier.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PublishOptions {
-    pub server_id: Option<u8>,
-}
-
 pub trait PublisherResolver: Send + Sync + 'static {
     fn as_resolver(&self) -> &(dyn Resolve + Send + Sync);
 }
