@@ -90,6 +90,7 @@ impl std::str::FromStr for DnsScheme {
 }
 
 pub mod deferred;
+pub(crate) mod selector;
 pub mod weak;
 
 type ArcResolver = Arc<dyn Resolve + Send + Sync + 'static>;

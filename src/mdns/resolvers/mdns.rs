@@ -5,7 +5,7 @@ use std::{net::SocketAddr, sync::Arc};
 #[cfg(feature = "mdns-resolver")]
 use dquic::qresolve::RecordStream;
 use dquic::{
-    qbase::net::{Family, addr::EndpointAddr as DquicEndpointAddr},
+    qbase::net::Family,
     qresolve::{Publish, PublishFuture, Resolve, ResolveFuture, Source},
 };
 use futures::{FutureExt, StreamExt, TryFutureExt, future, stream};
@@ -53,11 +53,8 @@ impl Resolve for MdnsResolver {
         let source = self.source();
         self.query(name.to_owned())
             .map_ok(move |list| {
-                stream::iter(list.into_iter().filter_map(move |ep| {
-                    let ep = DquicEndpointAddr::try_from(ep).ok()?;
-                    Some((source.clone(), ep))
-                }))
-                .boxed()
+                let endpoints = crate::resolvers::selector::selected_endpoint_addrs(list);
+                stream::iter(endpoints.into_iter().map(move |ep| (source.clone(), ep))).boxed()
             })
             .boxed()
     }
@@ -255,29 +252,46 @@ impl MdnsResolvers {
 
     pub async fn query(&self, name: &str) -> io::Result<RecordStream> {
         let mut lookup_futures = FuturesUnordered::new();
+        let mut has_resolver = false;
         self.for_each_resolver(|resolver| {
+            has_resolver = true;
             let source = resolver.source();
-            lookup_futures.push(resolver.query(name.to_owned()).map_ok(move |eps| {
-                stream::iter(eps.into_iter().filter_map(move |ep| {
-                    let ep = DquicEndpointAddr::try_from(ep).ok()?;
-                    Some((source.clone(), ep))
-                }))
-            }));
+            lookup_futures.push(
+                resolver
+                    .query(name.to_owned())
+                    .map_ok(move |eps| (source, eps)),
+            );
         });
+        if !has_resolver {
+            return Err(io::Error::other("no mdns resolvers available"));
+        }
 
         let mut last_error = None;
-        let no_resolver = || io::Error::other("no mdns resolvers available");
-        let stream = loop {
-            match lookup_futures.next().await {
-                Some(Ok(stream)) => break stream,
-                Some(Err(error)) => last_error = Some(error),
-                None => return Err(last_error.unwrap_or_else(no_resolver)),
+        let mut has_success = false;
+        let mut records = Vec::new();
+        while let Some(result) = lookup_futures.next().await {
+            match result {
+                Ok((source, endpoints)) => {
+                    has_success = true;
+                    records.extend(
+                        endpoints
+                            .into_iter()
+                            .map(|endpoint| (source.clone(), endpoint)),
+                    );
+                }
+                Err(error) => last_error = Some(error),
             }
-        };
+        }
 
-        Ok(stream
-            .chain(lookup_futures.flat_map(stream::iter).flatten())
-            .boxed())
+        if !has_success {
+            return Err(
+                last_error.unwrap_or_else(|| io::Error::other("no mdns resolvers available"))
+            );
+        }
+
+        let records = crate::resolvers::selector::selected_endpoint_records(records);
+
+        Ok(stream::iter(records).boxed())
     }
 
     /// Discover mDNS broadcasts from all active resolvers.

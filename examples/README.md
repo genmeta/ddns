@@ -86,8 +86,10 @@ Options:
 | `--sign <true|false>` | Whether to sign each endpoint `E` record. Defaults to `true`. |
 | `--host <NAME>` | DNS host to publish. Standard-policy servers require this to match the client certificate DNS SAN. |
 | `--addr <ADDR[,ADDR...]>` | One or more socket addresses to publish. |
-| `--is-main <true|false>` | Whether each endpoint is marked as the main address. Defaults to `true`. |
-| `--sequence <N>` | Cluster sequence number encoded in the endpoint record; `0` disables the clustered flag. Defaults to `1`. |
+
+The example derives the endpoint selector from the client certificate SKI before
+signing records. Use the correct certificate chain instead of manual selector
+flags.
 
 The example sends `POST /publish?host=<NAME>` with a binary DNS packet body. For
 Standard policy domains, the server requires a client certificate whose single

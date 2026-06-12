@@ -1,8 +1,9 @@
 use ddns::core::parser::{packet::be_packet, record::RData};
-use dhttp_identity::identity::RemoteAuthority;
+use dhttp_identity::identity::{RemoteAuthority, RemoteAuthorityCertificateExt};
+use snafu::ResultExt;
 use tracing::{debug, warn};
 
-use crate::error::{AppError, normalize_host};
+use crate::error::{AppError, app_error, normalize_host};
 
 // ---------------------------------------------------------------------------
 // Domain policy
@@ -125,6 +126,8 @@ pub fn validate_dns_packet(
         return Ok(ValidatedDnsPacket::Empty);
     };
 
+    validate_endpoint_selectors(&dns_packet, authority)?;
+
     if require_signature {
         let has_signature = dns_packet
             .answers
@@ -158,6 +161,47 @@ pub fn validate_dns_packet(
     })
 }
 
+fn validate_endpoint_selectors(
+    dns_packet: &ddns::core::parser::packet::Packet,
+    authority: &(impl RemoteAuthority + ?Sized),
+) -> Result<(), AppError> {
+    let mut endpoints = dns_packet
+        .answers
+        .iter()
+        .filter_map(|record| match record.data() {
+            RData::E(endpoint) => Some(endpoint),
+            _ => None,
+        });
+
+    let Some(first_endpoint) = endpoints.next() else {
+        return Ok(());
+    };
+
+    let expected = authority
+        .dhttp_subject_key_identifier()
+        .context(app_error::PublisherCertificateSelectorSnafu)?
+        .chain()
+        .clone();
+
+    let first = first_endpoint
+        .certificate_chain_key()
+        .context(app_error::EndpointRecordSelectorSnafu)?;
+    if first != expected {
+        return Err(AppError::EndpointSelectorMismatch);
+    }
+
+    for endpoint in endpoints {
+        let actual = endpoint
+            .certificate_chain_key()
+            .context(app_error::EndpointRecordSelectorSnafu)?;
+        if actual != expected {
+            return Err(AppError::EndpointSelectorMismatch);
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -169,7 +213,35 @@ mod tests {
     use super::*;
 
     #[derive(Debug)]
-    struct TestAuthority;
+    struct TestAuthority {
+        certs: Vec<CertificateDer<'static>>,
+    }
+
+    impl TestAuthority {
+        fn valid() -> Self {
+            Self {
+                certs: vec![CertificateDer::from(
+                    include_bytes!("../../../tests/fixtures/valid.der").to_vec(),
+                )],
+            }
+        }
+
+        fn missing_ski() -> Self {
+            Self {
+                certs: vec![CertificateDer::from(
+                    include_bytes!("../../../tests/fixtures/missing.der").to_vec(),
+                )],
+            }
+        }
+
+        fn malformed_ski() -> Self {
+            Self {
+                certs: vec![CertificateDer::from(
+                    include_bytes!("../../../tests/fixtures/malformed.der").to_vec(),
+                )],
+            }
+        }
+    }
 
     impl RemoteAuthority for TestAuthority {
         fn name(&self) -> &str {
@@ -177,8 +249,79 @@ mod tests {
         }
 
         fn cert_chain(&self) -> &[CertificateDer<'static>] {
-            &[]
+            &self.certs
         }
+    }
+
+    fn packet_with_endpoint(endpoint: EndpointAddr) -> Vec<u8> {
+        let hosts: HashMap<String, Vec<EndpointAddr>> =
+            HashMap::from([("reimu.pilot.dhttp.net".to_owned(), vec![endpoint])]);
+        MdnsPacket::answer(0, &hosts).to_bytes()
+    }
+
+    #[test]
+    fn validate_dns_packet_accepts_matching_certificate_selector() {
+        let mut endpoint = EndpointAddr::direct_v4("192.0.2.10:4433".parse().unwrap());
+        endpoint.set_main(true);
+        endpoint.set_sequence(0);
+        let packet = packet_with_endpoint(endpoint);
+
+        let validated = validate_dns_packet(&packet, false, &TestAuthority::valid()).unwrap();
+
+        assert!(matches!(validated, ValidatedDnsPacket::Records { .. }));
+    }
+
+    #[test]
+    fn validate_dns_packet_rejects_mismatched_endpoint_kind() {
+        let mut endpoint = EndpointAddr::direct_v4("192.0.2.10:4433".parse().unwrap());
+        endpoint.set_main(false);
+        endpoint.set_sequence(0);
+        let packet = packet_with_endpoint(endpoint);
+
+        let error = validate_dns_packet(&packet, false, &TestAuthority::valid()).unwrap_err();
+
+        assert!(matches!(error, AppError::EndpointSelectorMismatch));
+    }
+
+    #[test]
+    fn validate_dns_packet_rejects_mismatched_endpoint_sequence() {
+        let mut endpoint = EndpointAddr::direct_v4("192.0.2.10:4433".parse().unwrap());
+        endpoint.set_main(true);
+        endpoint.set_sequence(7);
+        let packet = packet_with_endpoint(endpoint);
+
+        let error = validate_dns_packet(&packet, false, &TestAuthority::valid()).unwrap_err();
+
+        assert!(matches!(error, AppError::EndpointSelectorMismatch));
+    }
+
+    #[test]
+    fn validate_dns_packet_rejects_missing_publisher_ski() {
+        let mut endpoint = EndpointAddr::direct_v4("192.0.2.10:4433".parse().unwrap());
+        endpoint.set_main(true);
+        let packet = packet_with_endpoint(endpoint);
+
+        let error = validate_dns_packet(&packet, false, &TestAuthority::missing_ski()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            AppError::PublisherCertificateSelector { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_dns_packet_rejects_malformed_publisher_ski() {
+        let mut endpoint = EndpointAddr::direct_v4("192.0.2.10:4433".parse().unwrap());
+        endpoint.set_main(true);
+        let packet = packet_with_endpoint(endpoint);
+
+        let error =
+            validate_dns_packet(&packet, false, &TestAuthority::malformed_ski()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            AppError::PublisherCertificateSelector { .. }
+        ));
     }
 
     #[test]
@@ -187,7 +330,7 @@ mod tests {
             HashMap::from([("reimu.pilot.dhttp.net".to_owned(), Vec::new())]);
         let packet = MdnsPacket::answer(0, &hosts).to_bytes();
 
-        let validated = validate_dns_packet(&packet, true, &TestAuthority).unwrap();
+        let validated = validate_dns_packet(&packet, true, &TestAuthority::valid()).unwrap();
 
         assert!(matches!(validated, ValidatedDnsPacket::Empty));
     }

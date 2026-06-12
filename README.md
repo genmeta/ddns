@@ -189,6 +189,13 @@ Flag bits:
 | `0x08` | `LOAD` | One-minute load value is present. |
 | `0x01` | `SIGNED` | Signature with explicit TLS signature scheme is present. |
 
+For DHTTP endpoint publishing, `MAIN` and `sequence` are derived from the
+publisher certificate's DHTTP subject key identifier. Operators do not choose
+these fields manually: `primary` certificates publish `MAIN = true`,
+`secondary` certificates publish `MAIN = false`, and the certificate-chain
+sequence becomes the normalized endpoint-record sequence. An omitted sequence
+field means sequence `0`.
+
 Signed records encode the signature scheme in the record; the no-scheme signed
 format is not accepted. Legacy unsigned fixed-length endpoint address records are
 still parsed by length for address-only compatibility.

@@ -8,6 +8,7 @@ use std::{
 
 use base64::Engine;
 use bytes::BufMut;
+use dhttp_identity::certificate::{CertificateChainKey, CertificateChainKind, CertificateSequence};
 use dquic::qbase::net::addr::EndpointAddr as DquicEndpointAddr;
 use nom::{
     IResult, Parser,
@@ -33,6 +34,13 @@ pub enum SignEndpointError {
     Sign {
         source: dhttp_identity::identity::SignError,
     },
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum EndpointSelectorError {
+    #[snafu(display("endpoint record sequence does not fit certificate sequence"))]
+    SequenceTooLarge { sequence: u64 },
 }
 
 /// EndpointAddress record (Type E = 266)
@@ -369,6 +377,28 @@ impl EndpointAddr {
             self.sequence = None;
             self.set_clustered(false);
         }
+    }
+
+    pub fn certificate_chain_key(&self) -> Result<CertificateChainKey, EndpointSelectorError> {
+        let kind = if self.is_main() {
+            CertificateChainKind::Primary
+        } else {
+            CertificateChainKind::Secondary
+        };
+        let sequence = self.sequence.map(VarInt::into_inner).unwrap_or(0);
+        if sequence > u64::from(u32::MAX) {
+            return endpoint_selector_error::SequenceTooLargeSnafu { sequence }.fail();
+        }
+        let sequence = sequence as u32;
+        Ok(CertificateChainKey::new(
+            CertificateSequence::from(sequence),
+            kind,
+        ))
+    }
+
+    pub fn set_certificate_chain_key(&mut self, chain: &CertificateChainKey) {
+        self.set_main(chain.kind() == CertificateChainKind::Primary);
+        self.set_sequence(u64::from(chain.sequence().get()));
     }
 
     pub fn load(&self) -> Option<f32> {
@@ -749,20 +779,6 @@ impl TryFrom<EndpointAddr> for DquicEndpointAddr {
     }
 }
 
-pub async fn sign_endponit_address(
-    server_id: u8,
-    authority: Option<&(impl dhttp_identity::identity::LocalAuthority + ?Sized)>,
-    endpoint: DquicEndpointAddr,
-) -> Option<EndpointAddr> {
-    let mut ep: EndpointAddr = endpoint.try_into().ok()?;
-    ep.set_main(server_id == 0);
-    ep.set_sequence(server_id as u64);
-    if let Some(authority) = authority {
-        let _ = ep.sign_with_authority(authority).await;
-    }
-    Some(ep)
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -771,6 +787,9 @@ mod tests {
     };
 
     use bytes::BytesMut;
+    use dhttp_identity::certificate::{
+        CertificateChainKey, CertificateChainKind, CertificateSequence,
+    };
     use futures::future::BoxFuture;
     use ring::signature::KeyPair;
     use rustls::{
@@ -780,6 +799,10 @@ mod tests {
 
     use super::*;
 
+    fn chain(sequence: u32, kind: CertificateChainKind) -> CertificateChainKey {
+        CertificateChainKey::new(CertificateSequence::from(sequence), kind)
+    }
+
     fn ed25519_spki(public_key: &[u8]) -> Vec<u8> {
         let mut spki = Vec::with_capacity(44);
         spki.extend_from_slice(&[
@@ -787,6 +810,53 @@ mod tests {
         ]);
         spki.extend_from_slice(public_key);
         spki
+    }
+
+    #[test]
+    fn endpoint_selector_normalizes_missing_sequence_to_primary_zero() {
+        let addr = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 5353);
+        let mut endpoint = EndpointAddr::direct_v4(addr);
+        endpoint.set_main(true);
+
+        let selector = endpoint
+            .certificate_chain_key()
+            .expect("missing sequence normalizes to selector");
+
+        assert_eq!(selector, chain(0, CertificateChainKind::Primary));
+    }
+
+    #[test]
+    fn endpoint_selector_normalizes_missing_sequence_to_secondary_zero() {
+        let addr = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 5353);
+        let endpoint = EndpointAddr::direct_v4(addr);
+
+        let selector = endpoint
+            .certificate_chain_key()
+            .expect("missing sequence normalizes to selector");
+
+        assert_eq!(selector, chain(0, CertificateChainKind::Secondary));
+    }
+
+    #[test]
+    fn endpoint_selector_sets_primary_and_secondary_chains() {
+        let addr = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 3), 5353);
+        let mut endpoint = EndpointAddr::direct_v4(addr);
+
+        endpoint.set_certificate_chain_key(&chain(7, CertificateChainKind::Primary));
+        assert!(endpoint.is_main());
+        assert!(endpoint.is_clustered());
+        assert_eq!(
+            endpoint.certificate_chain_key().unwrap(),
+            chain(7, CertificateChainKind::Primary)
+        );
+
+        endpoint.set_certificate_chain_key(&chain(0, CertificateChainKind::Secondary));
+        assert!(!endpoint.is_main());
+        assert!(!endpoint.is_clustered());
+        assert_eq!(
+            endpoint.certificate_chain_key().unwrap(),
+            chain(0, CertificateChainKind::Secondary)
+        );
     }
 
     #[test]
