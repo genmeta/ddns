@@ -270,7 +270,7 @@ impl Resolve for Resolvers {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{error::Error as StdError, fmt, io, str::FromStr};
 
     #[cfg(feature = "mdns-resolver")]
     use super::MdnsResolvers;
@@ -281,8 +281,53 @@ mod tests {
     ))]
     use super::Resolvers;
     use super::{
-        DHTTP_H3_DNS_SERVER, DHTTP_HTTP_DNS_SERVER, DHTTP_MDNS_SERVICE, DnsScheme, resolvable_name,
+        DHTTP_H3_DNS_SERVER, DHTTP_HTTP_DNS_SERVER, DHTTP_MDNS_SERVICE, DnsErrors, DnsScheme,
+        resolvable_name,
     };
+
+    #[derive(Debug)]
+    struct TestSourceError {
+        message: &'static str,
+        source: Option<Box<TestSourceError>>,
+    }
+
+    impl TestSourceError {
+        fn leaf(message: &'static str) -> Self {
+            Self {
+                message,
+                source: None,
+            }
+        }
+
+        fn with_source(message: &'static str, source: TestSourceError) -> Self {
+            Self {
+                message,
+                source: Some(Box::new(source)),
+            }
+        }
+    }
+
+    impl fmt::Display for TestSourceError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.message)
+        }
+    }
+
+    impl StdError for TestSourceError {
+        fn source(&self) -> Option<&(dyn StdError + 'static)> {
+            self.source
+                .as_deref()
+                .map(|source| source as &(dyn StdError + 'static))
+        }
+    }
+
+    fn other_error(message: &'static str) -> io::Error {
+        io::Error::other(message)
+    }
+
+    fn chained_other_error(root: TestSourceError) -> io::Error {
+        io::Error::other(root)
+    }
 
     #[test]
     fn resolver_defaults_come_from_compile_time_environment() {
@@ -334,6 +379,85 @@ mod tests {
         }
 
         assert!(DnsScheme::from_str("dht").is_err());
+    }
+
+    #[test]
+    fn dns_errors_render_no_resolvers_available_when_empty() {
+        let error = DnsErrors { errors: vec![] };
+
+        assert_eq!(error.to_string(), "no DNS resolvers available");
+    }
+
+    #[test]
+    fn dns_errors_render_resolver_bullets_in_stored_order() {
+        let error = DnsErrors {
+            errors: vec![
+                (
+                    "System DNS Resolver".to_string(),
+                    other_error("invalid socket address"),
+                ),
+                ("mDNS resolvers".to_string(), other_error("timed out")),
+            ],
+        };
+
+        assert_eq!(
+            error.to_string(),
+            concat!(
+                "all DNS resolvers failed\n",
+                "  - System DNS Resolver: invalid socket address\n",
+                "  - mDNS resolvers: timed out"
+            )
+        );
+    }
+
+    #[test]
+    fn dns_errors_render_numbered_source_chain_for_one_resolver() {
+        let error = DnsErrors {
+            errors: vec![(
+                "DeferredResolver(H3 DNS Resolver(https://dns.genmeta.net:4433/))".to_string(),
+                chained_other_error(TestSourceError::with_source(
+                    "deferred resolver lookup failed",
+                    TestSourceError::leaf("no DNS record found"),
+                )),
+            )],
+        };
+
+        assert_eq!(
+            error.to_string(),
+            concat!(
+                "all DNS resolvers failed\n",
+                "  - DeferredResolver(H3 DNS Resolver(https://dns.genmeta.net:4433/)): deferred resolver lookup failed\n",
+                "    1. deferred resolver lookup failed\n",
+                "    2. no DNS record found"
+            )
+        );
+    }
+
+    #[test]
+    fn dns_errors_render_repeated_source_messages_without_deduplication() {
+        let error = DnsErrors {
+            errors: vec![(
+                "DeferredResolver(H3 DNS Resolver(https://dns.genmeta.net:4433/))".to_string(),
+                chained_other_error(TestSourceError::with_source(
+                    "deferred resolver lookup failed",
+                    TestSourceError::with_source(
+                        "deferred resolver lookup failed",
+                        TestSourceError::leaf("no DNS record found"),
+                    ),
+                )),
+            )],
+        };
+
+        assert_eq!(
+            error.to_string(),
+            concat!(
+                "all DNS resolvers failed\n",
+                "  - DeferredResolver(H3 DNS Resolver(https://dns.genmeta.net:4433/)): deferred resolver lookup failed\n",
+                "    1. deferred resolver lookup failed\n",
+                "    2. deferred resolver lookup failed\n",
+                "    3. no DNS record found"
+            )
+        );
     }
 
     #[cfg(feature = "mdns-resolver")]
