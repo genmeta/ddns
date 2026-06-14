@@ -1,10 +1,12 @@
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
+    str::FromStr,
 };
 
 use clap::Parser;
-use serde::Deserialize;
+use h3x::dquic::binds::BindPattern;
+use serde::{Deserialize, Deserializer, de::Error as _};
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -29,9 +31,12 @@ pub struct Config {
     /// Redis URL (e.g. "redis://127.0.0.1/"). Omit to use in-memory storage.
     pub redis: Option<String>,
 
-    /// Socket to listen on.
-    #[serde(default = "Config::default_listen")]
-    pub listen: SocketAddr,
+    /// Bind patterns to listen on.
+    #[serde(
+        default = "Config::default_binds",
+        deserialize_with = "deserialize_bind_patterns"
+    )]
+    pub binds: Vec<BindPattern>,
 
     /// Server name (used as TLS SNI).
     #[serde(default = "Config::default_server_name")]
@@ -74,8 +79,13 @@ impl Config {
         self
     }
 
-    pub fn default_listen() -> SocketAddr {
-        "0.0.0.0:4433".parse().unwrap()
+    pub fn default_binds() -> Vec<BindPattern> {
+        ["0.0.0.0:4433", "[::]:4433"]
+            .into_iter()
+            .map(|value| {
+                BindPattern::from_str(value).expect("default bind pattern should be valid")
+            })
+            .collect()
     }
     pub fn default_server_name() -> String {
         "localhost".into()
@@ -95,6 +105,21 @@ impl Config {
     pub fn default_ttl_secs() -> u64 {
         30
     }
+}
+
+fn deserialize_bind_patterns<'de, D>(deserializer: D) -> Result<Vec<BindPattern>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Vec::<String>::deserialize(deserializer)?;
+    values
+        .into_iter()
+        .map(|value| {
+            BindPattern::from_str(&value).map_err(|error| {
+                D::Error::custom(format!("invalid bind pattern `{value}`: {error}"))
+            })
+        })
+        .collect()
 }
 
 fn expand_home_dir(path: &Path) -> PathBuf {
@@ -143,4 +168,44 @@ pub struct SeedRecordConfig {
 pub enum PolicyKind {
     Standard,
     OpenMulti,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_binds_are_explicit_dual_stack() {
+        let binds = Config::default_binds();
+
+        assert_eq!(binds.len(), 2);
+        assert_eq!(binds[0].to_string(), "inet://0.0.0.0:4433");
+        assert_eq!(binds[1].to_string(), "inet://[::]:4433");
+    }
+
+    #[test]
+    fn config_parses_bare_socket_bind_patterns() {
+        let config: Config = toml::from_str(
+            r#"
+            binds = ["0.0.0.0:4433", "[::]:4433"]
+            "#,
+        )
+        .expect("config should parse");
+
+        assert_eq!(config.binds.len(), 2);
+        assert_eq!(config.binds[0].to_string(), "inet://0.0.0.0:4433");
+        assert_eq!(config.binds[1].to_string(), "inet://[::]:4433");
+    }
+
+    #[test]
+    fn legacy_listen_field_is_rejected() {
+        let error = toml::from_str::<Config>(
+            r#"
+            listen = "0.0.0.0:4433"
+            "#,
+        )
+        .expect_err("legacy listen should be rejected");
+
+        assert!(error.to_string().contains("unknown field `listen`"));
+    }
 }

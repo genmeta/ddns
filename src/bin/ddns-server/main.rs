@@ -9,7 +9,6 @@ use std::{
     collections::HashMap,
     io,
     net::SocketAddr,
-    str::FromStr,
     sync::Arc,
     task::{Context, Poll},
 };
@@ -20,7 +19,6 @@ use futures::future::BoxFuture;
 use h3x::{
     dquic::{
         Identity, Network, QuicEndpoint,
-        binds::BindPattern,
         cert::handy::{ToCertificate, ToPrivateKey},
         server::ServerQuicConfig,
     },
@@ -80,17 +78,6 @@ impl tower_service::Service<lookup::Request> for DnsService {
             }
         })
     }
-}
-
-fn bind_patterns_for_listen(listen: SocketAddr) -> Vec<BindPattern> {
-    let bind_addr = match listen {
-        SocketAddr::V4(addr) if addr.ip().is_unspecified() => {
-            SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), addr.port())
-        }
-        addr => addr,
-    };
-
-    vec![BindPattern::from_str(&format!("inet://{bind_addr}")).expect("valid bind pattern")]
 }
 
 // ---------------------------------------------------------------------------
@@ -243,28 +230,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .network(Network::builder().build())
         .identity(identity)
         .server(server_config)
-        .bind(Arc::new(bind_patterns_for_listen(config.listen)))
+        .bind(Arc::new(config.binds.clone()))
         .build()
         .await;
     let server = Arc::new(H3Endpoint::new(quic));
-    info!(listen = %config.listen, server_name = %config.server_name, "h3_server.start");
+    info!(binds = ?config.binds, server_name = %config.server_name, "h3_server.start");
     server.listen_owned(router).await?;
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::net::SocketAddr;
-
-    use super::*;
-
-    #[test]
-    fn unspecified_ipv4_listen_uses_dual_stack_wildcard() {
-        let listen: SocketAddr = "0.0.0.0:4433".parse().unwrap();
-        let patterns = bind_patterns_for_listen(listen);
-
-        assert_eq!(patterns.len(), 1);
-        assert_eq!(patterns[0].to_string(), "inet://[::]:4433");
-    }
 }
