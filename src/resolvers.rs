@@ -9,7 +9,6 @@ use dquic::{
     qresolve::{Resolve, ResolveFuture, Source},
 };
 use futures::{FutureExt, Stream, StreamExt, TryFutureExt, stream};
-use snafu::Report;
 use tokio::io;
 
 #[cfg(feature = "h3x-resolver")]
@@ -122,14 +121,40 @@ pub struct DnsErrors {
     errors: Vec<(String, io::Error)>,
 }
 
+fn format_dns_error_sources(
+    f: &mut fmt::Formatter<'_>,
+    error: &(dyn Error + 'static),
+) -> fmt::Result {
+    let mut index = 1;
+    let mut current = error.source();
+
+    while let Some(source) = current {
+        write!(f, "\n    {index}. {source}")?;
+        index += 1;
+        current = source.source();
+    }
+
+    Ok(())
+}
+
+fn format_dns_error_entry(
+    f: &mut fmt::Formatter<'_>,
+    resolver: &str,
+    error: &io::Error,
+) -> fmt::Result {
+    write!(f, "\n  - {resolver}: {error}")?;
+    format_dns_error_sources(f, error)
+}
+
 impl fmt::Display for DnsErrors {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.errors.is_empty() {
             return write!(f, "no DNS resolvers available");
         }
-        writeln!(f, "all DNS resolvers failed")?;
-        for (resolver, error) in self.errors.iter() {
-            write!(f, "`{resolver}` failed: {}", Report::from_error(error))?;
+
+        write!(f, "all DNS resolvers failed")?;
+        for (resolver, error) in &self.errors {
+            format_dns_error_entry(f, resolver, error)?;
         }
         Ok(())
     }
@@ -427,8 +452,7 @@ mod tests {
             concat!(
                 "all DNS resolvers failed\n",
                 "  - DeferredResolver(H3 DNS Resolver(https://dns.genmeta.net:4433/)): deferred resolver lookup failed\n",
-                "    1. deferred resolver lookup failed\n",
-                "    2. no DNS record found"
+                "    1. no DNS record found"
             )
         );
     }
@@ -454,8 +478,7 @@ mod tests {
                 "all DNS resolvers failed\n",
                 "  - DeferredResolver(H3 DNS Resolver(https://dns.genmeta.net:4433/)): deferred resolver lookup failed\n",
                 "    1. deferred resolver lookup failed\n",
-                "    2. deferred resolver lookup failed\n",
-                "    3. no DNS record found"
+                "    2. no DNS record found"
             )
         );
     }
