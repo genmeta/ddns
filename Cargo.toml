@@ -1,7 +1,7 @@
 [package]
 name = "ddns"
 description = "DNS discovery and resolver support for DHTTP applications"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/genmeta/ddns"
@@ -43,7 +43,7 @@ tokio = { version = "1", features = [
 tracing = "0.1"
 x509-parser = "0.18"
 
-h3x = { git = "https://github.com/genmeta/h3x.git", branch = "endpoint", version = "0.2.0", default-features = false, optional = true }
+h3x = { git = "https://github.com/genmeta/h3x.git", branch = "endpoint", version = "0.3.0", default-features = false, optional = true }
 http = { version = "1", optional = true }
 http-body = { version = "1", optional = true }
 http-body-util = { version = "0.1", optional = true }
@@ -93,7 +93,7 @@ server = [
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }
-h3x = { git = "https://github.com/genmeta/h3x.git", branch = "endpoint", version = "0.2.0", default-features = false, features = [
+h3x = { git = "https://github.com/genmeta/h3x.git", branch = "endpoint", version = "0.3.0", default-features = false, features = [
     "dquic",
 ] }
 shellexpand = "3"
