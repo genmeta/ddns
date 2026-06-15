@@ -221,9 +221,10 @@ impl Resolve for HttpResolver {
                         }
                     }
                 }
-                let (_remain, packet) = be_packet(&r.dns).map_err(|source| Error::ParseRecords {
-                    source: source.to_owned(),
-                })?;
+                let (_remain, packet) =
+                    be_packet(&r.dns).map_err(|source| Error::ParseRecords {
+                        source: source.to_owned(),
+                    })?;
 
                 addrs.extend(
                     packet

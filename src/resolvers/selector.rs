@@ -1,4 +1,3 @@
-use dhttp_identity::certificate::{CertificateChainKey, CertificateChainKind};
 use dquic::qbase::net::addr::EndpointAddr as DquicEndpointAddr;
 
 use crate::core::parser::record::endpoint::EndpointAddr as DnsEndpointAddr;
@@ -15,12 +14,10 @@ pub(crate) fn selected_endpoint_addrs(
 pub(crate) fn selected_endpoint_records<T>(
     records: impl IntoIterator<Item = (T, DnsEndpointAddr)>,
 ) -> Vec<(T, DquicEndpointAddr)> {
-    let mut groups: Vec<(CertificateChainKey, Vec<(T, DquicEndpointAddr)>)> = Vec::new();
+    let mut groups: Vec<((bool, u64), Vec<(T, DquicEndpointAddr)>)> = Vec::new();
 
     for (tag, record) in records {
-        let Ok(selector) = record.certificate_chain_key() else {
-            continue;
-        };
+        let selector = (record.is_main(), 0);
         let Ok(endpoint) = DquicEndpointAddr::try_from(record) else {
             continue;
         };
@@ -32,20 +29,12 @@ pub(crate) fn selected_endpoint_records<T>(
         }
     }
 
-    let selected = groups
-        .iter()
-        .position(|(key, endpoints)| {
-            key.kind() == CertificateChainKind::Primary && !endpoints.is_empty()
-        })
-        .or_else(|| {
-            groups
-                .iter()
-                .position(|(_key, endpoints)| !endpoints.is_empty())
-        });
+    groups.sort_by_key(|((is_main, sequence), _)| (!*is_main, *sequence));
 
-    selected
-        .map(|index| groups.swap_remove(index).1)
-        .unwrap_or_default()
+    groups
+        .into_iter()
+        .flat_map(|(_, endpoints)| endpoints)
+        .collect()
 }
 
 #[cfg(test)]

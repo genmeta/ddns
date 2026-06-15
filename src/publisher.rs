@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use dhttp_identity::identity::LocalAuthority;
+use dhttp_identity::{identity::LocalAuthority, name::Name};
 #[cfg(feature = "mdns-resolver")]
 use dquic::qbase::net::Family;
 use dquic::{
@@ -18,7 +18,6 @@ use dquic::{
     qresolve::{Publish, Resolve},
     qtraversal::nat::client::{ClientLocationData, NatType},
 };
-use dhttp_identity::name::Name;
 use snafu::{ResultExt, Snafu};
 
 use crate::{
@@ -84,10 +83,7 @@ impl PublishAddresses {
         Self::default()
     }
 
-    pub fn wide_area(
-        mut self,
-        endpoints: impl IntoIterator<Item = EndpointAddr>,
-    ) -> Self {
+    pub fn wide_area(mut self, endpoints: impl IntoIterator<Item = EndpointAddr>) -> Self {
         self.wide_area.extend(endpoints);
         self
     }
