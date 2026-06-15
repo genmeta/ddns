@@ -18,7 +18,7 @@ use dquic::{
     qresolve::{Publish, Resolve},
     qtraversal::nat::client::{ClientLocationData, NatType},
 };
-use snafu::{ResultExt, Snafu};
+use snafu::{IntoError, ResultExt, Snafu};
 
 use crate::{
     core::{
@@ -28,6 +28,11 @@ use crate::{
     },
     resolvers::Resolvers,
 };
+
+#[cfg(feature = "h3x-resolver")]
+type DeferredH3Resolver = crate::resolvers::deferred::DeferredResolver<
+    crate::resolvers::h3::H3Resolver<h3x::dquic::QuicEndpoint>,
+>;
 
 pub const DEFAULT_PUBLISH_INTERVAL: Duration = Duration::from_secs(20);
 /// Upper bound for a single publish attempt in the background loop.
@@ -433,6 +438,21 @@ impl Publisher {
         if let Some(h3) =
             any.downcast_ref::<crate::resolvers::h3::H3Resolver<h3x::dquic::QuicEndpoint>>()
         {
+            self.publish_signed_h3_endpoints(h3, public_endpoints)
+                .await?;
+            return Ok(true);
+        }
+
+        #[cfg(feature = "h3x-resolver")]
+        if let Some(h3) = any.downcast_ref::<DeferredH3Resolver>() {
+            let Some(h3) = h3.get() else {
+                return Err(publish_once_error::PublishSnafu {
+                    publisher: h3.to_string(),
+                }
+                .into_error(io::Error::other(
+                    "deferred h3 resolver has not been initialized",
+                )));
+            };
             self.publish_signed_h3_endpoints(h3, public_endpoints)
                 .await?;
             return Ok(true);
