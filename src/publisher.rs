@@ -18,6 +18,7 @@ use dquic::{
     qresolve::{Publish, Resolve},
     qtraversal::nat::client::{ClientLocationData, NatType},
 };
+use dhttp_identity::name::Name;
 use snafu::{ResultExt, Snafu};
 
 use crate::{
@@ -71,6 +72,46 @@ pub struct PublishOptions {
     /// `0` marks the endpoint as the main record. Non-zero values mark the
     /// record as clustered and encode the identifier as its sequence number.
     pub server_id: Option<u8>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PublishAddresses {
+    wide_area: Vec<EndpointAddr>,
+}
+
+impl PublishAddresses {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn wide_area(
+        mut self,
+        endpoints: impl IntoIterator<Item = EndpointAddr>,
+    ) -> Self {
+        self.wide_area.extend(endpoints);
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EndpointPublisher {
+    inner: Arc<Publisher>,
+}
+
+impl EndpointPublisher {
+    pub fn new(inner: Arc<Publisher>) -> Self {
+        Self { inner }
+    }
+
+    pub async fn publish_once(
+        &self,
+        name: &Name<'_>,
+        addresses: &PublishAddresses,
+    ) -> Result<(), PublishOnceError> {
+        self.inner
+            .publish_addresses_to_resolver(self.inner.resolver.as_ref(), name, &addresses.wide_area)
+            .await
+    }
 }
 
 pub struct Publisher {
@@ -152,6 +193,84 @@ impl Publisher {
         }
 
         Ok(())
+    }
+
+    async fn publish_addresses_to_resolver(
+        &self,
+        resolver: &(dyn Resolve + Send + Sync),
+        name: &Name<'_>,
+        endpoints: &[EndpointAddr],
+    ) -> Result<(), PublishOnceError> {
+        let any: &dyn Any = resolver;
+
+        if let Some(resolvers) = any.downcast_ref::<Resolvers>() {
+            for resolver in resolvers.iter() {
+                self.publish_addresses_to_single_resolver(resolver.as_ref(), name, endpoints)
+                    .await?;
+            }
+            return Ok(());
+        }
+
+        self.publish_addresses_to_single_resolver(resolver, name, endpoints)
+            .await
+    }
+
+    async fn publish_addresses_to_single_resolver(
+        &self,
+        resolver: &(dyn Resolve + Send + Sync),
+        name: &Name<'_>,
+        endpoints: &[EndpointAddr],
+    ) -> Result<(), PublishOnceError> {
+        let packet = self.dns_packet_for_name(&name.to_string(), endpoints)?;
+        let any: &dyn Any = resolver;
+
+        #[cfg(feature = "http-resolver")]
+        if let Some(http) = any.downcast_ref::<crate::resolvers::http::HttpResolver>() {
+            let signature_fields = SignatureFields::sign(&packet, self.identity.as_ref())
+                .await
+                .context(publish_once_error::SignPacketSnafu)?;
+            http.publish_signed(&name.to_string(), &packet, &signature_fields)
+                .await
+                .context(publish_once_error::PublishSnafu {
+                    publisher: http.to_string(),
+                })?;
+            return Ok(());
+        }
+
+        #[cfg(feature = "h3x-resolver")]
+        if let Some(h3) =
+            any.downcast_ref::<crate::resolvers::h3::H3Resolver<h3x::dquic::QuicEndpoint>>()
+        {
+            let signature_fields = SignatureFields::sign(&packet, self.identity.as_ref())
+                .await
+                .context(publish_once_error::SignPacketSnafu)?;
+            h3.publish_signed(&name.to_string(), &packet, &signature_fields)
+                .await
+                .context(publish_once_error::PublishSnafu {
+                    publisher: h3.to_string(),
+                })?;
+            return Ok(());
+        }
+
+        Ok(())
+    }
+
+    fn dns_packet_for_name(
+        &self,
+        name: &str,
+        endpoints: &[EndpointAddr],
+    ) -> Result<Vec<u8>, PublishOnceError> {
+        let mut encoded = Vec::with_capacity(endpoints.len());
+        for endpoint in endpoints {
+            encoded.push(
+                DnsEndpointAddr::try_from(*endpoint)
+                    .map_err(|_| publish_once_error::EncodeEndpointSnafu.build())?,
+            );
+        }
+
+        let mut hosts = HashMap::new();
+        hosts.insert(name.to_owned(), encoded);
+        Ok(MdnsPacket::answer(0, &hosts).to_bytes())
     }
 
     pub async fn run(&self) -> ! {
