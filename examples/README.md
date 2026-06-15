@@ -1,6 +1,7 @@
 # DDNS examples
 
-This directory contains runnable examples for the single `ddns` package.
+This directory contains runnable examples for the single published `dyns`
+package, whose library target remains `ddns`.
 
 | Example | Feature requirement | Purpose |
 | --- | --- | --- |

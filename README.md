@@ -3,7 +3,8 @@
 `ddns` provides DNS discovery and resolver support for DHTTP applications. It is a
 single Rust package: the historical `ddns-core`, `gmdns`, `ddns`, and
 `ddns-server` crate boundaries now live as modules and feature-gated targets in
-one crate named `ddns`.
+one published Cargo package named `dyns`, with a library target kept as `ddns`
+for source compatibility.
 
 ## Crate layout
 
@@ -17,8 +18,12 @@ one crate named `ddns`.
 
 `ddns` is endpoint-facing support code for the DHTTP ecosystem. Applications
 normally reach it through the `dhttp` endpoint facade; lower-level consumers can
-depend on package `ddns` directly when they need DNS wire types, resolver
-composition, mDNS, or the DNS-over-H3 server.
+depend on package `dyns` directly (typically renamed locally to `ddns`) when
+they need DNS wire types, resolver composition, mDNS, or the DNS-over-H3 server.
+
+```toml
+ddns = { package = "dyns", version = "0.3.0" }
+```
 
 ## Features
 
