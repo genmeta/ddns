@@ -5,7 +5,7 @@ use ddns::core::{
 use dhttp_identity::identity::RemoteAuthority;
 use tracing::{debug, warn};
 
-use crate::error::{AppError, app_error, normalize_host};
+use crate::error::{AppError, normalize_host};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DomainPolicy {
@@ -152,8 +152,6 @@ pub fn validate_dns_packet(
         host: first_answer.name().to_string(),
     })
 }
-<<<<<<< HEAD
-=======
 
 #[cfg(test)]
 mod tests {
@@ -201,4 +199,3 @@ mod tests {
         assert!(matches!(validated, ValidatedDnsPacket::Empty));
     }
 }
->>>>>>> 01498cb (Add AWS deployment and Redis read-write separation)

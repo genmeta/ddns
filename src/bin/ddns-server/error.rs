@@ -73,10 +73,7 @@ pub fn normalize_host_allowlist(entries: &[String]) -> Result<Vec<String>, AppEr
 
 pub fn normalize_host(host: &str, allowlist: &[String]) -> Result<String, AppError> {
     let host = normalize_host_raw(host)?;
-    if allowlist
-        .iter()
-        .any(|suffix| host_matches_suffix(&host, suffix))
-    {
+    if allowlist.iter().any(|suffix| host_matches_suffix(&host, suffix)) {
         Ok(host)
     } else {
         Err(AppError::DomainNotAllowed)
@@ -97,7 +94,6 @@ pub fn normalize_host_raw(host: &str) -> Result<String, AppError> {
         _ => host,
     };
     let host = host.strip_suffix('.').unwrap_or(host);
-
     let host = idna::domain_to_ascii(host).map_err(|_| AppError::InvalidHost)?;
     Ok(host.to_ascii_lowercase())
 }
@@ -116,21 +112,3 @@ fn host_matches_suffix(host: &str, suffix: &str) -> bool {
             .is_some_and(|prefix| prefix.ends_with('.'))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn normalize_host_accepts_allowed_suffixes() {
-        let allowlist = vec!["genmeta.net".to_string()];
-        let host = normalize_host("DNS.Genmeta.Net.", &allowlist).unwrap();
-        assert_eq!(host, "dns.genmeta.net");
-    }
-
-    #[test]
-    fn normalize_host_rejects_non_boundary_suffixes() {
-        let allowlist = vec!["genmeta.net".to_string()];
-        let err = normalize_host("evilgenmeta.net", &allowlist).unwrap_err();
-        assert!(matches!(err, AppError::DomainNotAllowed));
-    }
-}

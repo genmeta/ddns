@@ -24,58 +24,6 @@ cargo run --example mdns_discover -- \
 
 Query a name over mDNS:
 
-<<<<<<< HEAD
-=======
-## HTTP Packet Structure Overview
-
-`ddns` uses the HTTP/3 protocol to transmit DNS queries and responses, similar to DNS over HTTPS (DoH) but based on the QUIC protocol. The structure of HTTP requests is as follows:
-
-### URL Structure
-- **Base URL**: Default `https://localhost:4433/`, used to specify the DNS server's address.
-- **Path**: For queries, usually the root path `/`, the server parses the DNS query based on the request body.
-- **Query Parameters**: Optional, used to specify query type or options.
-
-### HTTP Headers
-- **Content-Type**: `application/dns-message` for DNS packet bodies.
-- **Content-Digest**: Required for signed publish requests. Uses `sha-256`
-  (RFC 9530).
-- **Signature-Input**: Required for signed publish requests. Uses the `dns`
-  label and covers `content-digest` (RFC 9421).
-- **Signature**: Required for signed publish requests. Contains the publisher
-  signature for the DNS packet digest (RFC 9421).
-
-### Request Body (Body)
-- DNS queries are sent in binary DNS message format (RFC 1035), containing query name, type (such as A, AAAA, SRV), and class.
-- For publishing, the request body contains the DNS packet bytes to be
-  published. Standard signed publishes carry the signature in HTTP fields, not
-  in the endpoint `E` records.
-
-### Response Body
-- Publish returns a status body such as `OK`.
-- Lookup returns the server multi-record binary format. Each record contains the
-  saved `Content-Digest`, `Signature-Input`, `Signature`, DNS packet bytes, and
-  publisher certificate so clients can verify the returned DNS packet.
-
-## Usage Examples
-
-### Publishing Services (publish)
-
-Use the `publish` example to publish a DNS service record to the HTTP/3 DNS server.
-
-#### Program Parameters
-- `--base-url <URL>`: Base URL of the DNS server (default: build-time `DHTTP_H3_DNS_SERVER` with a trailing slash).
-- `--server-ca <PATH>`: CA certificate PEM file path for verifying the online server certificate.
-- `--client-name <NAME>`: Client identity name used for mTLS.
-- `--client-cert <PATH>`: Client certificate chain PEM file.
-- `--client-key <PATH>`: Client private key PEM file.
-- `--sign`: Whether to sign the DNS packet with RFC 9421/9530-style HTTP fields
-  (default: true).
-- `--host <NAME>`: DNS name to publish, must match the SAN in the client certificate.
-- `--addr <ADDR>`: List of socket addresses to publish, separated by commas.
-- `--is-main`: Whether it is the main record (default: true).
-
-#### Example Run Command
->>>>>>> 01498cb (Add AWS deployment and Redis read-write separation)
 ```bash
 cargo run --example mdns_query -- \
   --ip 192.168.5.156 \

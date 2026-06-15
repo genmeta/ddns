@@ -19,8 +19,8 @@ bitfield-struct = "0.13"
 bytes = "1"
 dashmap = "6"
 der = { version = "0.8.0", optional = true }
-dhttp-identity = { git = "https://github.com/genmeta/dhttp.git", branch = "main" }
-dquic = { git = "https://github.com/genmeta/dquic.git", branch = "feat/v0.5.1" }
+dhttp-identity = { path = "../dhttp/identity", version = "0.1.0" }
+dquic = { path = "../dquic/dquic", version = "0.5.1" }
 flume = "0.12"
 futures = "0.3"
 libc = "0.2"
@@ -48,7 +48,11 @@ tokio = { version = "1", features = [
 tracing = "0.1"
 x509-parser = { version = "0.18", features = ["verify"] }
 
-h3x = { version = "0.3.1", default-features = false, optional = true }
+<<<<<<< HEAD
+h3x = { path = "../h3x", default-features = false, optional = true }
+=======
+h3x = { path = "../h3x", default-features = false, optional = true }
+>>>>>>> c51f31b (feat add endpoint publisher helpers)
 http = { version = "1", optional = true }
 http-body = { version = "1", optional = true }
 http-body-util = { version = "0.1", optional = true }
@@ -105,7 +109,11 @@ server = [
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }
-h3x = { version = "0.3.1", default-features = false, features = [
+<<<<<<< HEAD
+h3x = { path = "../h3x", default-features = false, features = [
+=======
+h3x = { path = "../h3x", default-features = false, features = [
+>>>>>>> c51f31b (feat add endpoint publisher helpers)
     "dquic",
 ] }
 shellexpand = "3"
@@ -136,3 +144,20 @@ required-features = ["h3x-resolver"]
 
 [patch.crates-io]
 proc-macro-error2 = { path = "patches/proc-macro-error2" }
+
+[patch."https://github.com/genmeta/dquic.git"]
+dquic = { path = "../dquic/dquic", version = "0.5.1" }
+qbase = { path = "../dquic/qbase", version = "0.5.1" }
+qcongestion = { path = "../dquic/qcongestion", version = "0.5.1" }
+qconnection = { path = "../dquic/qconnection", version = "0.5.1" }
+qdatagram = { path = "../dquic/qdatagram", version = "0.5.1" }
+qevent = { path = "../dquic/qevent", version = "0.5.1" }
+qinterface = { path = "../dquic/qinterface", version = "0.5.1" }
+qmacro = { path = "../dquic/qmacro", version = "0.5.1" }
+qrecovery = { path = "../dquic/qrecovery", version = "0.5.1" }
+qresolve = { path = "../dquic/qresolve", version = "0.5.1" }
+qtraversal = { path = "../dquic/qtraversal", version = "0.5.1" }
+qudp = { path = "../dquic/qudp", version = "0.5.1" }
+
+[patch."https://github.com/genmeta/h3x.git"]
+h3x = { path = "../h3x", version = "0.2.0" }
