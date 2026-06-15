@@ -15,7 +15,7 @@ key = "~/Downloads/ssl/dns.genmeta.net/dns.genmeta.net.key"
 root_cert = "~/Downloads/ssl/root.crt"
 
 # Allowed host suffixes. Values are normalized and suffix-matched.
-# host_allowlist = ["genmeta.net"]
+host_allowlist = ["genmeta.net", "dhttp.net"]
 
 # Optional issuer certificate used to build OCSP requests when `cert` only
 # contains the leaf certificate. If `cert` already contains the full chain,

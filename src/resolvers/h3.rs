@@ -133,7 +133,10 @@ where
         request: http::Request<
             impl http_body::Body<Data = bytes::Bytes, Error = Infallible> + Send + 'static,
         >,
-    ) -> Result<http::Response<impl http_body::Body<Data = bytes::Bytes, Error = MessageStreamError>>, Error<C::Error>> {
+    ) -> Result<
+        http::Response<impl http_body::Body<Data = bytes::Bytes, Error = MessageStreamError>>,
+        Error<C::Error>,
+    > {
         let authority = request
             .uri()
             .authority()
@@ -363,10 +366,10 @@ where
             return Err(Error::ParseMultiResponse);
         }
 
-            let mut addrs = Vec::new();
-            for r in multi.records {
-                if !r.signature_fields.is_empty() {
-                    match r.signature_fields.verify(&r.dns, &r.cert) {
+        let mut addrs = Vec::new();
+        for r in multi.records {
+            if !r.signature_fields.is_empty() {
+                match r.signature_fields.verify(&r.dns, &r.cert) {
                     Ok(true) => {}
                     Ok(false) => {
                         tracing::debug!("ignored record with invalid DNS packet signature");
@@ -379,13 +382,13 @@ where
                 }
             }
 
-                let (_remain, packet) = be_packet(&r.dns).map_err(|source| Error::ParseRecords {
-                    source: source.to_owned(),
-                })?;
+            let (_remain, packet) = be_packet(&r.dns).map_err(|source| Error::ParseRecords {
+                source: source.to_owned(),
+            })?;
 
-                addrs.extend(
-                    packet
-                        .answers
+            addrs.extend(
+                packet
+                    .answers
                     .iter()
                     .filter_map(|answer| match answer.data() {
                         record::RData::E(ep) => {
@@ -405,9 +408,8 @@ where
                             tracing::debug!(?answer, "ignored record");
                             None
                         }
-                        }),
-                );
-            }
+                    }),
+            );
         }
 
         if addrs.is_empty() {

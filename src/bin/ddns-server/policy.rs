@@ -107,8 +107,7 @@ pub fn validate_dns_packet(
     }
     debug!(
         answers = dns_packet.answers.len(),
-        require_signature,
-        "validating dns packet"
+        require_signature, "validating dns packet"
     );
 
     if require_signature {

@@ -18,7 +18,6 @@ base64 = "0.22"
 bitfield-struct = "0.13"
 bytes = "1"
 dashmap = "6"
-der = { version = "0.8.0", optional = true }
 dhttp-identity = { path = "../dhttp/identity", version = "0.1.0" }
 dquic = { path = "../dquic/dquic", version = "0.5.1" }
 flume = "0.12"
@@ -33,7 +32,6 @@ rustls = { version = "0.23", default-features = false, features = [
 ] }
 rustls-native-certs = { version = "0.8", optional = true }
 rustls-pemfile = "2"
-sha1 = { version = "=0.11.0-rc.5", optional = true }
 snafu = "0.9"
 socket2 = { version = "0.6", features = ["all"] }
 tokio = { version = "1", features = [
@@ -48,11 +46,7 @@ tokio = { version = "1", features = [
 tracing = "0.1"
 x509-parser = { version = "0.18", features = ["verify"] }
 
-<<<<<<< HEAD
 h3x = { path = "../h3x", default-features = false, optional = true }
-=======
-h3x = { path = "../h3x", default-features = false, optional = true }
->>>>>>> c51f31b (feat add endpoint publisher helpers)
 http = { version = "1", optional = true }
 http-body = { version = "1", optional = true }
 http-body-util = { version = "0.1", optional = true }
@@ -76,7 +70,6 @@ tower-service = { version = "0.3", optional = true }
 tracing-subscriber = { version = "0.3", features = [
     "env-filter",
 ], optional = true }
-x509-cert = { version = "=0.3.0-rc.4", optional = true }
 
 [features]
 default = []
@@ -94,26 +87,19 @@ http-resolver = ["dep:reqwest", "dep:rustls-native-certs"]
 server = [
     "h3x-resolver",
     "dep:clap",
-    "dep:der",
     "dep:deadpool-redis",
     "dep:idna",
     "dep:maxminddb",
     "dep:reqwest",
     "dep:serde",
-    "dep:sha1",
     "dep:toml",
     "dep:tower-service",
     "dep:tracing-subscriber",
-    "dep:x509-cert",
 ]
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }
-<<<<<<< HEAD
 h3x = { path = "../h3x", default-features = false, features = [
-=======
-h3x = { path = "../h3x", default-features = false, features = [
->>>>>>> c51f31b (feat add endpoint publisher helpers)
     "dquic",
 ] }
 shellexpand = "3"
@@ -141,9 +127,6 @@ required-features = ["h3x-resolver"]
 name = "query"
 path = "examples/query.rs"
 required-features = ["h3x-resolver"]
-
-[patch.crates-io]
-proc-macro-error2 = { path = "patches/proc-macro-error2" }
 
 [patch."https://github.com/genmeta/dquic.git"]
 dquic = { path = "../dquic/dquic", version = "0.5.1" }

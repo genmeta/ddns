@@ -379,7 +379,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::SocketAddr, path::PathBuf};
+    use std::path::PathBuf;
 
     use super::*;
     use crate::config::Config;
@@ -389,7 +389,7 @@ mod tests {
             redis_write_url: None,
             redis_read_url: None,
             host_allowlist: Config::default_host_allowlist(),
-            listen: Config::default_listen(),
+            binds: Config::default_binds(),
             server_name: Config::default_server_name(),
             cert: Config::default_cert(),
             key: Config::default_key(),
@@ -407,12 +407,12 @@ mod tests {
     }
 
     #[test]
-    fn unspecified_ipv4_listen_uses_dual_stack_wildcard() {
-        let listen: SocketAddr = "0.0.0.0:4433".parse().unwrap();
-        let patterns = bind_patterns_for_listen(listen);
+    fn default_binds_include_ipv4_and_ipv6_wildcards() {
+        let patterns = Config::default_binds();
 
-        assert_eq!(patterns.len(), 1);
-        assert_eq!(patterns[0].to_string(), "inet://[::]:4433");
+        assert_eq!(patterns.len(), 2);
+        assert_eq!(patterns[0].to_string(), "inet://0.0.0.0:4433");
+        assert_eq!(patterns[1].to_string(), "inet://[::]:4433");
     }
 
     #[test]

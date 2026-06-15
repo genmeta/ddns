@@ -23,10 +23,6 @@ pub enum AppError {
     PublisherCertificateSelector {
         source: dhttp_identity::identity::ExtractDhttpSubjectKeyIdentifierError,
     },
-    #[snafu(display("endpoint record selector is invalid"))]
-    EndpointRecordSelector {
-        source: ddns::core::parser::record::endpoint::EndpointSelectorError,
-    },
     #[snafu(display("endpoint record selector does not match publisher certificate selector"))]
     EndpointSelectorMismatch,
     #[snafu(display("no answers in packet"))]
@@ -51,7 +47,6 @@ impl AppError {
             AppError::ClientCertDomainNotAllowed => http::StatusCode::FORBIDDEN,
             AppError::InvalidDnsPacket { .. } => http::StatusCode::BAD_REQUEST,
             AppError::PublisherCertificateSelector { .. } => http::StatusCode::BAD_REQUEST,
-            AppError::EndpointRecordSelector { .. } => http::StatusCode::BAD_REQUEST,
             AppError::EndpointSelectorMismatch => http::StatusCode::BAD_REQUEST,
             AppError::NoAnswersInPacket => http::StatusCode::UNPROCESSABLE_ENTITY,
             AppError::SignatureRequired => http::StatusCode::BAD_REQUEST,
@@ -73,7 +68,10 @@ pub fn normalize_host_allowlist(entries: &[String]) -> Result<Vec<String>, AppEr
 
 pub fn normalize_host(host: &str, allowlist: &[String]) -> Result<String, AppError> {
     let host = normalize_host_raw(host)?;
-    if allowlist.iter().any(|suffix| host_matches_suffix(&host, suffix)) {
+    if allowlist
+        .iter()
+        .any(|suffix| host_matches_suffix(&host, suffix))
+    {
         Ok(host)
     } else {
         Err(AppError::DomainNotAllowed)
@@ -111,4 +109,3 @@ fn host_matches_suffix(host: &str, suffix: &str) -> bool {
             .strip_suffix(suffix)
             .is_some_and(|prefix| prefix.ends_with('.'))
 }
-
