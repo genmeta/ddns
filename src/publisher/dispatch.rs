@@ -13,6 +13,11 @@ use super::{
 };
 use crate::resolvers::Resolvers;
 
+#[cfg(feature = "h3x-resolver")]
+type DeferredH3Resolver = crate::resolvers::deferred::DeferredResolver<
+    crate::resolvers::h3::H3Resolver<h3x::dquic::QuicEndpoint>,
+>;
+
 impl<A, R> Publisher<A, R>
 where
     A: LocalAuthority + Send + Sync + ?Sized,
@@ -75,6 +80,13 @@ where
         if let Some(h3) =
             any.downcast_ref::<crate::resolvers::h3::H3Resolver<h3x::dquic::QuicEndpoint>>()
         {
+            self.publish_selected(h3, name, addresses, AddressSelector::WideArea)
+                .await?;
+            return Ok(true);
+        }
+
+        #[cfg(feature = "h3x-resolver")]
+        if let Some(h3) = any.downcast_ref::<DeferredH3Resolver>() {
             self.publish_selected(h3, name, addresses, AddressSelector::WideArea)
                 .await?;
             return Ok(true);
