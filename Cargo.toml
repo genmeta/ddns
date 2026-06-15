@@ -1,5 +1,5 @@
 [package]
-name = "ddns"
+name = "dyns"
 description = "DNS discovery and resolver support for DHTTP applications"
 version = "0.3.0"
 edition = "2024"
@@ -9,6 +9,9 @@ readme = "README.md"
 keywords = ["dhttp", "dns", "mdns", "http3", "quic"]
 categories = ["network-programming", "asynchronous"]
 autoexamples = false
+
+[lib]
+name = "ddns"
 
 [dependencies]
 base64 = "0.22"
