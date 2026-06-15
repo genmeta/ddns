@@ -49,11 +49,6 @@ jobs:
           package_name=dyns
           package_version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
 
-          if [[ "$mode" == "dry-run" ]]; then
-            cargo publish --dry-run --locked
-            exit 0
-          fi
-
           crate_state="$(
             python3 - <<'PY' "$package_name" "$package_version"
           import sys
@@ -97,6 +92,12 @@ jobs:
 
           if [[ "$crate_state" == "missing_crate" ]]; then
             echo "skip $package_name $package_version (crate not yet initialized on crates.io)"
+            exit 0
+          fi
+
+          if [[ "$mode" == "dry-run" ]]; then
+            echo "dry-run $package_name $package_version"
+            cargo publish --dry-run --locked
             exit 0
           fi
 
