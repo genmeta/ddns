@@ -60,14 +60,29 @@ pub trait AddressViewSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PublishAddressScope {
+pub enum PublishScope {
     WideArea,
     LocalLink { device: Arc<str>, family: Family },
 }
 
+impl PublishScope {
+    pub(crate) fn selector(&self) -> AddressSelector<'_> {
+        match self {
+            Self::WideArea => AddressSelector::WideArea,
+            Self::LocalLink { device, family } => AddressSelector::LocalLink {
+                device: device.as_ref(),
+                family: *family,
+            },
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub type PublishAddressScope = PublishScope;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishAddressGroup {
-    scope: PublishAddressScope,
+    scope: PublishScope,
     endpoints: Vec<EndpointAddr>,
 }
 
@@ -77,7 +92,7 @@ impl PublishAddressGroup {
         I: IntoIterator<Item = EndpointAddr>,
     {
         Self {
-            scope: PublishAddressScope::WideArea,
+            scope: PublishScope::WideArea,
             endpoints: endpoints.into_iter().collect(),
         }
     }
@@ -87,7 +102,7 @@ impl PublishAddressGroup {
         I: IntoIterator<Item = EndpointAddr>,
     {
         Self {
-            scope: PublishAddressScope::LocalLink {
+            scope: PublishScope::LocalLink {
                 device: device.into(),
                 family,
             },
@@ -97,9 +112,9 @@ impl PublishAddressGroup {
 
     fn matches(&self, selector: AddressSelector<'_>) -> bool {
         match (&self.scope, selector) {
-            (PublishAddressScope::WideArea, AddressSelector::WideArea) => true,
+            (PublishScope::WideArea, AddressSelector::WideArea) => true,
             (
-                PublishAddressScope::LocalLink { device, family },
+                PublishScope::LocalLink { device, family },
                 AddressSelector::LocalLink {
                     device: selected_device,
                     family: selected_family,
@@ -388,6 +403,29 @@ fn local_endpoints_from_iface(iface: &BindInterface, family: Family) -> Vec<Endp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publish_scope_wide_area_converts_to_wide_area_selector() {
+        let scope = PublishScope::WideArea;
+
+        assert_eq!(scope.selector(), AddressSelector::WideArea);
+    }
+
+    #[test]
+    fn publish_scope_local_link_converts_to_borrowed_selector() {
+        let scope = PublishScope::LocalLink {
+            device: Arc::<str>::from("en0"),
+            family: Family::V4,
+        };
+
+        assert_eq!(
+            scope.selector(),
+            AddressSelector::LocalLink {
+                device: "en0",
+                family: Family::V4,
+            }
+        );
+    }
 
     #[test]
     fn publish_addresses_select_wide_area_only_for_wide_area_selector() {
