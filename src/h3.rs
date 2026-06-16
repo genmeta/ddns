@@ -1,16 +1,11 @@
 use std::{convert::Infallible, fmt, io, sync::Arc, time::Duration};
 
-use dashmap::DashMap;
-use dquic::{
-    qbase::net::addr::EndpointAddr,
-    qresolve::{Publish, PublishFuture, Resolve, ResolveFuture},
-};
+use dquic::qresolve::{Publish, PublishFuture, Resolve, ResolveFuture};
 use h3x::{
     dhttp::message::{MessageStreamError, hyper::client::RequestError as HyperRequestError},
     endpoint::H3Endpoint,
     quic,
 };
-use tokio::time::Instant;
 use url::Url;
 
 mod cache;
@@ -27,14 +22,7 @@ where
 {
     endpoint: Arc<H3Endpoint<C, C::Connection>>,
     base_url: Url,
-    cached_records: DashMap<String, Record>,
-    negative_cache: DashMap<String, Instant>,
-}
-
-#[derive(Debug)]
-pub(super) struct Record {
-    pub(super) addrs: Vec<EndpointAddr>,
-    pub(super) expire: Instant,
+    cache: cache::LookupCache,
 }
 
 impl<C> fmt::Debug for H3Resolver<C>
@@ -142,8 +130,7 @@ where
         Ok(Self {
             endpoint,
             base_url,
-            cached_records: DashMap::new(),
-            negative_cache: DashMap::new(),
+            cache: cache::LookupCache::default(),
         })
     }
 
@@ -190,8 +177,6 @@ mod tests {
     use dquic::{qbase::net::addr::EndpointAddr, qresolve::Source};
     #[cfg(feature = "dquic-network")]
     use futures::StreamExt;
-    #[cfg(feature = "dquic-network")]
-    use tokio::time::Instant;
 
     use super::*;
     #[cfg(feature = "dquic-network")]
@@ -214,12 +199,9 @@ mod tests {
             h3x::dquic::QuicEndpoint::builder().build().await,
         ));
         let resolver = H3Resolver::from_endpoint(DHTTP_H3_DNS_SERVER, endpoint).unwrap();
-        resolver.cached_records.insert(
-            "car.lab.dhttp.net".to_owned(),
-            Record {
-                addrs: vec![EndpointAddr::direct("192.168.5.78:41748".parse().unwrap())],
-                expire: Instant::now() + Duration::from_secs(60),
-            },
+        resolver.cache.insert_positive(
+            "car.lab.dhttp.net",
+            vec![EndpointAddr::direct("192.168.5.78:41748".parse().unwrap())],
         );
 
         let mut records = resolver.lookup("car.lab.dhttp.net").await.unwrap();
@@ -244,12 +226,9 @@ mod tests {
             h3x::dquic::QuicEndpoint::builder().build().await,
         ));
         let resolver = H3Resolver::from_endpoint(DHTTP_H3_DNS_SERVER, endpoint).unwrap();
-        resolver.cached_records.insert(
-            "dns.genmeta.net".to_owned(),
-            Record {
-                addrs: vec![EndpointAddr::direct("192.0.2.53:4433".parse().unwrap())],
-                expire: Instant::now() + Duration::from_secs(60),
-            },
+        resolver.cache.insert_positive(
+            "dns.genmeta.net",
+            vec![EndpointAddr::direct("192.0.2.53:4433".parse().unwrap())],
         );
 
         let mut records = resolver.lookup("dns.genmeta.net").await.unwrap();
@@ -268,12 +247,9 @@ mod tests {
             h3x::dquic::QuicEndpoint::builder().build().await,
         ));
         let resolver = H3Resolver::from_endpoint(DHTTP_H3_DNS_SERVER, endpoint).unwrap();
-        resolver.cached_records.insert(
-            "nat.genmeta.net".to_owned(),
-            Record {
-                addrs: vec![EndpointAddr::direct("192.0.2.10:21000".parse().unwrap())],
-                expire: Instant::now() + Duration::from_secs(60),
-            },
+        resolver.cache.insert_positive(
+            "nat.genmeta.net",
+            vec![EndpointAddr::direct("192.0.2.10:21000".parse().unwrap())],
         );
 
         let mut records = resolver.lookup("nat.genmeta.net:20004").await.unwrap();

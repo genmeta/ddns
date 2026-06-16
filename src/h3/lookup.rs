@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use dquic::qresolve::{RecordStream, Source};
 use futures::{StreamExt, stream};
@@ -9,7 +9,7 @@ use tokio::time::Instant;
 
 use super::{
     H3LookupError, H3Resolver, LOOKUP_REQUEST_ATTEMPTS, LOOKUP_REQUEST_TIMEOUT, LookupDecodeError,
-    Record, h3_lookup_error, lookup_decode_error,
+    h3_lookup_error, lookup_decode_error,
 };
 use crate::core::{parser::packet::be_packet, wire::be_multi_response};
 
@@ -170,19 +170,13 @@ where
         };
 
         let now = Instant::now();
-        let positive_ttl = Duration::from_secs(10);
-        let negative_ttl = Duration::from_secs(2);
+        self.cache.prune_expired(now);
 
-        self.cached_records
-            .retain(|_host, record| record.expire > now);
-        self.negative_cache.retain(|_host, expire| *expire > now);
-
-        if self.negative_cache.get(domain).is_some() {
+        if self.cache.negative_hit(domain) {
             return Err(H3LookupError::NoRecordFound);
         }
 
-        if let Some(record) = self.cached_records.get(domain) {
-            let addrs = record.addrs.clone();
+        if let Some(addrs) = self.cache.positive_hit(domain) {
             let stream = stream::iter(addrs.into_iter().map(move |ep| (source.clone(), ep)));
             return Ok(stream.boxed());
         }
@@ -195,8 +189,7 @@ where
         let response = match self.lookup_response_with_retry(uri).await {
             Ok(response) => response,
             Err(H3LookupError::NoRecordFound) => {
-                self.negative_cache
-                    .insert(domain.to_string(), now + negative_ttl);
+                self.cache.insert_negative(domain);
                 return Err(H3LookupError::NoRecordFound);
             }
             Err(error) => return Err(error),
@@ -207,20 +200,11 @@ where
         let addrs = records.endpoints;
 
         if addrs.is_empty() {
-            self.negative_cache
-                .insert(domain.to_string(), now + negative_ttl);
+            self.cache.insert_negative(domain);
             return Err(H3LookupError::NoRecordFound);
         }
 
-        self.cached_records.insert(
-            domain.to_string(),
-            Record {
-                addrs: addrs.clone(),
-                expire: now + positive_ttl,
-            },
-        );
-
-        self.negative_cache.remove(domain);
+        self.cache.insert_positive(domain, addrs.clone());
 
         Ok(stream::iter(addrs.into_iter().map(move |ep| (source.clone(), ep))).boxed())
     }
