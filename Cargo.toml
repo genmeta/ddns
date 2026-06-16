@@ -18,12 +18,12 @@ name = "ddns"
 base64 = "0.22"
 bitfield-struct = "0.13"
 bytes = "1"
-dashmap = "6"
+dashmap = { version = "6", optional = true }
 dhttp-identity = { path = "../dhttp/identity", version = "0.1.0" }
 dquic = "0.5.1"
-flume = "0.12"
+flume = { version = "0.12", optional = true }
 futures = "0.3"
-libc = "0.2"
+libc = { version = "0.2", optional = true }
 nom = "8"
 rand = "0.10"
 ring = "0.17"
@@ -34,7 +34,7 @@ rustls = { version = "0.23", default-features = false, features = [
 rustls-native-certs = { version = "0.8", optional = true }
 rustls-pemfile = "2"
 snafu = "0.9"
-socket2 = { version = "0.6", features = ["all"] }
+socket2 = { version = "0.6", features = ["all"], optional = true }
 tokio = { version = "1", features = [
     "time",
     "macros",
@@ -67,6 +67,7 @@ resolvers = []
 publishers = []
 dquic-network = ["dep:h3x", "h3x/dquic"]
 h3 = [
+    "dep:dashmap",
     "dep:h3x",
     "h3x/hyper",
     "dep:http",
@@ -74,8 +75,8 @@ h3 = [
     "dep:http-body-util",
     "dep:url",
 ]
-http = ["dep:reqwest", "dep:rustls-native-certs"]
-mdns = []
+http = ["dep:dashmap", "dep:reqwest", "dep:rustls-native-certs"]
+mdns = ["dep:dashmap", "dep:flume", "dep:libc", "dep:socket2"]
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }
