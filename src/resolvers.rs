@@ -205,7 +205,7 @@ impl ResolversBuilder {
         endpoint: Arc<h3x::endpoint::H3Endpoint<C, C::Connection>>,
     ) -> io::Result<Self>
     where
-        C: h3x::quic::Connect + Send + Sync + 'static,
+        C: h3x::quic::Connect + h3x::quic::WithLocalAuthority + Send + Sync + 'static,
         C::Error: Send + Sync + 'static,
         C::Connection: Send + 'static,
     {
@@ -219,7 +219,7 @@ impl ResolversBuilder {
         endpoint: Arc<h3x::endpoint::H3Endpoint<C, C::Connection>>,
     ) -> io::Result<Self>
     where
-        C: h3x::quic::Connect + Send + Sync + 'static,
+        C: h3x::quic::Connect + h3x::quic::WithLocalAuthority + Send + Sync + 'static,
         C::Error: Send + Sync + 'static,
         C::Connection: Send + 'static,
     {
