@@ -58,31 +58,59 @@ where
 }
 
 #[derive(Debug, snafu::Snafu)]
-pub enum Error<E: std::error::Error + Send + Sync + 'static> {
-    #[snafu(display("h3 stream error"))]
-    H3Stream { source: MessageStreamError },
+#[snafu(module)]
+pub enum H3RequestError<E: std::error::Error + Send + Sync + 'static> {
     #[snafu(display("failed to connect h3 endpoint"))]
     Connect { source: h3x::pool::ConnectError<E> },
     #[snafu(display("h3 request error"))]
-    H3Request {
+    Request {
         source: HyperRequestError<Infallible>,
     },
-    #[snafu(display("h3 request timed out after {timeout:?}"))]
-    RequestTimeout { timeout: Duration },
+}
 
+#[derive(Debug, snafu::Snafu)]
+#[snafu(module)]
+pub enum H3PublishError<E: std::error::Error + Send + Sync + 'static> {
+    #[snafu(transparent)]
+    Request { source: H3RequestError<E> },
+    #[snafu(display("anonymous h3 endpoint cannot sign dns publish request"))]
+    AnonymousEndpoint,
+    #[snafu(display("failed to get h3 endpoint local authority"))]
+    LocalAuthority { source: h3x::quic::ConnectionError },
+    #[snafu(display("failed to sign h3 dns publish request"))]
+    SignRequest {
+        source: crate::core::signature::SignatureFieldsError,
+    },
     #[snafu(display("{status}"))]
     Status { status: http::StatusCode },
+}
 
+#[derive(Debug, snafu::Snafu)]
+#[snafu(module)]
+pub enum H3LookupError<E: std::error::Error + Send + Sync + 'static> {
+    #[snafu(transparent)]
+    Request { source: H3RequestError<E> },
+    #[snafu(display("h3 stream error"))]
+    H3Stream { source: MessageStreamError },
+    #[snafu(display("h3 request timed out after {timeout:?}"))]
+    RequestTimeout { timeout: Duration },
+    #[snafu(display("{status}"))]
+    Status { status: http::StatusCode },
     #[snafu(display("no DNS record found"))]
     NoRecordFound,
+    #[snafu(display("failed to decode h3 dns lookup response"))]
+    Decode { source: LookupDecodeError },
+}
 
+#[derive(Debug, snafu::Snafu)]
+#[snafu(module)]
+pub enum LookupDecodeError {
+    #[snafu(display("failed to decode multi-record response"))]
+    MultiResponse,
     #[snafu(display("failed to parse DNS records from response"))]
     ParseRecords {
         source: nom::Err<nom::error::Error<Vec<u8>>>,
     },
-
-    #[snafu(display("failed to decode multi-record response"))]
-    ParseMultiResponse,
 }
 
 impl<C> H3Resolver<C>
@@ -132,10 +160,9 @@ where
 {
     fn publish<'a>(&'a self, name: &'a str, packet: &'a [u8]) -> PublishFuture<'a> {
         Box::pin(async move {
-            match self.publish_packet(name, packet).await {
-                Ok(()) => Ok(()),
-                Err(error) => Err(io::Error::other(error)),
-            }
+            self.publish_packet(name, packet)
+                .await
+                .map_err(io::Error::other)
         })
     }
 }
@@ -148,10 +175,9 @@ where
 {
     fn lookup<'l>(&'l self, name: &'l str) -> ResolveFuture<'l> {
         Box::pin(async move {
-            match H3Resolver::lookup(self, name).await {
-                Ok(stream) => Ok(stream),
-                Err(error) => Err(io::Error::other(error)),
-            }
+            H3Resolver::lookup(self, name)
+                .await
+                .map_err(io::Error::other)
         })
     }
 }

@@ -6,10 +6,14 @@ use dquic::{
 };
 use futures::{StreamExt, stream};
 use h3x::quic;
+use http_body_util::BodyExt;
 use tokio::time::Instant;
 use tracing::trace;
 
-use super::{Error, H3Resolver, Record};
+use super::{
+    H3LookupError, H3Resolver, LOOKUP_REQUEST_ATTEMPTS, LOOKUP_REQUEST_TIMEOUT, LookupDecodeError,
+    Record,
+};
 use crate::core::{parser::packet::be_packet, wire::be_multi_response};
 
 impl<C> H3Resolver<C>
@@ -18,13 +22,83 @@ where
     C::Error: Send + Sync + 'static,
     C::Connection: Send + 'static,
 {
-    pub async fn lookup(&self, name: &str) -> Result<RecordStream, Error<C::Error>> {
+    pub(super) fn retryable_lookup_error(error: &H3LookupError<C::Error>) -> bool {
+        matches!(
+            error,
+            H3LookupError::Request { .. } | H3LookupError::H3Stream { .. }
+        )
+    }
+
+    pub(super) async fn lookup_response(
+        &self,
+        uri: http::Uri,
+    ) -> Result<bytes::Bytes, H3LookupError<C::Error>> {
+        let request = http::Request::get(uri)
+            .body(http_body_util::Empty::<bytes::Bytes>::new())
+            .expect("h3 dns lookup request must be valid");
+        let resp = self.execute_request(request).await?;
+
+        tracing::trace!("received response with status {}", resp.status());
+        match resp.status() {
+            http::StatusCode::OK => {}
+            http::StatusCode::NOT_FOUND => return Err(H3LookupError::NoRecordFound),
+            status => return Err(H3LookupError::Status { status }),
+        }
+
+        match resp.into_body().collect().await {
+            Ok(response) => Ok(response.to_bytes()),
+            Err(source) => Err(H3LookupError::H3Stream { source }),
+        }
+    }
+
+    pub(super) async fn lookup_response_with_retry(
+        &self,
+        uri: http::Uri,
+    ) -> Result<bytes::Bytes, H3LookupError<C::Error>> {
+        for attempt in 1..=LOOKUP_REQUEST_ATTEMPTS {
+            match tokio::time::timeout(LOOKUP_REQUEST_TIMEOUT, self.lookup_response(uri.clone()))
+                .await
+            {
+                Ok(Ok(response)) => return Ok(response),
+                Ok(Err(error))
+                    if Self::retryable_lookup_error(&error)
+                        && attempt < LOOKUP_REQUEST_ATTEMPTS =>
+                {
+                    self.endpoint.clear_pool();
+                    tracing::debug!(
+                        attempt,
+                        timeout_ms = LOOKUP_REQUEST_TIMEOUT.as_millis(),
+                        "h3 dns lookup failed, retrying"
+                    );
+                }
+                Ok(Err(error)) => return Err(error),
+                Err(_elapsed) if attempt < LOOKUP_REQUEST_ATTEMPTS => {
+                    self.endpoint.clear_pool();
+                    tracing::debug!(
+                        attempt,
+                        timeout_ms = LOOKUP_REQUEST_TIMEOUT.as_millis(),
+                        "h3 dns lookup timed out, retrying"
+                    );
+                }
+                Err(_elapsed) => {
+                    self.endpoint.clear_pool();
+                    return Err(H3LookupError::RequestTimeout {
+                        timeout: LOOKUP_REQUEST_TIMEOUT,
+                    });
+                }
+            }
+        }
+
+        unreachable!("lookup retry loop returns on the final attempt")
+    }
+
+    pub async fn lookup(&self, name: &str) -> Result<RecordStream, H3LookupError<C::Error>> {
         use crate::core::parser::record;
         let server = Arc::from(self.base_url.origin().ascii_serialization());
         let source = Source::H3 { server };
 
         let Some(domain) = crate::resolvers::resolvable_name(name) else {
-            return Err(Error::NoRecordFound);
+            return Err(H3LookupError::NoRecordFound);
         };
 
         let now = Instant::now();
@@ -36,7 +110,7 @@ where
         self.negative_cache.retain(|_host, expire| *expire > now);
 
         if self.negative_cache.get(domain).is_some() {
-            return Err(Error::NoRecordFound);
+            return Err(H3LookupError::NoRecordFound);
         }
 
         if let Some(record) = self.cached_records.get(domain) {
@@ -52,19 +126,27 @@ where
         tracing::trace!("sending lookup request to {}", self.base_url);
         let response = match self.lookup_response_with_retry(uri).await {
             Ok(response) => response,
-            Err(Error::NoRecordFound) => {
+            Err(H3LookupError::NoRecordFound) => {
                 self.negative_cache
                     .insert(domain.to_string(), now + negative_ttl);
-                return Err(Error::NoRecordFound);
+                return Err(H3LookupError::NoRecordFound);
             }
             Err(error) => return Err(error),
         };
 
         // Server always returns multi-record format.
-        let (remain, multi) =
-            be_multi_response(response.as_ref()).map_err(|_| Error::ParseMultiResponse)?;
+        let (remain, multi) = match be_multi_response(response.as_ref()) {
+            Ok(response) => response,
+            Err(_error) => {
+                return Err(H3LookupError::Decode {
+                    source: LookupDecodeError::MultiResponse,
+                });
+            }
+        };
         if !remain.is_empty() {
-            return Err(Error::ParseMultiResponse);
+            return Err(H3LookupError::Decode {
+                source: LookupDecodeError::MultiResponse,
+            });
         }
 
         let mut addrs = Vec::new();
@@ -83,9 +165,16 @@ where
                 }
             }
 
-            let (_remain, packet) = be_packet(&r.dns).map_err(|source| Error::ParseRecords {
-                source: source.to_owned(),
-            })?;
+            let (_remain, packet) = match be_packet(&r.dns) {
+                Ok(packet) => packet,
+                Err(source) => {
+                    return Err(H3LookupError::Decode {
+                        source: LookupDecodeError::ParseRecords {
+                            source: source.to_owned(),
+                        },
+                    });
+                }
+            };
 
             addrs.extend(
                 packet
@@ -116,7 +205,7 @@ where
         if addrs.is_empty() {
             self.negative_cache
                 .insert(domain.to_string(), now + negative_ttl);
-            return Err(Error::NoRecordFound);
+            return Err(H3LookupError::NoRecordFound);
         }
 
         self.cached_records.insert(

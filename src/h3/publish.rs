@@ -5,7 +5,7 @@ use h3x::quic;
 use http_body_util::Full;
 use tracing::trace;
 
-use super::{Error, H3Resolver};
+use super::{H3PublishError, H3Resolver};
 use crate::core::{
     MdnsPacket,
     signature::{CONTENT_DIGEST_HEADER, SIGNATURE_HEADER, SIGNATURE_INPUT_HEADER, SignatureFields},
@@ -21,7 +21,7 @@ where
         &self,
         name: &str,
         endpoints: &[EndpointAddr],
-    ) -> Result<(), Error<C::Error>> {
+    ) -> Result<(), H3PublishError<C::Error>> {
         trace!("h3x publishing {} with {} endpoints", name, endpoints.len());
         let bytes = {
             let endpoints = endpoints
@@ -39,7 +39,11 @@ where
     }
 
     /// Publish a pre-built DNS packet (with signatures already included).
-    pub async fn publish_packet(&self, name: &str, packet: &[u8]) -> Result<(), Error<C::Error>> {
+    pub async fn publish_packet(
+        &self,
+        name: &str,
+        packet: &[u8],
+    ) -> Result<(), H3PublishError<C::Error>> {
         self.publish_packet_with_signature(name, packet, &SignatureFields::empty())
             .await
     }
@@ -60,7 +64,7 @@ where
         name: &str,
         packet: &[u8],
         signature_fields: &SignatureFields,
-    ) -> Result<(), Error<C::Error>> {
+    ) -> Result<(), H3PublishError<C::Error>> {
         let mut url = self.base_url.join("publish").expect("Invalid base URL");
         url.set_query(Some(&format!("host={name}")));
         let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
@@ -89,7 +93,7 @@ where
         let resp = self.execute_request(request).await?;
 
         if resp.status() != http::StatusCode::OK {
-            return Err(Error::Status {
+            return Err(H3PublishError::Status {
                 status: resp.status(),
             });
         }
