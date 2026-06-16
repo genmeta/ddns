@@ -4,6 +4,8 @@ mod address;
 mod dispatch;
 #[cfg(feature = "publishers")]
 mod packet;
+#[cfg(feature = "publishers")]
+mod publisher;
 
 #[cfg(all(feature = "publishers", feature = "dquic-network"))]
 use std::{any::TypeId, net::SocketAddr, time::Duration};
@@ -13,7 +15,7 @@ use std::{io, sync::Arc};
 #[cfg(feature = "publishers")]
 pub use address::{
     AddressSelector, AddressView, FnAddressView, PublishAddressGroup, PublishAddressScope,
-    PublishAddresses,
+    PublishAddresses, PublishScope,
 };
 #[cfg(all(feature = "publishers", feature = "dquic-network"))]
 pub use address::{AddressViewSource, EndpointBindingAddresses};
@@ -27,6 +29,8 @@ use dquic::{
 };
 #[cfg(feature = "publishers")]
 pub use packet::{EndpointRecordSigner, SignEndpointRecordsError};
+#[cfg(feature = "publishers")]
+pub use publisher::{Publisher, PublisherError};
 #[cfg(feature = "publishers")]
 use snafu::Snafu;
 
