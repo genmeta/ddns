@@ -19,7 +19,7 @@ base64 = "0.22"
 bitfield-struct = "0.13"
 bytes = "1"
 dashmap = { version = "6", optional = true }
-dhttp-identity = { git = "https://github.com/genmeta/dhttp.git", branch = "dev/v0.2.0", version = "0.2.0" }
+dhttp-identity = "0.2.0"
 dquic = "0.5.1"
 flume = { version = "0.12", optional = true }
 futures = "0.3"
@@ -47,7 +47,7 @@ tokio = { version = "1", features = [
 tracing = "0.1"
 x509-parser = { version = "0.18", features = ["verify"] }
 
-h3x = { git = "https://github.com/genmeta/h3x.git", branch = "dev/v0.4.0", version = "0.4.0", default-features = false, optional = true }
+h3x = { version = "0.4.0", default-features = false, optional = true }
 http = { version = "1", optional = true }
 http-body = { version = "1", optional = true }
 http-body-util = { version = "0.1", optional = true }
@@ -80,7 +80,7 @@ mdns = ["dep:dashmap", "dep:flume", "dep:libc", "dep:socket2"]
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }
-h3x = { git = "https://github.com/genmeta/h3x.git", branch = "dev/v0.4.0", version = "0.4.0", default-features = false, features = ["dquic"] }
+h3x = { version = "0.4.0", default-features = false, features = ["dquic"] }
 shellexpand = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
