@@ -7,7 +7,7 @@ whose library target remains `ddns`.
 | --- | --- | --- |
 | `mdns_discover` | `mdns` | Bind an mDNS service, publish sample local hosts, and print multicast packets. |
 | `mdns_query` | `mdns` | Query a DHTTP name over local mDNS. |
-| `query` | none | Query a DNS-over-H3 server and decode the multi-record response. |
+| `query` | `h3` | Query a DNS-over-H3 server and decode the multi-record response. |
 | `publish` | `h3` | Publish endpoint `E` records to a DNS-over-H3 server using client mTLS; H3 publish request headers are signed from the client endpoint identity. |
 
 Run all commands from the `ddns/` repository.
@@ -36,7 +36,7 @@ The mDNS service name defaults to the build-time `DHTTP_MDNS_SERVICE` constant.
 ## DNS-over-H3 query
 
 ```bash
-cargo run --example query -- \
+cargo run --example query --features h3 -- \
   --server-ca /path/to/root.crt \
   --host nat.genmeta.net
 ```

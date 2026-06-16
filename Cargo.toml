@@ -101,3 +101,4 @@ required-features = ["h3"]
 [[example]]
 name = "query"
 path = "examples/query.rs"
+required-features = ["h3"]
