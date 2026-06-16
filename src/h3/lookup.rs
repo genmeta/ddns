@@ -80,7 +80,7 @@ impl LookupRecords {
         }
 
         Ok(Self {
-            endpoints: crate::resolvers::selector::selected_endpoint_addrs(endpoint_records),
+            endpoints: crate::resolvers::endpoint_group::selected_endpoint_addrs(endpoint_records),
         })
     }
 }
@@ -221,11 +221,13 @@ mod tests {
         wire::{MultiResponse, ResponseRecord},
     };
 
-    fn direct(addr: &str, main: bool, sequence: u64) -> DnsEndpointAddr {
+    fn direct(addr: &str, main: bool, sequence: u32) -> DnsEndpointAddr {
         let socket: SocketAddrV4 = addr.parse().expect("socket addr");
         let mut endpoint = DnsEndpointAddr::direct_v4(socket);
         endpoint.set_main(main);
-        endpoint.set_sequence(sequence);
+        endpoint.set_sequence(
+            dhttp_identity::certificate::CertificateSequence::try_from(sequence).unwrap(),
+        );
         endpoint
     }
 

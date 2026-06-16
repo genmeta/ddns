@@ -141,7 +141,10 @@ async fn main() -> io::Result<()> {
             SocketAddr::V6(v6) => EndpointAddr::direct_v6(v6),
         };
         endpoint.set_main(opt.is_main);
-        endpoint.set_sequence(opt.sequence);
+        endpoint.set_sequence(
+            dhttp_identity::certificate::CertificateSequence::try_from(opt.sequence)
+                .map_err(io::Error::other)?,
+        );
         info!("Publishing endpoint: {:?}", endpoint);
         let mut hosts = std::collections::HashMap::new();
         hosts.insert(opt.host.clone(), vec![endpoint]);

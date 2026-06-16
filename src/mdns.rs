@@ -59,7 +59,7 @@ impl Resolve for MdnsResolver {
         let source = self.source();
         self.query(name.to_owned())
             .map_ok(move |list| {
-                let endpoints = crate::resolvers::selector::selected_endpoint_addrs(list);
+                let endpoints = crate::resolvers::endpoint_group::selected_endpoint_addrs(list);
                 stream::iter(endpoints.into_iter().map(move |ep| (source.clone(), ep))).boxed()
             })
             .boxed()
@@ -295,7 +295,7 @@ impl MdnsResolvers {
             );
         }
 
-        let records = crate::resolvers::selector::selected_endpoint_records(records);
+        let records = crate::resolvers::endpoint_group::selected_endpoint_records(records);
 
         Ok(stream::iter(records).boxed())
     }

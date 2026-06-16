@@ -92,7 +92,7 @@ impl std::str::FromStr for DnsScheme {
 }
 
 pub mod deferred;
-pub(crate) mod selector;
+pub(crate) mod endpoint_group;
 pub mod weak;
 
 #[cfg(feature = "resolvers")]

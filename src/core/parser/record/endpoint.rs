@@ -8,6 +8,7 @@ use std::{
 
 use base64::Engine;
 use bytes::BufMut;
+use dhttp_identity::certificate::{CertificateChainKey, CertificateChainKind, CertificateSequence};
 use dquic::qbase::net::addr::EndpointAddr as DquicEndpointAddr;
 use nom::{
     IResult, Parser,
@@ -84,9 +85,9 @@ pub struct EndpointSignature {
 #[derive(Debug, Clone)]
 pub struct EndpointAddr {
     flags: u8,
-    /// Device sequence number used when multiple hosts share a domain (CLUSTERED).
+    /// Certificate-chain sequence used when multiple hosts share a domain (CLUSTERED).
     /// None means no sequence number.
-    sequence: Option<VarInt>,
+    sequence: Option<CertificateSequence>,
     /// 1-minute load average (present when LOAD flag is set)
     load: Option<f32>,
     signature: Option<EndpointSignature>,
@@ -333,7 +334,7 @@ impl EndpointAddr {
 
         // sequence is only encoded when CLUSTERED flag is set
         if let Some(seq) = &self.sequence {
-            meta_len += seq.encoding_size();
+            meta_len += VarInt::from_u32(seq.get()).encoding_size();
         }
 
         if self.load.is_some() {
@@ -366,18 +367,32 @@ impl EndpointAddr {
         self.agent
     }
 
-    pub fn sequence(&self) -> Option<u64> {
-        self.sequence.map(Into::into)
+    pub fn sequence(&self) -> Option<CertificateSequence> {
+        self.sequence
     }
 
-    pub fn set_sequence(&mut self, sequence: u64) {
-        if sequence > 0 {
-            self.sequence = Some(VarInt::from_u64(sequence).expect("Sequence too large"));
+    pub fn normalized_sequence(&self) -> CertificateSequence {
+        self.sequence
+            .unwrap_or_else(|| CertificateSequence::from(0u8))
+    }
+
+    pub fn set_sequence(&mut self, sequence: CertificateSequence) {
+        if sequence.get() > 0 {
+            self.sequence = Some(sequence);
             self.set_clustered(true);
         } else {
             self.sequence = None;
             self.set_clustered(false);
         }
+    }
+
+    pub fn certificate_chain_key(&self) -> CertificateChainKey {
+        let kind = if self.is_main() {
+            CertificateChainKind::Primary
+        } else {
+            CertificateChainKind::Secondary
+        };
+        CertificateChainKey::new(self.normalized_sequence(), kind)
     }
 
     pub fn load(&self) -> Option<f32> {
@@ -407,7 +422,7 @@ impl EndpointAddr {
 
         // Sequence is only written when CLUSTERED is set
         if let Some(seq) = &self.sequence {
-            buf.put_varint(*seq);
+            buf.put_varint(VarInt::from_u32(seq.get()));
         }
 
         // Write primary address
@@ -468,7 +483,13 @@ pub fn be_endpoint_addr(input: &[u8]) -> nom::IResult<&[u8], EndpointAddr> {
     // Sequence number is only present when CLUSTERED is set
     let (remain, sequence) = if is_clustered {
         let (remain, seq) = be_varint(remain)?;
-        (remain, Some(seq))
+        let sequence = match CertificateSequence::try_from(seq.into_inner()) {
+            Ok(sequence) => sequence,
+            Err(_error) => {
+                return Err(nom::Err::Failure(make_error(remain, ErrorKind::TooLarge)));
+            }
+        };
+        (remain, Some(sequence))
     } else {
         (remain, None)
     };
@@ -765,7 +786,7 @@ pub async fn sign_endponit_address(
 ) -> Option<EndpointAddr> {
     let mut ep: EndpointAddr = endpoint.try_into().ok()?;
     ep.set_main(server_id == 0);
-    ep.set_sequence(server_id as u64);
+    ep.set_sequence(CertificateSequence::from(server_id));
     if let Some(authority) = authority {
         let _ = ep.sign_with_authority(authority).await;
     }
@@ -785,6 +806,58 @@ mod tests {
     use rustls::sign::{Signer, SigningKey};
 
     use super::*;
+
+    fn v4_outer() -> SocketAddrV4 {
+        SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 10), 4433)
+    }
+
+    #[test]
+    fn endpoint_certificate_chain_key_normalizes_missing_sequence() {
+        let mut endpoint = EndpointAddr::direct_v4(v4_outer());
+        endpoint.set_main(true);
+
+        let key = endpoint.certificate_chain_key();
+
+        assert_eq!(
+            key.kind(),
+            dhttp_identity::certificate::CertificateChainKind::Primary
+        );
+        assert_eq!(key.sequence().get(), 0);
+        assert_eq!(key.to_string(), "primary:0");
+    }
+
+    #[test]
+    fn endpoint_certificate_chain_key_uses_present_sequence() {
+        let mut endpoint = EndpointAddr::direct_v4(v4_outer());
+        endpoint.set_main(false);
+        endpoint.set_sequence(
+            dhttp_identity::certificate::CertificateSequence::try_from(7u32).unwrap(),
+        );
+
+        let key = endpoint.certificate_chain_key();
+
+        assert_eq!(
+            key.kind(),
+            dhttp_identity::certificate::CertificateChainKind::Secondary
+        );
+        assert_eq!(key.sequence().get(), 7);
+        assert_eq!(key.to_string(), "secondary:7");
+    }
+
+    #[test]
+    fn endpoint_parser_rejects_over_range_certificate_sequence() {
+        let sequence = crate::core::parser::varint::VarInt::from_u64(
+            dhttp_identity::certificate::CertificateSequence::MAX as u64 + 1,
+        )
+        .unwrap();
+        let mut packet = BytesMut::new();
+        packet.put_u8(EndpointAddr::FLAG_MAIN | EndpointAddr::FLAG_CLUSTERED);
+        packet.put_varint(sequence);
+        packet.put_u16(v4_outer().port());
+        packet.put_slice(&v4_outer().ip().octets());
+
+        assert!(be_endpoint_addr(&packet).is_err());
+    }
 
     #[test]
     fn legacy_endpoint_v4_direct_without_meta() {
@@ -900,7 +973,7 @@ mod tests {
             // IPv4 direct, MAIN + CLUSTERED flags
             EndpointAddr {
                 flags: EndpointAddr::FLAG_MAIN | EndpointAddr::FLAG_CLUSTERED,
-                sequence: Some(VarInt::from_u32(0)),
+                sequence: Some(CertificateSequence::from(0u8)),
                 load: None,
                 signature: None,
                 primary: v4_outer.into(),
@@ -909,7 +982,7 @@ mod tests {
             // IPv4 NAT, CLUSTERED flag
             EndpointAddr {
                 flags: EndpointAddr::FLAG_NAT | EndpointAddr::FLAG_CLUSTERED,
-                sequence: Some(VarInt::from_u32(127)),
+                sequence: Some(CertificateSequence::try_from(127u32).unwrap()),
                 load: None,
                 signature: None,
                 primary: v4_outer.into(),
@@ -920,7 +993,7 @@ mod tests {
                 flags: EndpointAddr::FLAG_FAMILY
                     | EndpointAddr::FLAG_MAIN
                     | EndpointAddr::FLAG_CLUSTERED,
-                sequence: Some(VarInt::from_u32(128)),
+                sequence: Some(CertificateSequence::try_from(128u32).unwrap()),
                 load: None,
                 signature: None,
                 primary: v6_outer.into(),
@@ -931,7 +1004,7 @@ mod tests {
                 flags: EndpointAddr::FLAG_FAMILY
                     | EndpointAddr::FLAG_NAT
                     | EndpointAddr::FLAG_CLUSTERED,
-                sequence: Some(VarInt::from_u64((1 << 62) - 1).unwrap()),
+                sequence: Some(CertificateSequence::try_from(16_384u32).unwrap()),
                 load: None,
                 signature: None,
                 primary: v6_outer.into(),
