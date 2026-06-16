@@ -1,14 +1,14 @@
 # DDNS examples
 
-This directory contains runnable examples for the single published `dyns`
-package, whose library target remains `ddns`.
+This directory contains runnable examples for the published `dyns` package,
+whose library target remains `ddns`.
 
 | Example | Feature requirement | Purpose |
 | --- | --- | --- |
-| `mdns_discover` | none | Bind an mDNS service, publish sample local hosts, and print multicast packets. |
-| `mdns_query` | none | Query a DHTTP name over local mDNS. |
-| `query` | `h3x-resolver` | Query a DNS-over-H3 server and decode the multi-record response. |
-| `publish` | `h3x-resolver` | Publish signed endpoint `E` records to a DNS-over-H3 server using client mTLS. |
+| `mdns_discover` | `mdns` | Bind an mDNS service, publish sample local hosts, and print multicast packets. |
+| `mdns_query` | `mdns` | Query a DHTTP name over local mDNS. |
+| `query` | none | Query a DNS-over-H3 server and decode the multi-record response. |
+| `publish` | `h3` | Publish signed endpoint `E` records to a DNS-over-H3 server using client mTLS. |
 
 Run all commands from the `ddns/` repository.
 
@@ -17,7 +17,7 @@ Run all commands from the `ddns/` repository.
 Bind to a local interface and print multicast traffic:
 
 ```bash
-cargo run --example mdns_discover -- \
+cargo run --example mdns_discover --features mdns -- \
   --ip 127.0.0.1 \
   --device lo0
 ```
@@ -25,19 +25,18 @@ cargo run --example mdns_discover -- \
 Query a name over mDNS:
 
 ```bash
-cargo run --example mdns_query -- \
+cargo run --example mdns_query --features mdns -- \
   --ip 192.168.5.156 \
   --device en0
 ```
 
-Replace `--ip` and `--device` with an address and interface that exist on the
-local machine. The mDNS service name defaults to the build-time
-`DHTTP_MDNS_SERVICE` constant.
+Replace `--ip` and `--device` with an address and interface that exist on the local machine.
+The mDNS service name defaults to the build-time `DHTTP_MDNS_SERVICE` constant.
 
 ## DNS-over-H3 query
 
 ```bash
-cargo run --example query --features h3x-resolver -- \
+cargo run --example query -- \
   --server-ca /path/to/root.crt \
   --host nat.genmeta.net
 ```
@@ -60,21 +59,12 @@ repeated count times:
 ```
 
 The example prints each DNS packet, the publisher certificate fingerprint when a
-certificate is present, and endpoint signature verification status for signed
-`E` records.
-
-After the server starts, it listens for HTTP/3 requests and handles publish and query operations.
-If the configured server certificate includes its issuer chain, the process also
-fetches and refreshes its own stapled OCSP response from cert-server's public
-`/ocsp` endpoint. When the PEM only contains the leaf certificate, configure
-`ocsp_issuer_cert` in `server.toml`. The same config file also supports
-`redis_write_url`, `redis_read_url`, and `host_allowlist` for AWS-style
-primary/replica Redis and domain suffix controls.
+certificate is present, and endpoint signature verification status for signed `E` records.
 
 ## DNS-over-H3 publish
 
 ```bash
-cargo run --example publish --features h3x-resolver -- \
+cargo run --example publish --features h3 -- \
   --server-ca /path/to/root.crt \
   --client-name demo.example.dhttp.net \
   --client-cert /path/to/demo.example.dhttp.net.pem \
@@ -93,26 +83,8 @@ Options:
 | `--client-cert <PATH>` | Client certificate chain PEM for mTLS and endpoint signature verification. |
 | `--client-key <PATH>` | Client private key PEM. |
 | `--sign <true|false>` | Whether to sign each endpoint `E` record. Defaults to `true`. |
-| `--host <NAME>` | DNS host to publish. Standard-policy servers require this to match the client certificate DNS SAN. |
+| `--host <NAME>` | DNS host to publish. |
 | `--addr <ADDR[,ADDR...]>` | One or more socket addresses to publish. |
 
-The example derives the endpoint selector from the client certificate SKI before
-signing records. Use the correct certificate chain instead of manual selector
-flags.
-
-The example sends `POST /publish?host=<NAME>` with a binary DNS packet body. For
-Standard policy domains, the server requires a client certificate whose single
-DNS SAN matches `host`; when `require_signature = true`, at least one signed
-endpoint record must verify against the publisher certificate. Open-multi policy
-domains still require client mTLS but skip the host SAN and endpoint signature
-checks.
-
-## Running the server
-
-```bash
-cargo run --bin ddns-server --features server -- --config server.toml
-```
-
-`server.toml` documents the available fields: listener, TLS identity, client root
-CA, optional Redis storage, TTL, domain policies, and static seed records.
-
+The example imports `H3Publisher` from the `ddns::publishers` facade, but only needs the
+`h3` backend feature because backend publisher types are re-exported from the facade directly.

@@ -9,6 +9,7 @@ readme = "README.md"
 keywords = ["dhttp", "dns", "mdns", "http3", "quic"]
 categories = ["network-programming", "asynchronous"]
 autoexamples = false
+autobins = false
 
 [lib]
 name = "ddns"
@@ -19,7 +20,7 @@ bitfield-struct = "0.13"
 bytes = "1"
 dashmap = "6"
 dhttp-identity = { path = "../dhttp/identity", version = "0.1.0" }
-dquic = { path = "../dquic/dquic", version = "0.5.1" }
+dquic = "0.5.1"
 flume = "0.12"
 futures = "0.3"
 libc = "0.2"
@@ -60,87 +61,43 @@ reqwest = { version = "0.13", default-features = false, features = [
 ], optional = true }
 url = { version = "2", optional = true }
 
-clap = { version = "4", features = ["derive"], optional = true }
-deadpool-redis = { version = "0.23", optional = true }
-idna = { version = "1", optional = true }
-maxminddb = { version = "0.26", optional = true }
-serde = { version = "1", features = ["derive"], optional = true }
-toml = { version = "1", optional = true }
-tower-service = { version = "0.3", optional = true }
-tracing-subscriber = { version = "0.3", features = [
-    "env-filter",
-], optional = true }
-
 [features]
 default = []
-h3x-resolver = [
+resolvers = []
+publishers = []
+dquic-network = ["dep:h3x", "h3x/dquic"]
+h3 = [
     "dep:h3x",
-    "h3x/dquic",
     "h3x/hyper",
     "dep:http",
     "dep:http-body",
     "dep:http-body-util",
     "dep:url",
 ]
-mdns-resolver = ["dep:h3x", "h3x/dquic"]
-http-resolver = ["dep:reqwest", "dep:rustls-native-certs"]
-server = [
-    "h3x-resolver",
-    "dep:clap",
-    "dep:deadpool-redis",
-    "dep:idna",
-    "dep:maxminddb",
-    "dep:reqwest",
-    "dep:serde",
-    "dep:toml",
-    "dep:tower-service",
-    "dep:tracing-subscriber",
-]
+http = ["dep:reqwest", "dep:rustls-native-certs"]
+mdns = []
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }
-h3x = { path = "../h3x", default-features = false, features = [
-    "dquic",
-] }
+h3x = { path = "../h3x", default-features = false, features = ["dquic"] }
 shellexpand = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-[[bin]]
-name = "ddns-server"
-path = "src/bin/ddns-server/main.rs"
-required-features = ["server"]
 
 [[example]]
 name = "mdns_discover"
 path = "examples/mdns_discover.rs"
+required-features = ["mdns"]
 
 [[example]]
 name = "mdns_query"
 path = "examples/mdns_query.rs"
+required-features = ["mdns"]
 
 [[example]]
 name = "publish"
 path = "examples/publish.rs"
-required-features = ["h3x-resolver"]
+required-features = ["h3"]
 
 [[example]]
 name = "query"
 path = "examples/query.rs"
-required-features = ["h3x-resolver"]
-
-[patch."https://github.com/genmeta/dquic.git"]
-dquic = { path = "../dquic/dquic", version = "0.5.1" }
-qbase = { path = "../dquic/qbase", version = "0.5.1" }
-qcongestion = { path = "../dquic/qcongestion", version = "0.5.1" }
-qconnection = { path = "../dquic/qconnection", version = "0.5.1" }
-qdatagram = { path = "../dquic/qdatagram", version = "0.5.1" }
-qevent = { path = "../dquic/qevent", version = "0.5.1" }
-qinterface = { path = "../dquic/qinterface", version = "0.5.1" }
-qmacro = { path = "../dquic/qmacro", version = "0.5.1" }
-qrecovery = { path = "../dquic/qrecovery", version = "0.5.1" }
-qresolve = { path = "../dquic/qresolve", version = "0.5.1" }
-qtraversal = { path = "../dquic/qtraversal", version = "0.5.1" }
-qudp = { path = "../dquic/qudp", version = "0.5.1" }
-
-[patch."https://github.com/genmeta/h3x.git"]
-h3x = { path = "../h3x", version = "0.2.0" }

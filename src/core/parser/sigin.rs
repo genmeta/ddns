@@ -147,6 +147,7 @@ pub fn sign_with_key(key: &(impl SigningKey + ?Sized), data: &[u8]) -> Result<Ve
     dhttp_identity::identity::sign_with_key(key, data).context(sign_error::IdentitySnafu)
 }
 
+#[allow(dead_code)]
 pub(crate) fn signature_scheme(
     spki: SubjectPublicKeyInfoDer<'_>,
 ) -> Result<SignatureScheme, SignatureSchemeError> {

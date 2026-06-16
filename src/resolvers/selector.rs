@@ -2,6 +2,10 @@ use dquic::qbase::net::addr::EndpointAddr as DquicEndpointAddr;
 
 use crate::core::parser::record::endpoint::EndpointAddr as DnsEndpointAddr;
 
+type Selector = (bool, u64);
+type TaggedEndpoint<T> = (T, DquicEndpointAddr);
+type EndpointGroup<T> = (Selector, Vec<TaggedEndpoint<T>>);
+
 pub(crate) fn selected_endpoint_addrs(
     records: impl IntoIterator<Item = DnsEndpointAddr>,
 ) -> Vec<DquicEndpointAddr> {
@@ -14,10 +18,10 @@ pub(crate) fn selected_endpoint_addrs(
 pub(crate) fn selected_endpoint_records<T>(
     records: impl IntoIterator<Item = (T, DnsEndpointAddr)>,
 ) -> Vec<(T, DquicEndpointAddr)> {
-    let mut groups: Vec<((bool, u64), Vec<(T, DquicEndpointAddr)>)> = Vec::new();
+    let mut groups: Vec<EndpointGroup<T>> = Vec::new();
 
     for (tag, record) in records {
-        let selector = (record.is_main(), 0);
+        let selector = (record.is_main(), record.sequence().unwrap_or(0));
         let Ok(endpoint) = DquicEndpointAddr::try_from(record) else {
             continue;
         };
@@ -33,8 +37,9 @@ pub(crate) fn selected_endpoint_records<T>(
 
     groups
         .into_iter()
-        .flat_map(|(_, endpoints)| endpoints)
-        .collect()
+        .next()
+        .map(|(_, endpoints)| endpoints)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

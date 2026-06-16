@@ -366,6 +366,10 @@ impl EndpointAddr {
         self.agent
     }
 
+    pub fn sequence(&self) -> Option<u64> {
+        self.sequence.map(Into::into)
+    }
+
     pub fn set_sequence(&mut self, sequence: u64) {
         if sequence > 0 {
             self.sequence = Some(VarInt::from_u64(sequence).expect("Sequence too large"));

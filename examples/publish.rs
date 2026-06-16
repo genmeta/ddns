@@ -8,7 +8,8 @@ use std::{
 use clap::Parser;
 use ddns::{
     core::{parser::record::endpoint::EndpointAddr, signature::SignatureFields},
-    resolvers::{DHTTP_H3_DNS_SERVER, h3::H3Publisher},
+    publishers::H3Publisher,
+    resolvers::DHTTP_H3_DNS_SERVER,
 };
 use h3x::dquic::{
     Identity, Network, QuicEndpoint,

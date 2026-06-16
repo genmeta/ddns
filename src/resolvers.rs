@@ -1,34 +1,33 @@
+#[cfg(feature = "resolvers")]
 use std::{
     error::Error,
-    fmt::{self, Debug, Display},
+    fmt::{self, Display},
     sync::Arc,
 };
 
+#[cfg(feature = "resolvers")]
 use dquic::{
     qbase::net::addr::EndpointAddr,
     qresolve::{Resolve, ResolveFuture, Source},
 };
+#[cfg(feature = "resolvers")]
 use futures::{FutureExt, Stream, StreamExt, TryFutureExt, stream};
+#[cfg(feature = "resolvers")]
 use tokio::io;
 
-#[cfg(feature = "h3x-resolver")]
-pub mod h3;
-#[cfg(feature = "http-resolver")]
-pub mod http;
-
-#[cfg(feature = "http-resolver")]
-use http::HttpResolver;
-
-#[cfg(feature = "mdns-resolver")]
-use crate::mdns::resolvers::mdns::MdnsResolvers;
+#[cfg(feature = "h3")]
+pub use crate::h3::H3Resolver;
+#[cfg(feature = "http")]
+pub use crate::http::HttpResolver;
+#[cfg(feature = "mdns")]
+pub use crate::mdns::MdnsResolver;
+#[cfg(all(feature = "mdns", feature = "dquic-network", feature = "resolvers"))]
+use crate::mdns::MdnsResolvers;
 
 /// Extract and validate the DNS host from `name`, which may include a `:port`
 /// suffix. Returns `Some(host)` if the host part is a valid RFC-compliant DNS
 /// name, or `None` for raw IP addresses, bracketed IPv6, or malformed input.
-#[cfg_attr(
-    not(any(feature = "h3x-resolver", feature = "http-resolver")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(any(feature = "h3", feature = "http")), allow(dead_code))]
 pub(crate) fn resolvable_name(name: &str) -> Option<&str> {
     let host = match name.rsplit_once(':') {
         Some((h, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => h,
@@ -47,6 +46,7 @@ pub const DHTTP_HTTP_DNS_SERVER: &str = crate::bootstrap::DHTTP_HTTP_DNS_SERVER;
 /// mDNS service type used by DHTTP endpoints.
 pub const DHTTP_MDNS_SERVICE: &str = crate::bootstrap::DHTTP_MDNS_SERVICE;
 
+#[cfg(feature = "resolvers")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum DnsScheme {
     Mdns,
@@ -55,6 +55,7 @@ pub enum DnsScheme {
     System,
 }
 
+#[cfg(feature = "resolvers")]
 impl Display for DnsScheme {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -66,12 +67,14 @@ impl Display for DnsScheme {
     }
 }
 
+#[cfg(feature = "resolvers")]
 #[derive(Debug, snafu::Snafu)]
 #[snafu(display("unsupported dns scheme {scheme}"))]
 pub struct ParseDnsSchemeError {
     scheme: String,
 }
 
+#[cfg(feature = "resolvers")]
 impl std::str::FromStr for DnsScheme {
     type Err = ParseDnsSchemeError;
 
@@ -89,16 +92,20 @@ impl std::str::FromStr for DnsScheme {
 }
 
 pub mod deferred;
+#[cfg(feature = "mdns")]
 pub(crate) mod selector;
 pub mod weak;
 
+#[cfg(feature = "resolvers")]
 type ArcResolver = Arc<dyn Resolve + Send + Sync + 'static>;
 
+#[cfg(feature = "resolvers")]
 #[derive(Default, Clone, Debug)]
 pub struct Resolvers {
     resolvers: Vec<ArcResolver>,
 }
 
+#[cfg(feature = "resolvers")]
 impl Display for Resolvers {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Resolvers(")?;
@@ -116,11 +123,13 @@ impl Display for Resolvers {
     }
 }
 
+#[cfg(feature = "resolvers")]
 #[derive(Debug)]
 pub struct DnsErrors {
     errors: Vec<(String, io::Error)>,
 }
 
+#[cfg(feature = "resolvers")]
 fn format_dns_error_sources(
     f: &mut fmt::Formatter<'_>,
     error: &(dyn Error + 'static),
@@ -137,6 +146,7 @@ fn format_dns_error_sources(
     Ok(())
 }
 
+#[cfg(feature = "resolvers")]
 fn format_dns_error_entry(
     f: &mut fmt::Formatter<'_>,
     resolver: &str,
@@ -146,6 +156,7 @@ fn format_dns_error_entry(
     format_dns_error_sources(f, error)
 }
 
+#[cfg(feature = "resolvers")]
 impl fmt::Display for DnsErrors {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.errors.is_empty() {
@@ -160,31 +171,35 @@ impl fmt::Display for DnsErrors {
     }
 }
 
+#[cfg(feature = "resolvers")]
 impl Error for DnsErrors {}
 
+#[cfg(feature = "resolvers")]
 #[derive(Default)]
 pub struct ResolversBuilder {
     resolvers: Resolvers,
 }
 
+#[cfg(feature = "resolvers")]
 impl ResolversBuilder {
     pub fn resolver(mut self, resolver: ArcResolver) -> Self {
         self.resolvers.push(resolver);
         self
     }
 
-    #[cfg(feature = "mdns-resolver")]
+    #[cfg(all(feature = "mdns", feature = "dquic-network"))]
     pub async fn mdns(
         mut self,
         network: Arc<h3x::dquic::Network>,
         patterns: Arc<Vec<h3x::dquic::binds::BindPattern>>,
     ) -> Self {
-        let mdns = Arc::new(MdnsResolvers::bind(network, patterns, DHTTP_MDNS_SERVICE).await);
+        let mdns: ArcResolver =
+            Arc::new(MdnsResolvers::bind(network, patterns, DHTTP_MDNS_SERVICE).await);
         self.resolvers.push(mdns);
         self
     }
 
-    #[cfg(feature = "h3x-resolver")]
+    #[cfg(feature = "h3")]
     pub fn h3<C>(
         self,
         endpoint: Arc<h3x::endpoint::H3Endpoint<C, C::Connection>>,
@@ -197,7 +212,7 @@ impl ResolversBuilder {
         self.h3_with_base_url(DHTTP_H3_DNS_SERVER, endpoint)
     }
 
-    #[cfg(feature = "h3x-resolver")]
+    #[cfg(feature = "h3")]
     pub fn h3_with_base_url<C>(
         mut self,
         base_url: impl AsRef<str>,
@@ -208,17 +223,17 @@ impl ResolversBuilder {
         C::Error: Send + Sync + 'static,
         C::Connection: Send + 'static,
     {
-        let resolver = h3::H3Resolver::from_endpoint(base_url, endpoint)?;
+        let resolver = H3Resolver::from_endpoint(base_url, endpoint)?;
         self.resolvers.push(Arc::new(resolver));
         Ok(self)
     }
 
-    #[cfg(feature = "http-resolver")]
+    #[cfg(feature = "http")]
     pub fn http(self) -> io::Result<Self> {
         self.http_with_base_url(DHTTP_HTTP_DNS_SERVER)
     }
 
-    #[cfg(feature = "http-resolver")]
+    #[cfg(feature = "http")]
     pub fn http_with_base_url(mut self, base_url: impl AsRef<str>) -> io::Result<Self> {
         let resolver = HttpResolver::new(base_url.as_ref())?;
         self.resolvers.push(Arc::new(resolver));
@@ -236,6 +251,7 @@ impl ResolversBuilder {
     }
 }
 
+#[cfg(feature = "resolvers")]
 impl Resolvers {
     pub fn builder() -> ResolversBuilder {
         ResolversBuilder::default()
@@ -284,6 +300,7 @@ impl Resolvers {
     }
 }
 
+#[cfg(feature = "resolvers")]
 impl Resolve for Resolvers {
     fn lookup<'l>(&'l self, name: &'l str) -> ResolveFuture<'l> {
         self.lookup(name)
@@ -297,18 +314,13 @@ impl Resolve for Resolvers {
 mod tests {
     use std::{error::Error as StdError, fmt, io, str::FromStr};
 
-    #[cfg(feature = "mdns-resolver")]
+    #[cfg(all(feature = "mdns", feature = "dquic-network", feature = "resolvers"))]
     use super::MdnsResolvers;
-    #[cfg(any(
-        feature = "h3x-resolver",
-        feature = "http-resolver",
-        feature = "mdns-resolver"
-    ))]
+    #[cfg(feature = "resolvers")]
     use super::Resolvers;
-    use super::{
-        DHTTP_H3_DNS_SERVER, DHTTP_HTTP_DNS_SERVER, DHTTP_MDNS_SERVICE, DnsErrors, DnsScheme,
-        resolvable_name,
-    };
+    use super::{DHTTP_H3_DNS_SERVER, DHTTP_HTTP_DNS_SERVER, DHTTP_MDNS_SERVICE, resolvable_name};
+    #[cfg(feature = "resolvers")]
+    use super::{DnsErrors, DnsScheme};
 
     #[derive(Debug)]
     struct TestSourceError {
@@ -389,6 +401,7 @@ mod tests {
         assert_eq!(resolvable_name("[::1]:443"), None);
     }
 
+    #[cfg(feature = "resolvers")]
     #[test]
     fn dns_scheme_round_trips_supported_schemes_and_rejects_dht() {
         let cases = [
@@ -406,6 +419,7 @@ mod tests {
         assert!(DnsScheme::from_str("dht").is_err());
     }
 
+    #[cfg(feature = "resolvers")]
     #[test]
     fn dns_errors_render_no_resolvers_available_when_empty() {
         let error = DnsErrors { errors: vec![] };
@@ -413,6 +427,7 @@ mod tests {
         assert_eq!(error.to_string(), "no DNS resolvers available");
     }
 
+    #[cfg(feature = "resolvers")]
     #[test]
     fn dns_errors_render_resolver_bullets_in_stored_order() {
         let error = DnsErrors {
@@ -435,6 +450,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "resolvers")]
     #[test]
     fn dns_errors_render_numbered_source_chain_for_one_resolver() {
         let error = DnsErrors {
@@ -457,6 +473,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "resolvers")]
     #[test]
     fn dns_errors_render_repeated_source_messages_without_deduplication() {
         let error = DnsErrors {
@@ -483,7 +500,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "mdns-resolver")]
+    #[cfg(all(feature = "mdns", feature = "dquic-network", feature = "resolvers"))]
     #[tokio::test]
     async fn resolvers_builder_can_enable_mdns() {
         use std::sync::Arc;
@@ -501,7 +518,7 @@ mod tests {
         assert!(resolvers.to_string().contains("mDNS resolvers"));
     }
 
-    #[cfg(feature = "h3x-resolver")]
+    #[cfg(all(feature = "h3", feature = "resolvers", feature = "dquic-network"))]
     #[tokio::test]
     async fn resolvers_builder_accepts_custom_h3_base_url() {
         use std::sync::Arc;
@@ -518,7 +535,7 @@ mod tests {
         assert!(resolvers.to_string().contains("custom-dns.example"));
     }
 
-    #[cfg(feature = "http-resolver")]
+    #[cfg(all(feature = "http", feature = "resolvers"))]
     #[test]
     fn resolvers_builder_accepts_custom_http_base_url() {
         let resolvers = Resolvers::builder()
@@ -529,7 +546,7 @@ mod tests {
         assert!(resolvers.to_string().contains("custom-dns.example"));
     }
 
-    #[cfg(feature = "mdns-resolver")]
+    #[cfg(all(feature = "mdns", feature = "dquic-network", feature = "resolvers"))]
     #[tokio::test]
     async fn mdns_resolvers_bind_installs_mdns_on_null_io_binding() {
         use std::sync::Arc;

@@ -1,7 +1,11 @@
 mod bootstrap;
 
 pub mod core;
+#[cfg(feature = "h3")]
+pub mod h3;
+#[cfg(feature = "http")]
+pub mod http;
+#[cfg(feature = "mdns")]
 pub mod mdns;
-#[cfg(any(feature = "h3x-resolver", feature = "mdns-resolver"))]
-pub mod publisher;
+pub mod publishers;
 pub mod resolvers;
