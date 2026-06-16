@@ -124,7 +124,7 @@ impl Display for Resolvers {
 
 #[cfg(feature = "resolvers")]
 #[derive(Debug)]
-pub struct DnsErrors {
+pub struct ResolversError {
     errors: Vec<(String, io::Error)>,
 }
 
@@ -156,7 +156,7 @@ fn format_dns_error_entry(
 }
 
 #[cfg(feature = "resolvers")]
-impl fmt::Display for DnsErrors {
+impl fmt::Display for ResolversError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.errors.is_empty() {
             return write!(f, "no DNS resolvers available");
@@ -171,7 +171,7 @@ impl fmt::Display for DnsErrors {
 }
 
 #[cfg(feature = "resolvers")]
-impl Error for DnsErrors {}
+impl Error for ResolversError {}
 
 #[cfg(feature = "resolvers")]
 #[derive(Default)]
@@ -276,7 +276,7 @@ impl Resolvers {
     pub async fn lookup(
         &self,
         name: &str,
-    ) -> Result<impl Stream<Item = (Source, EndpointAddr)> + use<>, DnsErrors> {
+    ) -> Result<impl Stream<Item = (Source, EndpointAddr)> + use<>, ResolversError> {
         let mut errors = vec![];
 
         let mut lookups = stream::FuturesUnordered::from_iter(
@@ -291,7 +291,7 @@ impl Resolvers {
             match lookups.next().await {
                 Some((Ok(endpoints), _)) => break endpoints,
                 Some((Err(error), resolver)) => errors.push((resolver.to_string(), error)),
-                None => return Err(DnsErrors { errors }),
+                None => return Err(ResolversError { errors }),
             }
         };
 
@@ -322,7 +322,7 @@ mod tests {
     use super::Resolvers;
     use super::{DHTTP_H3_DNS_SERVER, DHTTP_HTTP_DNS_SERVER, DHTTP_MDNS_SERVICE, resolvable_name};
     #[cfg(feature = "resolvers")]
-    use super::{DnsErrors, DnsScheme};
+    use super::{DnsScheme, ResolversError};
 
     #[cfg(feature = "resolvers")]
     #[derive(Debug)]
@@ -429,16 +429,16 @@ mod tests {
 
     #[cfg(feature = "resolvers")]
     #[test]
-    fn dns_errors_render_no_resolvers_available_when_empty() {
-        let error = DnsErrors { errors: vec![] };
+    fn resolvers_error_renders_no_resolvers_available_when_empty() {
+        let error = ResolversError { errors: vec![] };
 
         assert_eq!(error.to_string(), "no DNS resolvers available");
     }
 
     #[cfg(feature = "resolvers")]
     #[test]
-    fn dns_errors_render_resolver_bullets_in_stored_order() {
-        let error = DnsErrors {
+    fn resolvers_error_renders_resolver_bullets_in_stored_order() {
+        let error = ResolversError {
             errors: vec![
                 (
                     "System DNS Resolver".to_string(),
@@ -460,8 +460,8 @@ mod tests {
 
     #[cfg(feature = "resolvers")]
     #[test]
-    fn dns_errors_render_numbered_source_chain_for_one_resolver() {
-        let error = DnsErrors {
+    fn resolvers_error_renders_numbered_source_chain_for_one_resolver() {
+        let error = ResolversError {
             errors: vec![(
                 "DeferredResolver(H3 DNS Resolver(https://dns.genmeta.net:4433/))".to_string(),
                 chained_other_error(TestSourceError::with_source(
@@ -483,8 +483,8 @@ mod tests {
 
     #[cfg(feature = "resolvers")]
     #[test]
-    fn dns_errors_render_repeated_source_messages_without_deduplication() {
-        let error = DnsErrors {
+    fn resolvers_error_renders_repeated_source_messages_without_deduplication() {
+        let error = ResolversError {
             errors: vec![(
                 "DeferredResolver(H3 DNS Resolver(https://dns.genmeta.net:4433/))".to_string(),
                 chained_other_error(TestSourceError::with_source(
