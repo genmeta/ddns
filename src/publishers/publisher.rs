@@ -2,7 +2,7 @@ use std::{fmt, io, sync::Arc};
 
 use dhttp_identity::name::Name;
 use dquic::qresolve::Publish;
-use snafu::{ResultExt, Snafu};
+use snafu::{IntoError, ResultExt, Snafu};
 
 use super::{AddressView, PublishScope, packet};
 
@@ -18,6 +18,9 @@ pub enum PublisherError {
         publisher: String,
         source: io::Error,
     },
+    #[cfg(all(feature = "mdns", feature = "dquic-network"))]
+    #[snafu(display("all mdns publishers failed"))]
+    Mdns { source: MdnsPublishersError },
 }
 
 #[derive(Clone)]
@@ -31,7 +34,33 @@ enum PublisherKind {
         scope: PublishScope,
         publisher: Arc<dyn Publish + Send + Sync>,
     },
+    #[cfg(all(feature = "mdns", feature = "dquic-network"))]
+    Mdns(Arc<crate::mdns::MdnsResolvers>),
 }
+
+#[cfg(all(feature = "mdns", feature = "dquic-network"))]
+#[derive(Debug)]
+pub struct MdnsPublishersError {
+    errors: Vec<(String, io::Error)>,
+}
+
+#[cfg(all(feature = "mdns", feature = "dquic-network"))]
+impl fmt::Display for MdnsPublishersError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.errors.is_empty() {
+            return write!(f, "no mdns publishers available");
+        }
+
+        write!(f, "all mdns publishers failed")?;
+        for (publisher, error) in &self.errors {
+            write!(f, "\n  - {publisher}: {error}")?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "mdns", feature = "dquic-network"))]
+impl std::error::Error for MdnsPublishersError {}
 
 impl fmt::Debug for Publisher {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -41,6 +70,11 @@ impl fmt::Debug for Publisher {
                 .field("scope", scope)
                 .field("publisher", publisher)
                 .finish(),
+            #[cfg(all(feature = "mdns", feature = "dquic-network"))]
+            PublisherKind::Mdns(resolvers) => f
+                .debug_struct("Publisher")
+                .field("mdns", resolvers)
+                .finish(),
         }
     }
 }
@@ -49,6 +83,8 @@ impl fmt::Display for Publisher {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.inner {
             PublisherKind::Custom { publisher, .. } => fmt::Display::fmt(publisher, f),
+            #[cfg(all(feature = "mdns", feature = "dquic-network"))]
+            PublisherKind::Mdns(resolvers) => fmt::Display::fmt(resolvers, f),
         }
     }
 }
@@ -74,6 +110,13 @@ impl Publisher {
         Self::new(PublishScope::WideArea, publisher)
     }
 
+    #[cfg(all(feature = "mdns", feature = "dquic-network"))]
+    pub fn mdns(resolvers: Arc<crate::mdns::MdnsResolvers>) -> Self {
+        Self {
+            inner: PublisherKind::Mdns(resolvers),
+        }
+    }
+
     pub async fn publish<V>(&self, name: &Name<'_>, view: &V) -> Result<(), PublisherError>
     where
         V: AddressView + Sync,
@@ -82,6 +125,8 @@ impl Publisher {
             PublisherKind::Custom { scope, publisher } => {
                 publish_selected(publisher.as_ref(), scope, name, view).await
             }
+            #[cfg(all(feature = "mdns", feature = "dquic-network"))]
+            PublisherKind::Mdns(resolvers) => publish_mdns(resolvers, name, view).await,
         }
     }
 }
@@ -281,5 +326,43 @@ mod tests {
                 .to_string(),
             "publish rejected"
         );
+    }
+}
+
+#[cfg(all(feature = "mdns", feature = "dquic-network"))]
+async fn publish_mdns<V>(
+    resolvers: &crate::mdns::MdnsResolvers,
+    name: &Name<'_>,
+    view: &V,
+) -> Result<(), PublisherError>
+where
+    V: AddressView + Sync,
+{
+    let bound_resolvers = resolvers.bound_resolvers();
+    if bound_resolvers.is_empty() {
+        tracing::debug!(name = %name, "no mdns publishers currently bound");
+        return Ok(());
+    }
+
+    let mut errors = Vec::new();
+    let mut succeeded = false;
+    for bound in bound_resolvers {
+        let scope = PublishScope::LocalLink {
+            device: bound.device.clone().into(),
+            family: bound.family,
+        };
+        match publish_selected(&bound.resolver, &scope, name, view).await {
+            Ok(()) => succeeded = true,
+            Err(PublisherError::Publish { source, .. }) => {
+                errors.push((bound.resolver.to_string(), source));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    if succeeded {
+        Ok(())
+    } else {
+        Err(publisher_error::MdnsSnafu.into_error(MdnsPublishersError { errors }))
     }
 }

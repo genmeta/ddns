@@ -1,16 +1,11 @@
 #[cfg(feature = "publishers")]
 #[test]
-fn publishers_facade_exposes_endpoint_publisher_and_aggregate_types() {
-    let _ = core::any::type_name::<ddns::publishers::EndpointPublisher>();
-    let _ = core::any::type_name::<
-        ddns::publishers::EndpointPublisher<
-            dyn dhttp_identity::identity::LocalAuthority + Send + Sync,
-            dyn dquic::qresolve::Resolve + Send + Sync,
-        >,
-    >();
-
+fn publishers_facade_exposes_publisher_and_aggregate_types() {
+    let _ = core::any::type_name::<ddns::publishers::Publisher>();
     let _ = core::any::type_name::<ddns::publishers::Publishers>();
-    let _ = core::any::type_name::<ddns::publishers::PublishersBuilder>();
+    let _ = core::any::type_name::<ddns::publishers::PublisherError>();
+    let _ = core::any::type_name::<ddns::publishers::PublishersError>();
+    let _ = core::any::type_name::<ddns::publishers::PublishScope>();
 }
 
 #[cfg(all(feature = "publishers", feature = "dquic-network"))]

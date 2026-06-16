@@ -1,6 +1,8 @@
 #[cfg(feature = "publishers")]
 mod address;
 #[cfg(feature = "publishers")]
+mod aggregate;
+#[cfg(feature = "publishers")]
 mod dispatch;
 #[cfg(feature = "publishers")]
 mod packet;
@@ -20,9 +22,11 @@ pub use address::{
 #[cfg(all(feature = "publishers", feature = "dquic-network"))]
 pub use address::{AddressViewSource, EndpointBindingAddresses};
 #[cfg(feature = "publishers")]
+pub use aggregate::{Publishers, PublishersError};
+#[cfg(feature = "publishers")]
 use dhttp_identity::{identity::LocalAuthority, name::Name};
 #[cfg(feature = "publishers")]
-use dquic::qresolve::{Publish, Resolve};
+use dquic::qresolve::Resolve;
 #[cfg(all(feature = "publishers", feature = "dquic-network"))]
 use dquic::{
     qinterface::component::location::AddressEvent, qtraversal::nat::client::ClientLocationData,
@@ -126,50 +130,6 @@ where
             return publish_once_error::NoPublisherResolverSnafu.fail();
         }
         Ok(())
-    }
-}
-
-#[cfg(feature = "publishers")]
-#[derive(Default, Debug, Clone)]
-pub struct Publishers {
-    publishers: Vec<Arc<dyn Publish + Send + Sync + 'static>>,
-}
-
-#[cfg(feature = "publishers")]
-impl Publishers {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with(mut self, publisher: Arc<dyn Publish + Send + Sync + 'static>) -> Self {
-        self.push(publisher);
-        self
-    }
-
-    pub fn push(&mut self, publisher: Arc<dyn Publish + Send + Sync + 'static>) {
-        self.publishers.push(publisher);
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &Arc<dyn Publish + Send + Sync + 'static>> {
-        self.publishers.iter()
-    }
-}
-
-#[cfg(feature = "publishers")]
-#[derive(Default, Debug)]
-pub struct PublishersBuilder {
-    publishers: Publishers,
-}
-
-#[cfg(feature = "publishers")]
-impl PublishersBuilder {
-    pub fn publisher(mut self, publisher: Arc<dyn Publish + Send + Sync + 'static>) -> Self {
-        self.publishers.push(publisher);
-        self
-    }
-
-    pub fn build(self) -> Publishers {
-        self.publishers
     }
 }
 
