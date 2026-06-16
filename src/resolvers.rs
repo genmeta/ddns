@@ -92,7 +92,6 @@ impl std::str::FromStr for DnsScheme {
 }
 
 pub mod deferred;
-#[cfg(feature = "mdns")]
 pub(crate) mod selector;
 pub mod weak;
 
@@ -312,7 +311,10 @@ impl Resolve for Resolvers {
 
 #[cfg(test)]
 mod tests {
-    use std::{error::Error as StdError, fmt, io, str::FromStr};
+    #[cfg(all(feature = "mdns", feature = "dquic-network", feature = "resolvers"))]
+    use std::str::FromStr;
+    #[cfg(feature = "resolvers")]
+    use std::{error::Error as StdError, fmt, io};
 
     #[cfg(all(feature = "mdns", feature = "dquic-network", feature = "resolvers"))]
     use super::MdnsResolvers;
@@ -322,12 +324,14 @@ mod tests {
     #[cfg(feature = "resolvers")]
     use super::{DnsErrors, DnsScheme};
 
+    #[cfg(feature = "resolvers")]
     #[derive(Debug)]
     struct TestSourceError {
         message: &'static str,
         source: Option<Box<TestSourceError>>,
     }
 
+    #[cfg(feature = "resolvers")]
     impl TestSourceError {
         fn leaf(message: &'static str) -> Self {
             Self {
@@ -344,12 +348,14 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "resolvers")]
     impl fmt::Display for TestSourceError {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             f.write_str(self.message)
         }
     }
 
+    #[cfg(feature = "resolvers")]
     impl StdError for TestSourceError {
         fn source(&self) -> Option<&(dyn StdError + 'static)> {
             self.source
@@ -358,10 +364,12 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "resolvers")]
     fn other_error(message: &'static str) -> io::Error {
         io::Error::other(message)
     }
 
+    #[cfg(feature = "resolvers")]
     fn chained_other_error(root: TestSourceError) -> io::Error {
         io::Error::other(root)
     }

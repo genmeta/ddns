@@ -186,8 +186,11 @@ where
 mod tests {
     use std::time::Duration;
 
+    #[cfg(feature = "dquic-network")]
     use dquic::{qbase::net::addr::EndpointAddr, qresolve::Source};
+    #[cfg(feature = "dquic-network")]
     use futures::StreamExt;
+    #[cfg(feature = "dquic-network")]
     use tokio::time::Instant;
 
     use super::*;

@@ -1,20 +1,89 @@
 use std::{sync::Arc, time::Duration};
 
-use dquic::{
-    qbase::net::addr::EndpointAddr,
-    qresolve::{RecordStream, Source},
-};
+use dquic::qresolve::{RecordStream, Source};
 use futures::{StreamExt, stream};
 use h3x::quic;
 use http_body_util::BodyExt;
+use snafu::{IntoError, ResultExt};
 use tokio::time::Instant;
-use tracing::trace;
 
 use super::{
     H3LookupError, H3Resolver, LOOKUP_REQUEST_ATTEMPTS, LOOKUP_REQUEST_TIMEOUT, LookupDecodeError,
-    Record,
+    Record, h3_lookup_error, lookup_decode_error,
 };
 use crate::core::{parser::packet::be_packet, wire::be_multi_response};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LookupRecords {
+    pub(super) endpoints: Vec<dquic::qbase::net::addr::EndpointAddr>,
+}
+
+impl LookupRecords {
+    pub(super) fn decode(domain: &str, response: &[u8]) -> Result<Self, LookupDecodeError> {
+        use crate::core::parser::record;
+
+        let (remain, multi) = match be_multi_response(response) {
+            Ok(response) => response,
+            Err(_error) => return Err(LookupDecodeError::MultiResponse),
+        };
+        if !remain.is_empty() {
+            return Err(LookupDecodeError::MultiResponse);
+        }
+
+        let mut endpoint_records = Vec::new();
+        for r in multi.records {
+            if !r.signature_fields.is_empty() {
+                match r.signature_fields.verify(&r.dns, &r.cert) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::debug!("ignored record with invalid DNS packet signature");
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            error = %snafu::Report::from_error(&error),
+                            "ignored record with malformed DNS packet signature"
+                        );
+                        continue;
+                    }
+                }
+            }
+
+            let (_remain, packet) = match be_packet(&r.dns) {
+                Ok(packet) => packet,
+                Err(source) => {
+                    return Err(
+                        lookup_decode_error::ParseRecordsSnafu.into_error(source.to_owned())
+                    );
+                }
+            };
+
+            endpoint_records.extend(packet.answers.iter().filter_map(
+                |answer| match answer.data() {
+                    record::RData::E(ep) => {
+                        if answer.name() != domain {
+                            tracing::debug!(
+                                answer_name = %answer.name(),
+                                query = domain,
+                                "ignored endpoint answer for different name"
+                            );
+                            return None;
+                        }
+                        Some(ep.clone())
+                    }
+                    _ => {
+                        tracing::debug!(?answer, "ignored record");
+                        None
+                    }
+                },
+            ));
+        }
+
+        Ok(Self {
+            endpoints: crate::resolvers::selector::selected_endpoint_addrs(endpoint_records),
+        })
+    }
+}
 
 impl<C> H3Resolver<C>
 where
@@ -93,7 +162,6 @@ where
     }
 
     pub async fn lookup(&self, name: &str) -> Result<RecordStream, H3LookupError<C::Error>> {
-        use crate::core::parser::record;
         let server = Arc::from(self.base_url.origin().ascii_serialization());
         let source = Source::H3 { server };
 
@@ -134,73 +202,9 @@ where
             Err(error) => return Err(error),
         };
 
-        // Server always returns multi-record format.
-        let (remain, multi) = match be_multi_response(response.as_ref()) {
-            Ok(response) => response,
-            Err(_error) => {
-                return Err(H3LookupError::Decode {
-                    source: LookupDecodeError::MultiResponse,
-                });
-            }
-        };
-        if !remain.is_empty() {
-            return Err(H3LookupError::Decode {
-                source: LookupDecodeError::MultiResponse,
-            });
-        }
-
-        let mut addrs = Vec::new();
-        for r in multi.records {
-            if !r.signature_fields.is_empty() {
-                match r.signature_fields.verify(&r.dns, &r.cert) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        tracing::debug!("ignored record with invalid DNS packet signature");
-                        continue;
-                    }
-                    Err(error) => {
-                        tracing::debug!(error = %snafu::Report::from_error(&error), "ignored record with malformed DNS packet signature");
-                        continue;
-                    }
-                }
-            }
-
-            let (_remain, packet) = match be_packet(&r.dns) {
-                Ok(packet) => packet,
-                Err(source) => {
-                    return Err(H3LookupError::Decode {
-                        source: LookupDecodeError::ParseRecords {
-                            source: source.to_owned(),
-                        },
-                    });
-                }
-            };
-
-            addrs.extend(
-                packet
-                    .answers
-                    .iter()
-                    .filter_map(|answer| match answer.data() {
-                        record::RData::E(ep) => {
-                            if answer.name() != domain {
-                                tracing::debug!(
-                                    answer_name = %answer.name(),
-                                    query = domain,
-                                    "ignored endpoint answer for different name"
-                                );
-                                return None;
-                            }
-                            let endpoint = TryInto::<EndpointAddr>::try_into(ep.clone()).ok()?;
-                            trace!(?endpoint, "parsed endpoint from record");
-                            Some(endpoint)
-                        }
-                        _ => {
-                            tracing::debug!(?answer, "ignored record");
-                            None
-                        }
-                    }),
-            );
-        }
+        let records = LookupRecords::decode(domain, response.as_ref())
+            .context(h3_lookup_error::DecodeSnafu)?;
+        let addrs = records.endpoints;
 
         if addrs.is_empty() {
             self.negative_cache
@@ -219,5 +223,66 @@ where
         self.negative_cache.remove(domain);
 
         Ok(stream::iter(addrs.into_iter().map(move |ep| (source.clone(), ep))).boxed())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, net::SocketAddrV4};
+
+    use super::*;
+    use crate::core::{
+        MdnsPacket,
+        parser::record::endpoint::EndpointAddr as DnsEndpointAddr,
+        wire::{MultiResponse, ResponseRecord},
+    };
+
+    fn direct(addr: &str, main: bool, sequence: u64) -> DnsEndpointAddr {
+        let socket: SocketAddrV4 = addr.parse().expect("socket addr");
+        let mut endpoint = DnsEndpointAddr::direct_v4(socket);
+        endpoint.set_main(main);
+        endpoint.set_sequence(sequence);
+        endpoint
+    }
+
+    fn response_for(name: &str, endpoints: Vec<DnsEndpointAddr>) -> Vec<u8> {
+        let mut hosts = HashMap::new();
+        hosts.insert(name.to_owned(), endpoints);
+        let packet = MdnsPacket::answer(0, &hosts).to_bytes();
+        MultiResponse::new([ResponseRecord::unsigned(packet, Vec::new())]).encode()
+    }
+
+    #[test]
+    fn lookup_records_select_primary_group() {
+        let response = response_for(
+            "demo.dhttp.net",
+            vec![
+                direct("192.0.2.20:4433", false, 1),
+                direct("192.0.2.10:4433", true, 2),
+                direct("192.0.2.11:4433", true, 2),
+                direct("192.0.2.30:4433", true, 3),
+            ],
+        );
+
+        let records = LookupRecords::decode("demo.dhttp.net", &response).expect("records");
+
+        assert_eq!(records.endpoints.len(), 2);
+        assert_eq!(
+            records.endpoints[0],
+            dquic::qbase::net::addr::EndpointAddr::direct("192.0.2.10:4433".parse().unwrap())
+        );
+        assert_eq!(
+            records.endpoints[1],
+            dquic::qbase::net::addr::EndpointAddr::direct("192.0.2.11:4433".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn lookup_records_ignore_answer_name_mismatch() {
+        let response = response_for("other.dhttp.net", vec![direct("192.0.2.50:4433", true, 1)]);
+
+        let records = LookupRecords::decode("demo.dhttp.net", &response).expect("records");
+
+        assert!(records.endpoints.is_empty());
     }
 }

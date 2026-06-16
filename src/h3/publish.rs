@@ -106,8 +106,10 @@ where
 mod tests {
     use std::sync::Arc;
 
+    #[cfg(feature = "dquic-network")]
     use dquic::qresolve::Publish as _;
     use futures::future::BoxFuture;
+    #[cfg(feature = "dquic-network")]
     use h3x::endpoint::H3Endpoint;
     use ring::signature::KeyPair as _;
     use rustls::{
