@@ -7,8 +7,7 @@ use std::{
 
 use clap::Parser;
 use ddns::{
-    core::{parser::record::endpoint::EndpointAddr, signature::SignatureFields},
-    publishers::H3Publisher,
+    core::parser::record::endpoint::EndpointAddr, publishers::H3Publisher,
     resolvers::DHTTP_H3_DNS_SERVER,
 };
 use h3x::dquic::{
@@ -42,13 +41,6 @@ struct Options {
     /// 客户端私钥 PEM。
     #[arg(long)]
     client_key: PathBuf,
-
-    /// Sign DNS packets using HTTP signature fields and the client private key.
-    ///
-    /// This must correspond to the client certificate presented in mTLS, because the server
-    /// verifies the signature with the peer certificate's SPKI.
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-    sign: bool,
 
     /// 要发布的线上域名，必须与客户端证书 SAN 匹配。
     #[arg(long)]
@@ -142,12 +134,6 @@ async fn main() -> io::Result<()> {
     let resolver = H3Publisher::new(opt.base_url.clone(), h3_endpoint)?;
 
     info!(host = %opt.host, addrs = ?opt.addr, base_url = %opt.base_url, "publish.start");
-    if opt.sign {
-        info!("publish.packet_signing.enabled");
-    } else {
-        info!("publish.packet_signing.disabled");
-    }
-
     for &addr in &opt.addr {
         info!("Creating endpoint for address: {}", addr);
         let mut endpoint = match addr {
@@ -160,20 +146,10 @@ async fn main() -> io::Result<()> {
         let mut hosts = std::collections::HashMap::new();
         hosts.insert(opt.host.clone(), vec![endpoint]);
         let packet = ddns::core::MdnsPacket::answer(0, &hosts).to_bytes();
-        if opt.sign {
-            info!("signing dns packet");
-            let signature_fields = SignatureFields::sign(&packet, identity.as_ref())
-                .await
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            resolver
-                .publish_signed(&opt.host, &packet, &signature_fields)
-                .await?;
-        } else {
-            resolver
-                .publish(&opt.host, &packet)
-                .await
-                .map_err(io::Error::other)?;
-        }
+        resolver
+            .publish(&opt.host, &packet)
+            .await
+            .map_err(io::Error::other)?;
         info!("Successfully published endpoint for {}", addr);
     }
     info!("publish.ok");

@@ -8,7 +8,7 @@ whose library target remains `ddns`.
 | `mdns_discover` | `mdns` | Bind an mDNS service, publish sample local hosts, and print multicast packets. |
 | `mdns_query` | `mdns` | Query a DHTTP name over local mDNS. |
 | `query` | none | Query a DNS-over-H3 server and decode the multi-record response. |
-| `publish` | `h3` | Publish signed endpoint `E` records to a DNS-over-H3 server using client mTLS. |
+| `publish` | `h3` | Publish endpoint `E` records to a DNS-over-H3 server using client mTLS; H3 publish request headers are signed from the client endpoint identity. |
 
 Run all commands from the `ddns/` repository.
 
@@ -82,9 +82,9 @@ Options:
 | `--client-name <NAME>` | DHTTP identity name presented by the client endpoint. |
 | `--client-cert <PATH>` | Client certificate chain PEM for mTLS and endpoint signature verification. |
 | `--client-key <PATH>` | Client private key PEM. |
-| `--sign <true|false>` | Whether to sign each endpoint `E` record. Defaults to `true`. |
 | `--host <NAME>` | DNS host to publish. |
 | `--addr <ADDR[,ADDR...]>` | One or more socket addresses to publish. |
 
 The example imports `H3Publisher` from the `ddns::publishers` facade, but only needs the
 `h3` backend feature because backend publisher types are re-exported from the facade directly.
+H3 publish request headers are always signed with the configured client endpoint identity; callers no longer pass request signature fields.
