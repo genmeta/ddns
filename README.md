@@ -8,7 +8,7 @@ while `ddns::resolvers` and `ddns::publishers` act as facades for re-exports and
 aggregate helper types.
 
 ```toml
-ddns = { package = "dyns", version = "0.3.0" }
+ddns = { package = "dyns", version = "0.4.0" }
 ```
 
 ## Crate layout
