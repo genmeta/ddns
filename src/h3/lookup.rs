@@ -13,6 +13,16 @@ use super::{
 };
 use crate::core::{parser::packet::be_packet, wire::be_multi_response};
 
+const LOOKUP_API_PATH: &str = "/api/v2/lookup";
+
+fn lookup_url(base_url: &url::Url, name: &str) -> url::Url {
+    let mut url = base_url
+        .join(LOOKUP_API_PATH)
+        .expect("h3 dns lookup api path must be valid");
+    url.query_pairs_mut().append_pair("host", name);
+    url
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct LookupRecords {
     pub(super) endpoints: Vec<dquic::qbase::net::addr::EndpointAddr>,
@@ -181,8 +191,7 @@ where
             return Ok(stream.boxed());
         }
 
-        let mut url = self.base_url.join("lookup").expect("Invalid URL");
-        url.set_query(Some(&format!("host={}", domain)));
+        let url = lookup_url(&self.base_url, domain);
         let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
 
         tracing::trace!("sending lookup request to {}", self.base_url);
@@ -236,6 +245,28 @@ mod tests {
         hosts.insert(name.to_owned(), endpoints);
         let packet = MdnsPacket::answer(0, &hosts).to_bytes();
         MultiResponse::new([ResponseRecord::unsigned(packet, Vec::new())]).encode()
+    }
+
+    #[test]
+    fn h3_lookup_url_targets_v2_api_from_origin_base() {
+        let base_url = url::Url::parse("https://dns.example.test:4433").expect("url");
+        let url = lookup_url(&base_url, "demo.dhttp.net");
+
+        assert_eq!(
+            url.as_str(),
+            "https://dns.example.test:4433/api/v2/lookup?host=demo.dhttp.net"
+        );
+    }
+
+    #[test]
+    fn h3_lookup_url_does_not_duplicate_v2_base_path() {
+        let base_url = url::Url::parse("https://dns.example.test:4433/api/v2/").expect("url");
+        let url = lookup_url(&base_url, "demo.dhttp.net");
+
+        assert_eq!(
+            url.as_str(),
+            "https://dns.example.test:4433/api/v2/lookup?host=demo.dhttp.net"
+        );
     }
 
     #[test]

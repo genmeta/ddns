@@ -49,7 +49,7 @@ Options:
 | `--server-ca <PATH>` | PEM root CA used to verify the DNS server certificate. |
 | `--host <NAME>` | DNS host to query. Defaults to `nat.genmeta.net`. |
 
-The example sends `GET /lookup?host=<NAME>`. A successful server response is a
+The example sends `GET /api/v2/lookup?host=<NAME>`. A successful server response is a
 `ddns::core::wire::MultiResponse` body with header `x-record-format: multi`:
 
 ```text
@@ -88,3 +88,4 @@ Options:
 The example imports `H3Publisher` from the `ddns::publishers` facade, but only needs the
 `h3` backend feature because backend publisher types are re-exported from the facade directly.
 H3 publish request headers are always signed with the configured client endpoint identity; callers no longer pass request signature fields.
+Publish requests are sent to `POST /api/v2/publish?host=<NAME>`.

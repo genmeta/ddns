@@ -123,10 +123,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await;
     let client = H3Endpoint::new(quic);
 
-    let url = format!("{}lookup?host={}", opt.base_url, opt.host);
+    let mut url = url::Url::parse(&opt.base_url)?.join("/api/v2/lookup")?;
+    url.query_pairs_mut().append_pair("host", &opt.host);
     info!(url = %url, "lookup.start");
 
-    let uri: http::Uri = url.parse()?;
+    let uri: http::Uri = url.as_str().parse()?;
     let authority = uri
         .authority()
         .ok_or_else(|| {

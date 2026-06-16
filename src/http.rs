@@ -15,6 +15,9 @@ use crate::core::{
     wire::be_multi_response,
 };
 
+const LOOKUP_API_PATH: &str = "/api/v2/lookup";
+const PUBLISH_API_PATH: &str = "/api/v2/publish";
+
 #[derive(Debug)]
 struct Record {
     addrs: Vec<EndpointAddr>,
@@ -26,6 +29,20 @@ pub struct HttpResolver {
     http_client: Client,
     base_url: Url,
     cached_records: DashMap<String, Record>,
+}
+
+fn lookup_url(base_url: &Url, name: &str) -> Url {
+    api_url(base_url, LOOKUP_API_PATH, name)
+}
+
+fn publish_url(base_url: &Url, name: &str) -> Url {
+    api_url(base_url, PUBLISH_API_PATH, name)
+}
+
+fn api_url(base_url: &Url, path: &str, name: &str) -> Url {
+    let mut url = base_url.join(path).expect("ddns api path must be valid");
+    url.query_pairs_mut().append_pair("host", name);
+    url
 }
 
 impl Display for HttpResolver {
@@ -74,8 +91,7 @@ impl HttpResolver {
         packet: &[u8],
         signature_fields: &SignatureFields,
     ) -> Result<(), Error> {
-        let mut url = self.base_url.join("publish").expect("Invalid base URL");
-        url.set_query(Some(&format!("host={name}")));
+        let url = publish_url(&self.base_url, name);
         let mut request = self
             .http_client
             .post(url)
@@ -194,8 +210,7 @@ impl Resolve for HttpResolver {
             }
             let response = self
                 .http_client
-                .get(self.base_url.join("lookup").expect("Invalid URL"))
-                .query(&[("host", domain)])
+                .get(lookup_url(&self.base_url, domain))
                 .send()
                 .await;
 
@@ -267,5 +282,32 @@ impl Resolve for HttpResolver {
             Ok(stream::iter(addrs.into_iter().map(move |ep| (soource.clone(), ep))).boxed())
         };
         Box::pin(lookup.map_err(io::Error::other))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_publish_url_targets_v2_api_from_origin_base() {
+        let base_url = Url::parse("https://dns.example.test").expect("url");
+        let url = publish_url(&base_url, "demo.dhttp.net");
+
+        assert_eq!(
+            url.as_str(),
+            "https://dns.example.test/api/v2/publish?host=demo.dhttp.net"
+        );
+    }
+
+    #[test]
+    fn http_lookup_url_does_not_duplicate_v2_base_path() {
+        let base_url = Url::parse("https://dns.example.test/api/v2/").expect("url");
+        let url = lookup_url(&base_url, "demo.dhttp.net");
+
+        assert_eq!(
+            url.as_str(),
+            "https://dns.example.test/api/v2/lookup?host=demo.dhttp.net"
+        );
     }
 }

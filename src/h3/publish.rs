@@ -13,14 +13,23 @@ use crate::core::{
     signature::{CONTENT_DIGEST_HEADER, SIGNATURE_HEADER, SIGNATURE_INPUT_HEADER, SignatureFields},
 };
 
+const PUBLISH_API_PATH: &str = "/api/v2/publish";
+
+fn publish_url(base_url: &url::Url, name: &str) -> url::Url {
+    let mut url = base_url
+        .join(PUBLISH_API_PATH)
+        .expect("h3 dns publish api path must be valid");
+    url.query_pairs_mut().append_pair("host", name);
+    url
+}
+
 async fn signed_publish_request<A: LocalAuthority + ?Sized>(
     base_url: &url::Url,
     name: &str,
     packet: &[u8],
     authority: &A,
 ) -> Result<http::Request<Full<bytes::Bytes>>, crate::core::signature::SignatureFieldsError> {
-    let mut url = base_url.join("publish").expect("h3 dns base URL is valid");
-    url.set_query(Some(&format!("host={name}")));
+    let url = publish_url(base_url, name);
     let uri: http::Uri = url
         .as_str()
         .parse()
@@ -234,7 +243,7 @@ mod tests {
         assert_eq!(request.method(), http::Method::POST);
         assert_eq!(
             request.uri().to_string(),
-            "https://dns.example.test:4433/publish?host=demo.dhttp.net"
+            "https://dns.example.test:4433/api/v2/publish?host=demo.dhttp.net"
         );
         assert!(
             request
