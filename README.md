@@ -20,7 +20,7 @@ ddns = { package = "dyns", version = "0.3.0" }
 | `ddns::http` | DNS-over-HTTP backend implementation. |
 | `ddns::mdns` | RFC 6762 multicast DNS transport plus LAN resolver/publisher backend implementation. |
 | `ddns::resolvers` | Resolver facade: backend re-exports, resolver chains, and `Resolvers` aggregation. |
-| `ddns::publishers` | Publisher facade: backend re-exports, endpoint record signing, and endpoint publication helpers. |
+| `ddns::publishers` | Publisher facade: backend re-exports, scoped publisher atoms, `Publishers` aggregation, and endpoint publication helpers. |
 
 ## Features
 
@@ -29,7 +29,7 @@ The default feature set is empty.
 | Feature | Enables |
 | --- | --- |
 | `resolvers` | Resolver aggregation types such as `Resolvers`, `ResolversBuilder`, and `DnsScheme`. |
-| `publishers` | Endpoint publication aggregation and signing helpers such as `EndpointPublisher`, `EndpointPublicationLoop`, and `PublishAddresses`. |
+| `publishers` | Scoped publication helpers such as `Publisher`, `Publishers`, `PublishScope`, `EndpointPublicationLoop`, and `PublishAddresses`; backend `Publish` implementations own any required signing. |
 | `dquic-network` | `h3x`/`dquic` network-backed publication helpers such as `EndpointBindingAddresses`; meaningful together with `publishers`, and also used by mDNS resolver aggregation. |
 | `h3` | DNS-over-HTTP/3 backend surface (`ddns::h3`, plus `H3Resolver` / `H3Publisher` re-exports from the facades). |
 | `http` | DNS-over-HTTP backend surface (`ddns::http`, plus `HttpResolver` / `HttpPublisher` re-exports from the facades). |
@@ -62,7 +62,7 @@ use ddns::resolvers::Resolvers;
 use futures::StreamExt;
 
 #[tokio::main]
-async fn main() -> Result<(), ddns::resolvers::DnsErrors> {
+async fn main() -> Result<(), ddns::resolvers::ResolversError> {
     let resolvers = Resolvers::builder().system().build();
     let mut endpoints = resolvers.lookup("demo.example.dhttp.net").await?;
 
