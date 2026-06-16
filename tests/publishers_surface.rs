@@ -13,14 +13,7 @@ fn publishers_facade_exposes_publisher_and_aggregate_types() {
 fn publishers_facade_exposes_network_publication_loop_surface() {
     let _ = ddns::publishers::DEFAULT_PUBLISH_INTERVAL;
     let _ = ddns::publishers::DEFAULT_PUBLISH_TIMEOUT;
-    let _ = core::any::type_name::<ddns::publishers::CreatePublisherError>();
-    let _ = core::any::type_name::<ddns::publishers::PublishOnceError>();
-    let _ = core::any::type_name::<ddns::publishers::EndpointPublisherLoop>();
     let _ = core::any::type_name::<
-        ddns::publishers::EndpointPublicationLoop<
-            dyn dhttp_identity::identity::LocalAuthority + Send + Sync,
-            dyn dquic::qresolve::Resolve + Send + Sync,
-            ddns::publishers::EndpointBindingAddresses,
-        >,
+        ddns::publishers::EndpointPublicationLoop<ddns::publishers::EndpointBindingAddresses>,
     >();
 }

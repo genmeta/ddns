@@ -13,49 +13,6 @@ pub enum EncodeEndpointPacketError {
     EncodeEndpoint,
 }
 
-#[allow(dead_code)]
-pub type SignEndpointRecordsError = EncodeEndpointPacketError;
-
-#[allow(dead_code)]
-#[derive(Clone)]
-pub struct EndpointRecordSigner<A: ?Sized> {
-    authority: std::sync::Arc<A>,
-}
-
-impl<A: ?Sized> std::fmt::Debug for EndpointRecordSigner<A>
-where
-    A: dhttp_identity::identity::LocalAuthority,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EndpointRecordSigner")
-            .field("authority", &self.authority.name())
-            .finish()
-    }
-}
-
-#[allow(dead_code)]
-impl<A> EndpointRecordSigner<A>
-where
-    A: dhttp_identity::identity::LocalAuthority + Send + Sync + ?Sized,
-{
-    pub fn new(authority: std::sync::Arc<A>) -> Self {
-        Self { authority }
-    }
-
-    pub fn authority(&self) -> &std::sync::Arc<A> {
-        &self.authority
-    }
-
-    pub async fn signed_packet(
-        &self,
-        name: &Name<'_>,
-        endpoints: &[EndpointAddr],
-    ) -> Result<Vec<u8>, SignEndpointRecordsError> {
-        let _ = &self.authority;
-        endpoint_packet(name, endpoints.iter().copied())
-    }
-}
-
 pub(crate) fn endpoint_packet(
     name: &Name<'_>,
     endpoints: impl IntoIterator<Item = EndpointAddr>,
