@@ -1,4 +1,4 @@
-use dhttp_identity::certificate::CertificateChainKey;
+use dhttp_identity::certificate::{CertificateChainKey, CertificateChainKind, CertificateSequence};
 use dquic::qbase::net::addr::EndpointAddr as DquicEndpointAddr;
 
 use crate::core::parser::record::endpoint::EndpointAddr as DnsEndpointAddr;
@@ -15,13 +15,49 @@ pub(crate) fn selected_endpoint_addrs(
         .collect()
 }
 
+pub(crate) fn selected_endpoint_addrs_for_sequence(
+    records: impl IntoIterator<Item = DnsEndpointAddr>,
+    sequence: Option<CertificateSequence>,
+) -> Vec<DquicEndpointAddr> {
+    match sequence {
+        Some(sequence) => selected_endpoint_records_for_sequence(
+            records.into_iter().map(|record| ((), record)),
+            Some(sequence),
+        )
+        .into_iter()
+        .map(|((), endpoint)| endpoint)
+        .collect(),
+        None => selected_endpoint_addrs(records),
+    }
+}
+
 pub(crate) fn selected_endpoint_records<T>(
     records: impl IntoIterator<Item = (T, DnsEndpointAddr)>,
 ) -> Vec<(T, DquicEndpointAddr)> {
+    selected_endpoint_records_with_fallback_chain_keys(
+        records.into_iter().map(|(tag, record)| (tag, record, None)),
+        None,
+    )
+}
+
+pub(crate) fn selected_endpoint_records_for_sequence<T>(
+    records: impl IntoIterator<Item = (T, DnsEndpointAddr)>,
+    sequence: Option<CertificateSequence>,
+) -> Vec<(T, DquicEndpointAddr)> {
+    selected_endpoint_records_with_fallback_chain_keys(
+        records.into_iter().map(|(tag, record)| (tag, record, None)),
+        sequence,
+    )
+}
+
+pub(crate) fn selected_endpoint_records_with_fallback_chain_keys<T>(
+    records: impl IntoIterator<Item = (T, DnsEndpointAddr, Option<CertificateChainKey>)>,
+    sequence: Option<CertificateSequence>,
+) -> Vec<(T, DquicEndpointAddr)> {
     let mut groups: Vec<EndpointGroup<T>> = Vec::new();
 
-    for (tag, record) in records {
-        let chain_key = record.certificate_chain_key();
+    for (tag, record, fallback_chain_key) in records {
+        let chain_key = effective_chain_key(&record, fallback_chain_key);
         let Ok(endpoint) = DquicEndpointAddr::try_from(record) else {
             continue;
         };
@@ -35,11 +71,22 @@ pub(crate) fn selected_endpoint_records<T>(
 
     groups.sort_by_key(|(chain_key, _)| {
         let primary_rank = match chain_key.kind() {
-            dhttp_identity::certificate::CertificateChainKind::Primary => 0,
-            dhttp_identity::certificate::CertificateChainKind::Secondary => 1,
+            CertificateChainKind::Primary => 0,
+            CertificateChainKind::Secondary => 1,
         };
         (primary_rank, chain_key.sequence().get())
     });
+
+    if let Some(sequence) = sequence {
+        return groups
+            .into_iter()
+            .find(|(chain_key, _)| {
+                chain_key.kind() == CertificateChainKind::Primary
+                    && chain_key.sequence() == sequence
+            })
+            .map(|(_, endpoints)| endpoints)
+            .unwrap_or_default();
+    }
 
     groups
         .into_iter()
@@ -48,9 +95,22 @@ pub(crate) fn selected_endpoint_records<T>(
         .unwrap_or_default()
 }
 
+fn effective_chain_key(
+    record: &DnsEndpointAddr,
+    fallback_chain_key: Option<CertificateChainKey>,
+) -> CertificateChainKey {
+    if record.is_main() || record.sequence().is_some() {
+        return record.certificate_chain_key();
+    }
+
+    fallback_chain_key.unwrap_or_else(|| record.certificate_chain_key())
+}
+
 #[cfg(test)]
 mod tests {
-    use dhttp_identity::certificate::CertificateSequence;
+    use dhttp_identity::certificate::{
+        CertificateChainKey, CertificateChainKind, CertificateSequence,
+    };
 
     use crate::core::parser::record::endpoint::EndpointAddr;
 
@@ -131,6 +191,62 @@ mod tests {
         assert_eq!(
             selected[1].1,
             dquic::qbase::net::addr::EndpointAddr::direct("192.0.2.52:4433".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn selected_endpoint_addrs_for_sequence_filters_requested_primary_group() {
+        let selected = super::selected_endpoint_addrs_for_sequence(
+            [
+                direct("192.0.2.10:4433", true, 0),
+                direct("192.0.2.11:4433", true, 0),
+                direct("192.0.2.20:4433", true, 1),
+                direct("192.0.2.30:4433", false, 1),
+            ],
+            Some(CertificateSequence::from(1u8)),
+        );
+
+        assert_eq!(
+            selected,
+            vec![dquic::qbase::net::addr::EndpointAddr::direct(
+                "192.0.2.20:4433".parse().unwrap()
+            )]
+        );
+    }
+
+    #[test]
+    fn selected_endpoint_addrs_for_sequence_returns_empty_when_primary_sequence_missing() {
+        let selected = super::selected_endpoint_addrs_for_sequence(
+            [
+                direct("192.0.2.10:4433", true, 0),
+                direct("192.0.2.20:4433", false, 2),
+            ],
+            Some(CertificateSequence::from(9u8)),
+        );
+
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn selected_endpoint_records_for_sequence_uses_fallback_chain_key_when_packet_omits_it() {
+        let endpoint = EndpointAddr::direct_v4("192.0.2.60:4433".parse().unwrap());
+        let selected = super::selected_endpoint_records_with_fallback_chain_keys(
+            [(
+                "wifi",
+                endpoint,
+                Some(CertificateChainKey::new(
+                    CertificateSequence::from(1u8),
+                    CertificateChainKind::Primary,
+                )),
+            )],
+            Some(CertificateSequence::from(1u8)),
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].0, "wifi");
+        assert_eq!(
+            selected[0].1,
+            dquic::qbase::net::addr::EndpointAddr::direct("192.0.2.60:4433".parse().unwrap())
         );
     }
 }

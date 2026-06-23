@@ -8,8 +8,12 @@
 /// +-----------+  | u32 BE    | ...  | u32 BE    | ...  |
 ///                +-----------+------+-----------+------+
 /// ```
+use std::borrow::Borrow;
+
 use bytes::BufMut;
+use dhttp_identity::certificate::CertificateChainKey;
 use nom::{IResult, bytes::streaming::take, number::streaming::be_u32};
+use rustls::pki_types::CertificateDer;
 
 use crate::core::signature::SignatureFields;
 
@@ -47,6 +51,17 @@ impl ResponseRecord {
         use ring::digest::{SHA256, digest};
         let digest = digest(&SHA256, &self.cert);
         Some(digest.as_ref().iter().map(|b| format!("{b:02x}")).collect())
+    }
+
+    pub fn publisher_certificate_chain_key(&self) -> Option<CertificateChainKey> {
+        if self.cert.is_empty() {
+            return None;
+        }
+
+        let cert = CertificateDer::from(self.cert.clone());
+        dhttp_identity::identity::extract_dhttp_subject_key_identifier(std::slice::from_ref(&cert))
+            .ok()
+            .map(|ski| ski.chain().clone())
     }
 }
 
@@ -86,6 +101,26 @@ impl MultiResponse {
         buf.put_multi_response(self);
         buf
     }
+
+    pub fn encode_records<I, R>(records: I) -> Vec<u8>
+    where
+        I: IntoIterator<Item = R>,
+        R: Borrow<ResponseRecord>,
+    {
+        let mut buf = Vec::new();
+        buf.put_u32(0);
+
+        let mut count = 0u32;
+        for record in records {
+            count = count
+                .checked_add(1)
+                .expect("multi response record count exceeds u32 range");
+            put_response_record(&mut buf, record.borrow());
+        }
+
+        buf[..4].copy_from_slice(&count.to_be_bytes());
+        buf
+    }
 }
 
 pub trait WriteMultiResponse {
@@ -96,13 +131,17 @@ impl<B: BufMut> WriteMultiResponse for B {
     fn put_multi_response(&mut self, response: &MultiResponse) {
         self.put_u32(response.records.len() as u32);
         for record in &response.records {
-            put_field(self, &record.signature_fields.content_digest);
-            put_field(self, &record.signature_fields.signature_input);
-            put_field(self, &record.signature_fields.signature);
-            put_field(self, &record.dns);
-            put_field(self, &record.cert);
+            put_response_record(self, record);
         }
     }
+}
+
+fn put_response_record<B: BufMut>(buf: &mut B, record: &ResponseRecord) {
+    put_field(buf, &record.signature_fields.content_digest);
+    put_field(buf, &record.signature_fields.signature_input);
+    put_field(buf, &record.signature_fields.signature);
+    put_field(buf, &record.dns);
+    put_field(buf, &record.cert);
 }
 
 fn put_field<B: BufMut>(buf: &mut B, value: &[u8]) {
@@ -163,5 +202,37 @@ mod tests {
         let (remain, decoded) = be_multi_response(&encoded).unwrap();
         assert!(remain.is_empty());
         assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn encode_records_matches_multi_response_encoding_for_owned_records() {
+        let records = [
+            ResponseRecord::unsigned(vec![1, 2, 3], vec![4, 5]),
+            ResponseRecord::new(
+                SignatureFields {
+                    content_digest: b"sha-256=:abc:".to_vec(),
+                    signature_input: b"dns=(\"content-digest\")".to_vec(),
+                    signature: b"dns=:sig:".to_vec(),
+                },
+                vec![6, 7],
+                Vec::new(),
+            ),
+        ];
+        let response = MultiResponse::new(records.clone());
+
+        assert_eq!(MultiResponse::encode_records(records), response.encode());
+    }
+
+    #[test]
+    fn encode_records_matches_multi_response_encoding_for_borrowed_records() {
+        let response = MultiResponse::new([
+            ResponseRecord::unsigned(vec![1, 2, 3], vec![4, 5]),
+            ResponseRecord::unsigned(vec![6, 7], Vec::new()),
+        ]);
+
+        assert_eq!(
+            MultiResponse::encode_records(response.records.iter()),
+            response.encode()
+        );
     }
 }

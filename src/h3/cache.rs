@@ -76,4 +76,20 @@ mod tests {
 
         assert!(cache.negative_hit("missing.dhttp.net"));
     }
+
+    #[test]
+    fn positive_cache_hit_keeps_selector_entries_separate() {
+        let cache = LookupCache::default();
+        cache.insert_positive("demo.dhttp.net", vec![endpoint("192.0.2.10:4433")]);
+        cache.insert_positive("demo.dhttp.net:1", vec![endpoint("192.0.2.11:4433")]);
+
+        assert_eq!(
+            cache.positive_hit("demo.dhttp.net").unwrap(),
+            vec![endpoint("192.0.2.10:4433")]
+        );
+        assert_eq!(
+            cache.positive_hit("demo.dhttp.net:1").unwrap(),
+            vec![endpoint("192.0.2.11:4433")]
+        );
+    }
 }

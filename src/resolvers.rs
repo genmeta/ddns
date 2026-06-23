@@ -27,7 +27,6 @@ use crate::mdns::MdnsResolvers;
 /// Extract and validate the DNS host from `name`, which may include a `:port`
 /// suffix. Returns `Some(host)` if the host part is a valid RFC-compliant DNS
 /// name, or `None` for raw IP addresses, bracketed IPv6, or malformed input.
-#[cfg_attr(not(any(feature = "h3", feature = "http")), allow(dead_code))]
 pub(crate) fn resolvable_name(name: &str) -> Option<&str> {
     let host = match name.rsplit_once(':') {
         Some((h, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => h,
@@ -35,6 +34,32 @@ pub(crate) fn resolvable_name(name: &str) -> Option<&str> {
     };
     rustls::pki_types::DnsName::try_from(host).ok()?;
     Some(host)
+}
+
+#[cfg_attr(
+    not(any(feature = "h3", feature = "http", feature = "mdns")),
+    allow(dead_code)
+)]
+pub(crate) fn endpoint_lookup_name_and_sequence(
+    name: &str,
+) -> Option<(
+    &str,
+    Option<dhttp_identity::certificate::CertificateSequence>,
+)> {
+    use dhttp_identity::certificate::CertificateSequence;
+
+    let (host, sequence) = match name.rsplit_once(':') {
+        Some((host, digits))
+            if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            let sequence = digits.parse::<u64>().ok()?;
+            let sequence = CertificateSequence::try_from(sequence).ok()?;
+            (host, Some(sequence))
+        }
+        _ => (name, None),
+    };
+
+    Some((resolvable_name(host)?, sequence))
 }
 
 /// Default DNS-over-H3 server for DHTTP endpoints.
@@ -408,6 +433,35 @@ mod tests {
     fn resolvable_name_rejects_ip_literals() {
         assert_eq!(resolvable_name("127.0.0.1:443"), None);
         assert_eq!(resolvable_name("[::1]:443"), None);
+    }
+
+    #[test]
+    fn endpoint_lookup_name_and_sequence_accepts_plain_name() {
+        let (name, sequence) =
+            super::endpoint_lookup_name_and_sequence("example.dhttp.net").expect("dns name");
+
+        assert_eq!(name, "example.dhttp.net");
+        assert_eq!(sequence, None);
+    }
+
+    #[test]
+    fn endpoint_lookup_name_and_sequence_parses_numeric_selector() {
+        let (name, sequence) =
+            super::endpoint_lookup_name_and_sequence("reimu.hakurei.dhttp.net:1")
+                .expect("dns name");
+
+        assert_eq!(name, "reimu.hakurei.dhttp.net");
+        assert_eq!(
+            sequence.map(dhttp_identity::certificate::CertificateSequence::get),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn endpoint_lookup_name_and_sequence_rejects_out_of_range_selector() {
+        let invalid = format!("example.dhttp.net:{}", (1u64 << 62) + 1);
+
+        assert_eq!(super::endpoint_lookup_name_and_sequence(&invalid), None);
     }
 
     #[cfg(feature = "resolvers")]

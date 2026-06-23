@@ -1,6 +1,7 @@
 use std::{fmt::Display, io, sync::Arc};
 
 use dashmap::DashMap;
+use dhttp_identity::certificate::CertificateSequence;
 use dquic::{
     qbase::net::addr::EndpointAddr,
     qresolve::{Publish, PublishFuture, Resolve, ResolveFuture, Source},
@@ -31,8 +32,14 @@ pub struct HttpResolver {
     cached_records: DashMap<String, Record>,
 }
 
-fn lookup_url(base_url: &Url, name: &str) -> Url {
-    api_url(base_url, LOOKUP_API_PATH, name)
+fn lookup_url(base_url: &Url, name: &str, sequence: Option<CertificateSequence>) -> Url {
+    let mut url = api_url(base_url, LOOKUP_API_PATH, name);
+    if let Some(sequence) = sequence {
+        let sequence_text = sequence.get().to_string();
+        url.query_pairs_mut()
+            .append_pair("sequence", &sequence_text);
+    }
+    url
 }
 
 fn publish_url(base_url: &Url, name: &str) -> Url {
@@ -189,28 +196,30 @@ impl Publish for HttpResolver {
 impl Resolve for HttpResolver {
     fn lookup<'l>(&'l self, name: &'l str) -> ResolveFuture<'l> {
         let lookup = async move {
-            let Some(domain) = crate::resolvers::resolvable_name(name) else {
+            let Some((domain, sequence)) =
+                crate::resolvers::endpoint_lookup_name_and_sequence(name)
+            else {
                 return Err(Error::NoRecordFound);
             };
 
             let now = Instant::now();
             let server = Arc::from(self.base_url.host_str().unwrap_or("<unknown server>"));
-            let soource = Source::Http { server };
+            let source = Source::Http { server };
 
             use crate::core::parser::record;
             self.cached_records
-                .retain(|_host, Record { expire, .. }| *expire < now);
-            if let Some(record) = self.cached_records.get(domain) {
+                .retain(|_host, Record { expire, .. }| *expire > now);
+            if let Some(record) = self.cached_records.get(name) {
                 let endpoint_addrs: Vec<_> = record
                     .addrs
                     .iter()
-                    .map(|endpoint: &EndpointAddr| (soource.clone(), *endpoint))
+                    .map(|endpoint: &EndpointAddr| (source.clone(), *endpoint))
                     .collect();
                 return Ok(stream::iter(endpoint_addrs).boxed());
             }
             let response = self
                 .http_client
-                .get(lookup_url(&self.base_url, domain))
+                .get(lookup_url(&self.base_url, domain, sequence))
                 .send()
                 .await;
 
@@ -221,8 +230,9 @@ impl Resolve for HttpResolver {
                 return Err(Error::ParseMultiResponse);
             }
 
-            let mut addrs = Vec::new();
+            let mut endpoint_records = Vec::new();
             for r in multi.records {
+                let publisher_chain_key = r.publisher_certificate_chain_key();
                 if !r.signature_fields.is_empty() {
                     match r.signature_fields.verify(&r.dns, &r.cert) {
                         Ok(true) => {}
@@ -241,45 +251,50 @@ impl Resolve for HttpResolver {
                         source: source.to_owned(),
                     })?;
 
-                addrs.extend(
-                    packet
-                        .answers
-                        .iter()
-                        .filter_map(|answer| match answer.data() {
-                            record::RData::E(ep) => {
-                                if answer.name() != domain {
-                                    tracing::debug!(
-                                        answer_name = %answer.name(),
-                                        query = domain,
-                                        "ignored endpoint answer for different name"
-                                    );
-                                    return None;
-                                }
-                                let endpoint =
-                                    TryInto::<EndpointAddr>::try_into(ep.clone()).ok()?;
-                                Some(endpoint)
+                endpoint_records.extend(packet.answers.iter().filter_map(|answer| {
+                    match answer.data() {
+                        record::RData::E(ep) => {
+                            if answer.name() != domain {
+                                tracing::debug!(
+                                    answer_name = %answer.name(),
+                                    query = domain,
+                                    "ignored endpoint answer for different name"
+                                );
+                                return None;
                             }
-                            _ => {
-                                tracing::debug!(?answer, "ignored record");
-                                None
-                            }
-                        }),
-                );
+                            Some((ep.clone(), publisher_chain_key.clone()))
+                        }
+                        _ => {
+                            tracing::debug!(?answer, "ignored record");
+                            None
+                        }
+                    }
+                }));
             }
+            let addrs =
+                crate::resolvers::endpoint_group::selected_endpoint_records_with_fallback_chain_keys(
+                    endpoint_records
+                        .into_iter()
+                        .map(|(endpoint, fallback_chain_key)| ((), endpoint, fallback_chain_key)),
+                    sequence,
+                )
+                .into_iter()
+                .map(|((), endpoint)| endpoint)
+                .collect::<Vec<_>>();
             if addrs.is_empty() {
                 return Err(Error::NoRecordFound);
             }
 
             // cache the addrs
             self.cached_records.insert(
-                domain.to_string(),
+                name.to_string(),
                 Record {
                     addrs: addrs.clone(),
                     expire: now + std::time::Duration::from_secs(300),
                 },
             );
 
-            Ok(stream::iter(addrs.into_iter().map(move |ep| (soource.clone(), ep))).boxed())
+            Ok(stream::iter(addrs.into_iter().map(move |ep| (source.clone(), ep))).boxed())
         };
         Box::pin(lookup.map_err(io::Error::other))
     }
@@ -303,11 +318,26 @@ mod tests {
     #[test]
     fn http_lookup_url_does_not_duplicate_v2_base_path() {
         let base_url = Url::parse("https://dns.example.test/api/v2/").expect("url");
-        let url = lookup_url(&base_url, "demo.dhttp.net");
+        let url = lookup_url(&base_url, "demo.dhttp.net", None);
 
         assert_eq!(
             url.as_str(),
             "https://dns.example.test/api/v2/lookup?host=demo.dhttp.net"
+        );
+    }
+
+    #[test]
+    fn http_lookup_url_appends_sequence_query() {
+        let base_url = Url::parse("https://dns.example.test").expect("url");
+        let url = lookup_url(
+            &base_url,
+            "demo.dhttp.net",
+            Some(CertificateSequence::from(7u8)),
+        );
+
+        assert_eq!(
+            url.as_str(),
+            "https://dns.example.test/api/v2/lookup?host=demo.dhttp.net&sequence=7"
         );
     }
 }

@@ -57,9 +57,16 @@ impl Publish for MdnsPublisher {
 impl Resolve for MdnsResolver {
     fn lookup<'l>(&'l self, name: &'l str) -> ResolveFuture<'l> {
         let source = self.source();
-        self.query(name.to_owned())
+        let Some((domain, sequence)) = crate::resolvers::endpoint_lookup_name_and_sequence(name)
+        else {
+            return future::ready(Err(io::Error::other("no DNS record found"))).boxed();
+        };
+        self.query(domain.to_owned())
             .map_ok(move |list| {
-                let endpoints = crate::resolvers::endpoint_group::selected_endpoint_addrs(list);
+                let endpoints =
+                    crate::resolvers::endpoint_group::selected_endpoint_addrs_for_sequence(
+                        list, sequence,
+                    );
                 stream::iter(endpoints.into_iter().map(move |ep| (source.clone(), ep))).boxed()
             })
             .boxed()
@@ -256,7 +263,11 @@ impl MdnsResolvers {
         resolvers
     }
 
-    pub async fn query(&self, name: &str) -> io::Result<RecordStream> {
+    pub async fn query(
+        &self,
+        name: &str,
+        sequence: Option<dhttp_identity::certificate::CertificateSequence>,
+    ) -> io::Result<RecordStream> {
         let mut lookup_futures = FuturesUnordered::new();
         let mut has_resolver = false;
         self.for_each_resolver(|resolver| {
@@ -295,7 +306,9 @@ impl MdnsResolvers {
             );
         }
 
-        let records = crate::resolvers::endpoint_group::selected_endpoint_records(records);
+        let records = crate::resolvers::endpoint_group::selected_endpoint_records_for_sequence(
+            records, sequence,
+        );
 
         Ok(stream::iter(records).boxed())
     }
@@ -354,6 +367,10 @@ impl Publish for MdnsResolvers {
 #[cfg(feature = "dquic-network")]
 impl Resolve for MdnsResolvers {
     fn lookup<'l>(&'l self, name: &'l str) -> ResolveFuture<'l> {
-        self.query(name).boxed()
+        let Some((domain, sequence)) = crate::resolvers::endpoint_lookup_name_and_sequence(name)
+        else {
+            return future::ready(Err(io::Error::other("no DNS record found"))).boxed();
+        };
+        self.query(domain, sequence).boxed()
     }
 }

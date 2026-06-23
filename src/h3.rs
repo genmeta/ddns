@@ -248,7 +248,7 @@ mod tests {
         ));
         let resolver = H3Resolver::from_endpoint(DHTTP_H3_DNS_SERVER, endpoint).unwrap();
         resolver.cache.insert_positive(
-            "nat.genmeta.net",
+            "nat.genmeta.net:20004",
             vec![EndpointAddr::direct("192.0.2.10:21000".parse().unwrap())],
         );
 
