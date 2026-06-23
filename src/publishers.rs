@@ -33,9 +33,7 @@ pub use aggregate::{Publishers, PublishersError};
 #[cfg(feature = "publishers")]
 use dhttp_identity::name::Name;
 #[cfg(all(feature = "publishers", feature = "dquic-network"))]
-use dquic::{
-    qinterface::component::location::AddressEvent, qtraversal::nat::client::ClientLocationData,
-};
+use dquic::qinterface::component::location::{AddressEvent, LocalEndpointSet};
 #[cfg(feature = "publishers")]
 pub use publisher::{Publisher, PublisherError};
 
@@ -234,17 +232,17 @@ where
     fn location_event_requires_publish(event: &AddressEvent) -> bool {
         match event {
             AddressEvent::Upsert(data) => {
+                if let Some(endpoints) = data.downcast_ref::<LocalEndpointSet>() {
+                    return !endpoints.endpoints().is_empty();
+                }
                 if let Some(bound_addr) = data.downcast_ref::<std::io::Result<SocketAddr>>() {
                     return bound_addr.is_ok();
-                }
-                if let Some(stun_addr) = data.downcast_ref::<ClientLocationData>() {
-                    return stun_addr.is_ok();
                 }
                 false
             }
             AddressEvent::Remove(type_id) => {
-                *type_id == TypeId::of::<std::io::Result<SocketAddr>>()
-                    || *type_id == TypeId::of::<ClientLocationData>()
+                *type_id == TypeId::of::<LocalEndpointSet>()
+                    || *type_id == TypeId::of::<std::io::Result<SocketAddr>>()
             }
             AddressEvent::Closed => true,
         }
@@ -254,8 +252,7 @@ where
 #[cfg(all(test, feature = "publishers", feature = "dquic-network"))]
 mod tests {
     use std::{
-        fmt, io,
-        net::SocketAddr,
+        fmt,
         sync::{
             Arc,
             atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -266,7 +263,7 @@ mod tests {
     use dhttp_identity::name::Name;
     use dquic::{
         qbase::net::addr::EndpointAddr,
-        qinterface::component::location::{Locations, Observer},
+        qinterface::component::location::{LocalEndpointSet, Locations, Observer},
         qresolve::{Publish, PublishFuture},
     };
     use futures::FutureExt;
@@ -395,9 +392,9 @@ mod tests {
         fn notify_publishable_location(&self) {
             self.locations.upsert(
                 self.bind_uri.clone(),
-                Arc::new(Ok::<SocketAddr, io::Error>(
+                Arc::new(LocalEndpointSet::from_endpoints([EndpointAddr::direct(
                     "127.0.0.1:4433".parse().expect("socket address"),
-                )),
+                )])),
             );
         }
     }
