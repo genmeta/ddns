@@ -3,7 +3,7 @@ use std::{fmt, io};
 use dquic::qresolve::{Publish, PublishFuture, RecordStream, Resolve, ResolveFuture};
 use futures::FutureExt;
 use snafu::{ResultExt, Snafu};
-use tokio::sync::OnceCell;
+use tokio::sync::{Notify, OnceCell};
 
 #[derive(Debug, Snafu)]
 #[snafu(module, visibility(pub))]
@@ -32,6 +32,7 @@ pub enum SetDeferredResolverError {
 
 pub struct DeferredResolver<R> {
     inner: OnceCell<R>,
+    initialized: Notify,
 }
 
 impl<R> fmt::Debug for DeferredResolver<R> {
@@ -53,6 +54,7 @@ impl<R> DeferredResolver<R> {
     pub fn new() -> Self {
         Self {
             inner: OnceCell::new(),
+            initialized: Notify::new(),
         }
     }
 
@@ -60,12 +62,23 @@ impl<R> DeferredResolver<R> {
         if self.inner.set(resolver).is_err() {
             return set_deferred_resolver_error::AlreadyInitializedSnafu.fail();
         }
+        self.initialized.notify_waiters();
         Ok(())
     }
 
     #[must_use]
     pub fn get(&self) -> Option<&R> {
         self.inner.get()
+    }
+
+    async fn wait(&self) -> &R {
+        loop {
+            let initialized = self.initialized.notified();
+            if let Some(resolver) = self.get() {
+                return resolver;
+            }
+            initialized.await;
+        }
     }
 }
 
@@ -101,7 +114,7 @@ where
     R: Resolve + 'static,
 {
     fn lookup<'a>(&'a self, name: &'a str) -> ResolveFuture<'a> {
-        async move { self.lookup_typed(name).await.map_err(io::Error::other) }.boxed()
+        async move { self.wait().await.lookup(name).await }.boxed()
     }
 }
 
@@ -129,18 +142,13 @@ where
     R: Publish + 'static,
 {
     fn publish<'a>(&'a self, name: &'a str, packet: &'a [u8]) -> PublishFuture<'a> {
-        async move {
-            self.publish_typed(name, packet)
-                .await
-                .map_err(io::Error::other)
-        }
-        .boxed()
+        async move { self.wait().await.publish(name, packet).await }.boxed()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fmt;
+    use std::{fmt, time::Duration};
 
     use dquic::{
         qbase::net::addr::EndpointAddr,
@@ -189,6 +197,28 @@ mod tests {
         };
 
         assert!(matches!(error, DeferredLookupError::Uninitialized));
+    }
+
+    #[tokio::test]
+    async fn resolve_trait_lookup_waits_until_set() {
+        let resolver = DeferredResolver::new();
+        let mut lookup = resolver.lookup("example.test");
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut lookup)
+                .await
+                .is_err(),
+            "trait lookup must not fail fast before set"
+        );
+
+        resolver.set(TestResolver).expect("first set succeeds");
+
+        let mut stream = lookup.await.expect("lookup completes after set");
+        let (_source, endpoint) = stream.next().await.expect("forwarded endpoint");
+        assert_eq!(
+            endpoint,
+            EndpointAddr::direct("127.0.0.1:4433".parse().unwrap())
+        );
     }
 
     #[tokio::test]
