@@ -9,9 +9,7 @@ mod publisher;
 
 #[cfg(all(feature = "publishers", feature = "dquic-network"))]
 use std::{
-    any::TypeId,
     future::Future,
-    net::SocketAddr,
     pin::Pin,
     sync::{
         Arc,
@@ -33,7 +31,7 @@ pub use aggregate::{Publishers, PublishersError};
 #[cfg(feature = "publishers")]
 use dhttp_identity::name::Name;
 #[cfg(all(feature = "publishers", feature = "dquic-network"))]
-use dquic::qinterface::component::location::{AddressEvent, LocalEndpointSet};
+use dquic::qinterface::component::local_endpoint::InterfaceEndpointUpdate;
 #[cfg(feature = "publishers")]
 pub use publisher::{Publisher, PublisherError};
 
@@ -142,7 +140,7 @@ where
     }
 
     pub async fn run(&self) -> ! {
-        let mut locations = self.source.subscribe();
+        let mut local_endpoints = self.source.subscribe();
         let interval = tokio::time::sleep(self.interval);
         tokio::pin!(interval);
         let mut current_publish = Some(self.new_publish_loop_future());
@@ -167,14 +165,14 @@ where
                     }
                     current_publish = Some(self.new_publish_loop_future());
                 }
-                event = locations.recv() => {
-                    let Some((bind_uri, event)) = event else {
+                update = local_endpoints.recv() => {
+                    let Some((bind_uri, update)) = update else {
                         continue;
                     };
                     if !self.source.observes(&bind_uri) {
                         continue;
                     }
-                    if !Self::location_event_requires_publish(&event) {
+                    if !Self::local_endpoint_update_requires_publish(&update) {
                         continue;
                     }
 
@@ -229,22 +227,11 @@ where
         }
     }
 
-    fn location_event_requires_publish(event: &AddressEvent) -> bool {
-        match event {
-            AddressEvent::Upsert(data) => {
-                if let Some(endpoints) = data.downcast_ref::<LocalEndpointSet>() {
-                    return !endpoints.endpoints().is_empty();
-                }
-                if let Some(bound_addr) = data.downcast_ref::<std::io::Result<SocketAddr>>() {
-                    return bound_addr.is_ok();
-                }
-                false
-            }
-            AddressEvent::Remove(type_id) => {
-                *type_id == TypeId::of::<LocalEndpointSet>()
-                    || *type_id == TypeId::of::<std::io::Result<SocketAddr>>()
-            }
-            AddressEvent::Closed => true,
+    fn local_endpoint_update_requires_publish(update: &InterfaceEndpointUpdate) -> bool {
+        match update {
+            InterfaceEndpointUpdate::Upsert { .. }
+            | InterfaceEndpointUpdate::Remove { .. }
+            | InterfaceEndpointUpdate::Close => true,
         }
     }
 }
@@ -263,7 +250,9 @@ mod tests {
     use dhttp_identity::name::Name;
     use dquic::{
         qbase::net::addr::EndpointAddr,
-        qinterface::component::location::{LocalEndpointSet, Locations, Observer},
+        qinterface::component::local_endpoint::{
+            InterfaceEndpointKey, InterfaceEndpointUpdate, LocalEndpointSubscriber, LocalEndpoints,
+        },
         qresolve::{Publish, PublishFuture},
     };
     use futures::FutureExt;
@@ -374,7 +363,7 @@ mod tests {
     #[derive(Clone)]
     struct TestSource {
         bind_uri: BindUri,
-        locations: Arc<Locations>,
+        local_endpoints: Arc<LocalEndpoints>,
         addresses: PublishAddresses,
     }
 
@@ -382,20 +371,19 @@ mod tests {
         fn new(bind_uri: BindUri) -> Self {
             Self {
                 bind_uri,
-                locations: Arc::new(Locations::new()),
+                local_endpoints: Arc::new(LocalEndpoints::new()),
                 addresses: PublishAddresses::new().wide_area([EndpointAddr::direct(
                     "127.0.0.1:4433".parse().expect("socket address"),
                 )]),
             }
         }
 
-        fn notify_publishable_location(&self) {
-            self.locations.upsert(
-                self.bind_uri.clone(),
-                Arc::new(LocalEndpointSet::from_endpoints([EndpointAddr::direct(
-                    "127.0.0.1:4433".parse().expect("socket address"),
-                )])),
-            );
+        fn notify_publishable_local_endpoint(&self) {
+            let publishers = self.local_endpoints.publisher(self.bind_uri.clone());
+            let mut direct = publishers
+                .direct_endpoint_publisher()
+                .expect("direct endpoint publisher");
+            assert!(direct.upsert("127.0.0.1:4433".parse().expect("socket address")));
         }
     }
 
@@ -404,8 +392,8 @@ mod tests {
             self.addresses.clone()
         }
 
-        fn subscribe(&self) -> Observer {
-            self.locations.subscribe()
+        fn subscribe(&self) -> LocalEndpointSubscriber {
+            self.local_endpoints.subscribe()
         }
 
         fn observes(&self, bind_uri: &BindUri) -> bool {
@@ -430,6 +418,28 @@ mod tests {
 
     fn name() -> Name<'static> {
         "alice.dhttp.net".parse().expect("valid name")
+    }
+
+    #[test]
+    fn typed_local_endpoint_updates_require_publication_refresh() {
+        let direct = InterfaceEndpointUpdate::Upsert {
+            key: InterfaceEndpointKey::Direct,
+            endpoint: EndpointAddr::direct("127.0.0.1:12345".parse().expect("addr")),
+        };
+        let remove = InterfaceEndpointUpdate::Remove {
+            key: InterfaceEndpointKey::Direct,
+        };
+        let close = InterfaceEndpointUpdate::Close;
+
+        assert!(
+            EndpointPublicationLoop::<TestSource>::local_endpoint_update_requires_publish(&direct)
+        );
+        assert!(
+            EndpointPublicationLoop::<TestSource>::local_endpoint_update_requires_publish(&remove)
+        );
+        assert!(
+            EndpointPublicationLoop::<TestSource>::local_endpoint_update_requires_publish(&close)
+        );
     }
 
     #[tokio::test]
@@ -458,7 +468,7 @@ mod tests {
         )
         .await;
 
-        source.notify_publishable_location();
+        source.notify_publishable_local_endpoint();
 
         wait_until(
             "replacement publish attempt to start after the location update",

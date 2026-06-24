@@ -20,7 +20,7 @@ bitfield-struct = "0.13"
 bytes = "1"
 dashmap = { version = "6", optional = true }
 dhttp-identity = "0.2.0"
-dquic = "0.5.1"
+dquic = "0.6.0"
 flume = { version = "0.12", optional = true }
 futures = "0.3"
 libc = { version = "0.2", optional = true }
