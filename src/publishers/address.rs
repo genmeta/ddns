@@ -6,7 +6,7 @@ use std::{net::SocketAddr, sync::OnceLock};
 
 use dquic::qbase::net::{Family, addr::EndpointAddr};
 #[cfg(feature = "dquic-network")]
-use dquic::qinterface::component::location::Observer;
+use dquic::qinterface::component::local_endpoint::LocalEndpointSubscriber;
 #[cfg(feature = "dquic-network")]
 use h3x::dquic::{
     Network,
@@ -55,7 +55,7 @@ where
 #[cfg(feature = "dquic-network")]
 pub trait AddressViewSource {
     fn address_view(&self) -> impl AddressView + Send + Sync + '_;
-    fn subscribe(&self) -> Observer;
+    fn subscribe(&self) -> LocalEndpointSubscriber;
     fn observes(&self, bind_uri: &BindUri) -> bool;
 }
 
@@ -199,8 +199,8 @@ impl AddressViewSource for EndpointBindingAddresses {
         EndpointBindingAddressView::new(self.network.clone(), self.bind_patterns.clone())
     }
 
-    fn subscribe(&self) -> Observer {
-        self.network.quic().locations().subscribe()
+    fn subscribe(&self) -> LocalEndpointSubscriber {
+        self.network.quic().local_endpoints().subscribe()
     }
 
     fn observes(&self, bind_uri: &BindUri) -> bool {
