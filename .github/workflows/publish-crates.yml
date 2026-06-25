@@ -22,23 +22,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust stable toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-
-      - name: Install Rust nightly for formatting
+      - name: Install Rust nightly toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: nightly
-          components: rustfmt
+          components: rustfmt, clippy
 
       - name: Check formatting
         run: cargo +nightly fmt -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo +nightly clippy --all-targets --all-features -- -D warnings
 
       - name: Test crate
-        run: cargo test --all-features --all-targets
+        run: cargo +nightly test --all-features --all-targets
 
       - name: Authenticate to crates.io
         if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
@@ -59,7 +56,7 @@ jobs:
           fi
 
           package_name=dyns
-          package_version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          package_version="$(cargo +nightly metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
 
           crate_state="$(
             python3 - <<'PY' "$package_name" "$package_version"
@@ -109,9 +106,9 @@ jobs:
 
           if [[ "$mode" == "dry-run" ]]; then
             echo "dry-run $package_name $package_version"
-            cargo publish --dry-run
+            cargo +nightly publish --dry-run
             exit 0
           fi
 
           echo "publish $package_name $package_version"
-          cargo publish
+          cargo +nightly publish
