@@ -263,7 +263,11 @@ impl MdnsResolvers {
         resolvers
     }
 
-    pub async fn query(
+    pub async fn query(&self, name: &str) -> io::Result<RecordStream> {
+        self.query_with_sequence(name, None).await
+    }
+
+    pub async fn query_with_sequence(
         &self,
         name: &str,
         sequence: Option<dhttp_identity::certificate::CertificateSequence>,
@@ -371,6 +375,6 @@ impl Resolve for MdnsResolvers {
         else {
             return future::ready(Err(io::Error::other("no DNS record found"))).boxed();
         };
-        self.query(domain, sequence).boxed()
+        self.query_with_sequence(domain, sequence).boxed()
     }
 }
