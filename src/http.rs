@@ -56,7 +56,7 @@ impl Display for HttpResolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Http DNS({})",
+            "HTTP DNS Resolver({})",
             self.base_url.host_str().expect("checked in constructor")
         )
     }
@@ -115,11 +115,15 @@ impl HttpResolver {
                 )
                 .header(SIGNATURE_HEADER, signature_fields.signature.as_slice());
         }
-        request
-            .body(packet.to_vec())
-            .send()
-            .await?
-            .error_for_status()?;
+        let response = request.body(packet.to_vec()).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.bytes().await?;
+            return Err(Error::Status {
+                status,
+                message: StatusBody::new(bounded_status_body(&body)),
+            });
+        }
         Ok(())
     }
 }
@@ -151,13 +155,67 @@ fn build_http_client() -> io::Result<Client> {
         .map_err(io::Error::other)
 }
 
+fn dns_packet_for_http_publish(
+    name: &str,
+    endpoints: impl IntoIterator<Item = EndpointAddr>,
+) -> io::Result<Vec<u8>> {
+    let mut encoded = Vec::new();
+    for endpoint in endpoints {
+        let endpoint = crate::core::parser::record::endpoint::EndpointAddr::try_from(endpoint)
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "failed to encode endpoint address",
+                )
+            })?;
+        encoded.push(endpoint);
+    }
+
+    let mut hosts = std::collections::HashMap::new();
+    hosts.insert(name.to_owned(), encoded);
+    Ok(crate::core::MdnsPacket::answer(0, &hosts).to_bytes())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StatusBody(String);
+
+impl StatusBody {
+    fn new(body: String) -> Self {
+        Self(body)
+    }
+}
+
+impl std::fmt::Display for StatusBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.is_empty() {
+            Ok(())
+        } else {
+            write!(f, ": {}", self.0)
+        }
+    }
+}
+
+const STATUS_BODY_LIMIT: usize = 4096;
+
+fn bounded_status_body(body: &[u8]) -> String {
+    let body = if body.len() > STATUS_BODY_LIMIT {
+        &body[..STATUS_BODY_LIMIT]
+    } else {
+        body
+    };
+    String::from_utf8_lossy(body).trim().to_owned()
+}
+
 #[derive(Debug, snafu::Snafu)]
 enum Error {
     #[snafu(display("http request failed"))]
     Reqwest { source: reqwest::Error },
 
-    #[snafu(display("{status}"))]
-    Status { status: StatusCode },
+    #[snafu(display("{status}{message}"))]
+    Status {
+        status: StatusCode,
+        message: StatusBody,
+    },
 
     #[snafu(display("no DNS record found"))]
     NoRecordFound,
@@ -175,7 +233,10 @@ impl From<reqwest::Error> for Error {
     fn from(source: reqwest::Error) -> Self {
         match source.status() {
             Some(stateus) if stateus == StatusCode::NOT_FOUND => Error::NoRecordFound,
-            Some(status) => Error::Status { status },
+            Some(status) => Error::Status {
+                status,
+                message: StatusBody::new(String::new()),
+            },
             None => Error::Reqwest {
                 source: source.without_url(),
             },
@@ -184,9 +245,15 @@ impl From<reqwest::Error> for Error {
 }
 
 impl Publish for HttpResolver {
-    fn publish<'a>(&'a self, name: &'a str, packet: &'a [u8]) -> PublishFuture<'a> {
+    fn publish<'a>(
+        &'a self,
+        name: &'a str,
+        endpoints: &mut dyn Iterator<Item = EndpointAddr>,
+    ) -> PublishFuture<'a> {
+        let endpoints: Vec<_> = endpoints.collect();
         Box::pin(async move {
-            self.publish_packet_with_signature(name, packet, &SignatureFields::empty())
+            let packet = dns_packet_for_http_publish(name, endpoints)?;
+            self.publish_packet_with_signature(name, &packet, &SignatureFields::empty())
                 .await
                 .map_err(io::Error::other)
         })

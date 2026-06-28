@@ -20,7 +20,6 @@ use futures::{Stream, stream::FuturesUnordered};
 use self::protocol::MdnsProtocol;
 #[cfg(feature = "dquic-network")]
 use crate::core::parser::packet::Packet;
-use crate::core::parser::record::RData;
 
 pub type MdnsResolver = service::Mdns;
 pub type MdnsPublisher = service::Mdns;
@@ -44,8 +43,12 @@ impl fmt::Display for MdnsResolver {
 }
 
 impl Publish for MdnsPublisher {
-    fn publish<'a>(&'a self, name: &'a str, packet: &'a [u8]) -> PublishFuture<'a> {
-        let endpoints = match endpoints_from_packet(packet) {
+    fn publish<'a>(
+        &'a self,
+        name: &'a str,
+        endpoints: &mut dyn Iterator<Item = dquic::qbase::net::addr::EndpointAddr>,
+    ) -> PublishFuture<'a> {
+        let endpoints = match mdns_endpoints_from_dquic(endpoints) {
             Ok(endpoints) => endpoints,
             Err(error) => return future::ready(Err(error)).boxed(),
         };
@@ -73,20 +76,21 @@ impl Resolve for MdnsResolver {
     }
 }
 
-fn endpoints_from_packet(packet: &[u8]) -> io::Result<Vec<crate::core::MdnsEndpoint>> {
-    use crate::core::parser::packet::be_packet;
-
-    be_packet(packet)
-        .map(|(_, pkt)| {
-            pkt.answers
-                .iter()
-                .filter_map(|rr| match rr.data() {
-                    RData::E(ep) => Some(ep.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        })
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
+fn mdns_endpoints_from_dquic(
+    endpoints: &mut dyn Iterator<Item = dquic::qbase::net::addr::EndpointAddr>,
+) -> io::Result<Vec<crate::core::MdnsEndpoint>> {
+    let mut records = Vec::new();
+    for endpoint in endpoints {
+        let endpoint = crate::core::parser::record::endpoint::EndpointAddr::try_from(endpoint)
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "failed to encode endpoint address",
+                )
+            })?;
+        records.push(endpoint);
+    }
+    Ok(records)
 }
 
 #[cfg(feature = "dquic-network")]
@@ -354,8 +358,12 @@ impl MdnsResolvers {
 
 #[cfg(feature = "dquic-network")]
 impl Publish for MdnsResolvers {
-    fn publish<'a>(&'a self, name: &'a str, packet: &'a [u8]) -> PublishFuture<'a> {
-        let endpoints = match endpoints_from_packet(packet) {
+    fn publish<'a>(
+        &'a self,
+        name: &'a str,
+        endpoints: &mut dyn Iterator<Item = dquic::qbase::net::addr::EndpointAddr>,
+    ) -> PublishFuture<'a> {
+        let endpoints = match mdns_endpoints_from_dquic(endpoints) {
             Ok(endpoints) => endpoints,
             Err(error) => return future::ready(Err(error)).boxed(),
         };

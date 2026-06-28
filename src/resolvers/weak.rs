@@ -3,8 +3,8 @@ use std::{
     sync::{Arc, Weak},
 };
 
-use dquic::qresolve::{Publish, PublishFuture, RecordStream, Resolve, ResolveFuture};
-use futures::FutureExt;
+use dquic::qresolve::{EndpointAddr, Publish, PublishFuture, RecordStream, Resolve, ResolveFuture};
+use futures::{FutureExt, future::BoxFuture};
 use snafu::{ResultExt, Snafu};
 
 #[derive(Debug, Snafu)]
@@ -94,14 +94,23 @@ impl<R: ?Sized> WeakResolver<R>
 where
     R: Publish + 'static,
 {
-    pub async fn publish_typed(&self, name: &str, packet: &[u8]) -> Result<(), WeakPublishError> {
-        let Some(resolver) = self.inner.upgrade() else {
-            return weak_publish_error::DroppedSnafu.fail();
-        };
-        resolver
-            .publish(name, packet)
-            .await
-            .context(weak_publish_error::PublishSnafu)
+    pub fn publish_typed<'a>(
+        &'a self,
+        name: &'a str,
+        endpoints: &mut dyn Iterator<Item = EndpointAddr>,
+    ) -> BoxFuture<'a, Result<(), WeakPublishError>> {
+        let endpoints: Vec<_> = endpoints.collect();
+        async move {
+            let Some(resolver) = self.inner.upgrade() else {
+                return weak_publish_error::DroppedSnafu.fail();
+            };
+            let mut endpoints = endpoints.into_iter();
+            resolver
+                .publish(name, &mut endpoints)
+                .await
+                .context(weak_publish_error::PublishSnafu)
+        }
+        .boxed()
     }
 }
 
@@ -109,9 +118,15 @@ impl<R: ?Sized> Publish for WeakResolver<R>
 where
     R: Publish + 'static,
 {
-    fn publish<'a>(&'a self, name: &'a str, packet: &'a [u8]) -> PublishFuture<'a> {
+    fn publish<'a>(
+        &'a self,
+        name: &'a str,
+        endpoints: &mut dyn Iterator<Item = EndpointAddr>,
+    ) -> PublishFuture<'a> {
+        let endpoints: Vec<_> = endpoints.collect();
         async move {
-            self.publish_typed(name, packet)
+            let mut endpoints = endpoints.into_iter();
+            self.publish_typed(name, &mut endpoints)
                 .await
                 .map_err(io::Error::other)
         }
@@ -154,8 +169,9 @@ mod tests {
         fn publish<'a>(
             &'a self,
             _name: &'a str,
-            _packet: &'a [u8],
+            endpoints: &mut dyn Iterator<Item = dquic::qresolve::EndpointAddr>,
         ) -> dquic::qresolve::PublishFuture<'a> {
+            let _endpoints: Vec<_> = endpoints.collect();
             async move { Ok(()) }.boxed()
         }
     }
@@ -193,8 +209,9 @@ mod tests {
         let strong = Arc::new(TestResolver);
         let resolver = WeakResolver::new(Arc::downgrade(&strong));
 
+        let mut endpoints = std::iter::empty();
         resolver
-            .publish_typed("example.test", b"packet")
+            .publish_typed("example.test", &mut endpoints)
             .await
             .unwrap();
     }

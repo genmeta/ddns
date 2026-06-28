@@ -22,31 +22,6 @@ pub enum EncodeAuthorityDnsPacketError {
     EncodeEndpoint,
 }
 
-
-#[derive(Debug, Snafu)]
-#[snafu(module)]
-pub enum EncodeEndpointPacketError {
-    #[snafu(display("failed to encode endpoint address"))]
-    EncodeEndpoint,
-}
-
-pub(crate) fn endpoint_packet(
-    name: &dhttp_identity::name::Name<'_>,
-    endpoints: impl IntoIterator<Item = EndpointAddr>,
-) -> Result<Vec<u8>, EncodeEndpointPacketError> {
-    let mut encoded = Vec::new();
-    for endpoint in endpoints {
-        let Ok(endpoint) = DnsEndpointAddr::try_from(endpoint) else {
-            return encode_endpoint_packet_error::EncodeEndpointSnafu.fail();
-        };
-        encoded.push(endpoint);
-    }
-
-    let mut hosts = HashMap::new();
-    hosts.insert(name.as_str().to_owned(), encoded);
-    Ok(MdnsPacket::answer(0, &hosts).to_bytes())
-}
-
 pub(crate) fn dns_packet_for_authority(
     authority: &dyn LocalAuthority,
     name: &str,
@@ -57,9 +32,9 @@ pub(crate) fn dns_packet_for_authority(
         encode_authority_dns_packet_error::AuthorityNameMismatchSnafu
     );
 
-    let ski = authority.dhttp_subject_key_identifier().context(
-        encode_authority_dns_packet_error::DhttpSubjectKeyIdentifierSnafu,
-    )?;
+    let ski = authority
+        .dhttp_subject_key_identifier()
+        .context(encode_authority_dns_packet_error::DhttpSubjectKeyIdentifierSnafu)?;
     let chain = ski.chain();
 
     let mut encoded = Vec::new();
@@ -136,12 +111,9 @@ mod tests {
         let authority = authority("client.example.com.dhttp.net");
         let mut endpoints = std::iter::once(endpoint());
 
-        let packet = dns_packet_for_authority(
-            &authority,
-            "client.example.com.dhttp.net",
-            &mut endpoints,
-        )
-        .expect("authority packet");
+        let packet =
+            dns_packet_for_authority(&authority, "client.example.com.dhttp.net", &mut endpoints)
+                .expect("authority packet");
 
         let (remain, parsed) = be_packet(&packet).expect("dns packet parses");
         assert!(remain.is_empty());
@@ -162,12 +134,9 @@ mod tests {
         let authority = authority("client.example.com.dhttp.net");
         let mut endpoints = std::iter::once(endpoint());
 
-        let error = dns_packet_for_authority(
-            &authority,
-            "other.example.com.dhttp.net",
-            &mut endpoints,
-        )
-        .expect_err("name mismatch fails");
+        let error =
+            dns_packet_for_authority(&authority, "other.example.com.dhttp.net", &mut endpoints)
+                .expect_err("name mismatch fails");
 
         assert_eq!(
             error.to_string(),
@@ -180,12 +149,9 @@ mod tests {
         let authority = authority("client.example.com.dhttp.net");
         let mut endpoints = std::iter::empty();
 
-        let packet = dns_packet_for_authority(
-            &authority,
-            "client.example.com.dhttp.net",
-            &mut endpoints,
-        )
-        .expect("authority packet");
+        let packet =
+            dns_packet_for_authority(&authority, "client.example.com.dhttp.net", &mut endpoints)
+                .expect("authority packet");
 
         let (remain, parsed) = be_packet(&packet).expect("dns packet parses");
         assert!(remain.is_empty());

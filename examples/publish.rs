@@ -6,10 +6,8 @@ use std::{
 };
 
 use clap::Parser;
-use ddns::{
-    core::parser::record::endpoint::EndpointAddr, publishers::H3Publisher,
-    resolvers::DHTTP_H3_DNS_SERVER,
-};
+use ddns::{publishers::H3Publisher, resolvers::DHTTP_H3_DNS_SERVER};
+use dquic::qbase::net::addr::EndpointAddr;
 use h3x::dquic::{
     Identity, Network, QuicEndpoint,
     cert::handy::{ToCertificate, ToPrivateKey},
@@ -49,12 +47,6 @@ struct Options {
     /// 要发布的地址列表。
     #[arg(long, value_delimiter = ',', num_args = 1..)]
     addr: Vec<SocketAddr>,
-
-    #[arg(long, default_value_t = true)]
-    is_main: bool,
-
-    #[arg(long, default_value_t = 1)]
-    sequence: u64,
 }
 
 fn default_h3_base_url() -> String {
@@ -135,25 +127,15 @@ async fn main() -> io::Result<()> {
 
     info!(host = %opt.host, addrs = ?opt.addr, base_url = %opt.base_url, "publish.start");
     for &addr in &opt.addr {
-        info!("Creating endpoint for address: {}", addr);
-        let mut endpoint = match addr {
-            SocketAddr::V4(v4) => EndpointAddr::direct_v4(v4),
-            SocketAddr::V6(v6) => EndpointAddr::direct_v6(v6),
-        };
-        endpoint.set_main(opt.is_main);
-        endpoint.set_sequence(
-            dhttp_identity::certificate::CertificateSequence::try_from(opt.sequence)
-                .map_err(io::Error::other)?,
-        );
-        info!("Publishing endpoint: {:?}", endpoint);
-        let mut hosts = std::collections::HashMap::new();
-        hosts.insert(opt.host.clone(), vec![endpoint]);
-        let packet = ddns::core::MdnsPacket::answer(0, &hosts).to_bytes();
+        info!("creating endpoint for address: {}", addr);
+        let endpoint = EndpointAddr::direct(addr);
+        info!("publishing endpoint: {:?}", endpoint);
+        let mut endpoints = std::iter::once(endpoint);
         resolver
-            .publish(&opt.host, &packet)
+            .publish(&opt.host, &mut endpoints)
             .await
             .map_err(io::Error::other)?;
-        info!("Successfully published endpoint for {}", addr);
+        info!("successfully published endpoint for {}", addr);
     }
     info!("publish.ok");
 

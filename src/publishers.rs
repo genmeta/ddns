@@ -3,7 +3,7 @@ mod address;
 #[cfg(feature = "publishers")]
 mod aggregate;
 #[cfg(feature = "publishers")]
-mod packet;
+pub(crate) mod packet;
 #[cfg(feature = "publishers")]
 mod publisher;
 
@@ -27,7 +27,7 @@ pub use address::{
 #[cfg(all(feature = "publishers", feature = "dquic-network"))]
 pub use address::{AddressViewSource, EndpointBindingAddresses};
 #[cfg(feature = "publishers")]
-pub use aggregate::{Publishers, PublishersError};
+pub use aggregate::{PublishReport, PublisherSuccess, Publishers, PublishersError};
 #[cfg(feature = "publishers")]
 use dhttp_identity::name::Name;
 #[cfg(all(feature = "publishers", feature = "dquic-network"))]
@@ -208,12 +208,17 @@ where
         )
         .await
         {
-            Ok(Ok(())) => {
-                tracing::info!(name = %self.name, "published resolver endpoints");
+            Ok(Ok(report)) if report.is_complete() => {
+                tracing::info!(name = %self.name, publishers = %report, "published resolver endpoints");
+                true
+            }
+            Ok(Ok(report)) => {
+                tracing::warn!(error = %report, name = %self.name, "dns publish partially failed");
                 true
             }
             Ok(Err(error)) => {
-                tracing::warn!(error = %error, name = %self.name, "dns publish failed");
+                let report = snafu::Report::from_error(&error);
+                tracing::warn!(error = %report, name = %self.name, "dns publish failed");
                 false
             }
             Err(_elapsed) => {
@@ -318,7 +323,12 @@ mod tests {
     }
 
     impl Publish for BlockingPublisher {
-        fn publish<'a>(&'a self, _name: &'a str, _packet: &'a [u8]) -> PublishFuture<'a> {
+        fn publish<'a>(
+            &'a self,
+            _name: &'a str,
+            endpoints: &mut dyn Iterator<Item = EndpointAddr>,
+        ) -> PublishFuture<'a> {
+            let _endpoints: Vec<_> = endpoints.collect();
             let state = self.state.clone();
             async move {
                 let attempt = state.started.fetch_add(1, Ordering::SeqCst) + 1;
@@ -350,7 +360,12 @@ mod tests {
     }
 
     impl Publish for DelayedPublisher {
-        fn publish<'a>(&'a self, _name: &'a str, _packet: &'a [u8]) -> PublishFuture<'a> {
+        fn publish<'a>(
+            &'a self,
+            _name: &'a str,
+            endpoints: &mut dyn Iterator<Item = EndpointAddr>,
+        ) -> PublishFuture<'a> {
+            let _endpoints: Vec<_> = endpoints.collect();
             let delay = self.delay;
             async move {
                 tokio::time::sleep(delay).await;

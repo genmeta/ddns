@@ -1,16 +1,13 @@
-use std::collections::HashMap;
-
 use dhttp_identity::identity::LocalAuthority;
 use dquic::qbase::net::addr::EndpointAddr;
 use h3x::quic;
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full};
 use snafu::{OptionExt, ResultExt};
 use tracing::trace;
 
-use super::{H3PublishError, H3Resolver, h3_publish_error};
-use crate::core::{
-    MdnsPacket,
-    signature::{CONTENT_DIGEST_HEADER, SIGNATURE_HEADER, SIGNATURE_INPUT_HEADER, SignatureFields},
+use super::{H3PublishError, H3Resolver, StatusBody, h3_publish_error};
+use crate::core::signature::{
+    CONTENT_DIGEST_HEADER, SIGNATURE_HEADER, SIGNATURE_INPUT_HEADER, SignatureFields,
 };
 
 const PUBLISH_API_PATH: &str = "/api/v2/publish";
@@ -50,6 +47,17 @@ async fn signed_publish_request<A: LocalAuthority + ?Sized>(
         .expect("h3 dns publish request must be valid"))
 }
 
+const STATUS_BODY_LIMIT: usize = 4096;
+
+fn bounded_status_body(body: &[u8]) -> String {
+    let body = if body.len() > STATUS_BODY_LIMIT {
+        &body[..STATUS_BODY_LIMIT]
+    } else {
+        body
+    };
+    String::from_utf8_lossy(body).trim().to_owned()
+}
+
 impl<C> H3Resolver<C>
 where
     C: quic::Connect + quic::WithLocalAuthority + Send + Sync + 'static,
@@ -59,36 +67,15 @@ where
     pub async fn publish_endpoints(
         &self,
         name: &str,
-        endpoints: &[EndpointAddr],
+        endpoints: impl IntoIterator<Item = EndpointAddr>,
     ) -> Result<(), H3PublishError<C::Error>> {
-        trace!("h3x publishing {} with {} endpoints", name, endpoints.len());
-        let bytes = {
-            let endpoints = endpoints
-                .iter()
-                .filter_map(|ep| {
-                    crate::core::parser::record::endpoint::EndpointAddr::try_from(*ep).ok()
-                })
-                .collect();
-            let mut hosts = HashMap::new();
-            hosts.insert(name.to_string(), endpoints);
-            MdnsPacket::answer(0, &hosts).to_bytes()
-        };
-
-        self.publish_packet(name, &bytes).await
-    }
-
-    /// Publish a pre-built DNS packet (with signatures already included).
-    pub async fn publish_packet(
-        &self,
-        name: &str,
-        packet: &[u8],
-    ) -> Result<(), H3PublishError<C::Error>> {
-        tracing::trace!(
+        let endpoints: Vec<_> = endpoints.into_iter().collect();
+        trace!(
             name,
-            packet_len = packet.len(),
-            url = %self.base_url,
-            "h3 dns publishing packet"
+            endpoint_count = endpoints.len(),
+            "h3 dns publishing endpoints"
         );
+
         let authority = self
             .endpoint
             .quic()
@@ -96,14 +83,44 @@ where
             .await
             .context(h3_publish_error::LocalAuthoritySnafu)?
             .context(h3_publish_error::AnonymousEndpointSnafu)?;
-        let request = signed_publish_request(&self.base_url, name, packet, &authority)
+        let mut endpoints = endpoints.into_iter();
+        let packet =
+            crate::publishers::packet::dns_packet_for_authority(&authority, name, &mut endpoints)
+                .context(h3_publish_error::EncodePacketSnafu)?;
+
+        self.publish_packet_with_authority(name, &packet, &authority)
+            .await
+    }
+
+    async fn publish_packet_with_authority(
+        &self,
+        name: &str,
+        packet: &[u8],
+        authority: &dyn LocalAuthority,
+    ) -> Result<(), H3PublishError<C::Error>> {
+        tracing::trace!(
+            name,
+            packet_len = packet.len(),
+            url = %self.base_url,
+            "h3 dns publishing packet"
+        );
+        let request = signed_publish_request(&self.base_url, name, packet, authority)
             .await
             .context(h3_publish_error::SignRequestSnafu)?;
         let resp = self.execute_request(request).await?;
+        let status = resp.status();
 
-        if resp.status() != http::StatusCode::OK {
+        if status != http::StatusCode::OK {
+            let body = resp
+                .into_body()
+                .collect()
+                .await
+                .context(h3_publish_error::ResponseBodySnafu)?
+                .to_bytes();
+            let body = bounded_status_body(&body);
             return Err(H3PublishError::Status {
-                status: resp.status(),
+                status,
+                message: StatusBody::new(body),
             });
         }
 
@@ -138,8 +155,10 @@ mod tests {
         let resolver = H3Resolver::from_endpoint("https://dns.example.test:4433", endpoint)
             .expect("valid h3 resolver");
 
+        let endpoint_addr =
+            dquic::qbase::net::addr::EndpointAddr::direct("203.0.113.10:4433".parse().unwrap());
         let error = resolver
-            .publish_packet("demo.dhttp.net", b"dns-packet")
+            .publish_endpoints("demo.dhttp.net", [endpoint_addr])
             .await
             .expect_err("anonymous endpoint should not publish");
 
@@ -148,8 +167,9 @@ mod tests {
             "anonymous h3 endpoint cannot sign dns publish request"
         );
 
+        let mut endpoints = std::iter::once(endpoint_addr);
         let trait_error = resolver
-            .publish("demo.dhttp.net", b"dns-packet")
+            .publish("demo.dhttp.net", &mut endpoints)
             .await
             .expect_err("trait publish should surface anonymous endpoint");
         assert!(

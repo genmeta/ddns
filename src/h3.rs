@@ -1,6 +1,9 @@
 use std::{convert::Infallible, fmt, io, sync::Arc, time::Duration};
 
-use dquic::qresolve::{Publish, PublishFuture, Resolve, ResolveFuture};
+use dquic::{
+    qbase::net::addr::EndpointAddr,
+    qresolve::{Publish, PublishFuture, Resolve, ResolveFuture},
+};
 use h3x::{
     dhttp::message::{MessageStreamError, hyper::client::RequestError as HyperRequestError},
     endpoint::H3Endpoint,
@@ -69,8 +72,36 @@ pub enum H3PublishError<E: std::error::Error + Send + Sync + 'static> {
     SignRequest {
         source: crate::core::signature::SignatureFieldsError,
     },
-    #[snafu(display("{status}"))]
-    Status { status: http::StatusCode },
+    #[snafu(display("failed to encode h3 dns publish packet"))]
+    EncodePacket {
+        source: crate::publishers::packet::EncodeAuthorityDnsPacketError,
+    },
+    #[snafu(display("h3 dns publish response body error"))]
+    ResponseBody { source: MessageStreamError },
+    #[snafu(display("{status}{message}"))]
+    Status {
+        status: http::StatusCode,
+        message: StatusBody,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusBody(String);
+
+impl StatusBody {
+    pub fn new(body: String) -> Self {
+        Self(body)
+    }
+}
+
+impl fmt::Display for StatusBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.is_empty() {
+            Ok(())
+        } else {
+            write!(f, ": {}", self.0)
+        }
+    }
 }
 
 #[derive(Debug, snafu::Snafu)]
@@ -145,9 +176,14 @@ where
     C::Error: Send + Sync + 'static,
     C::Connection: Send + 'static,
 {
-    fn publish<'a>(&'a self, name: &'a str, packet: &'a [u8]) -> PublishFuture<'a> {
+    fn publish<'a>(
+        &'a self,
+        name: &'a str,
+        endpoints: &mut dyn Iterator<Item = EndpointAddr>,
+    ) -> PublishFuture<'a> {
+        let endpoints: Vec<_> = endpoints.collect();
         Box::pin(async move {
-            self.publish_packet(name, packet)
+            self.publish_endpoints(name, endpoints)
                 .await
                 .map_err(io::Error::other)
         })

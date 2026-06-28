@@ -4,16 +4,12 @@ use dhttp_identity::name::Name;
 use dquic::qresolve::Publish;
 use snafu::{IntoError, ResultExt, Snafu};
 
-use super::{AddressView, PublishScope, packet};
+use super::{AddressView, PublishScope};
 
 #[derive(Debug, Snafu)]
 #[snafu(module)]
 pub enum PublisherError {
-    #[snafu(display("failed to encode endpoint dns packet"))]
-    EncodePacket {
-        source: packet::EncodeEndpointPacketError,
-    },
-    #[snafu(display("failed to publish dns packet with {publisher}"))]
+    #[snafu(display("failed to publish dns records with {publisher}"))]
     Publish {
         publisher: String,
         source: io::Error,
@@ -140,21 +136,18 @@ async fn publish_selected<V>(
 where
     V: AddressView + Sync,
 {
-    let endpoints: Vec<_> = view.endpoints(scope.selector()).collect();
-    let packet =
-        packet::endpoint_packet(name, endpoints).context(publisher_error::EncodePacketSnafu)?;
     tracing::debug!(
         publisher = %publisher,
         name = %name,
-        packet_len = packet.len(),
-        "publishing dns packet"
+        "publishing dns records"
     );
-    publisher
-        .publish(name.as_str(), &packet)
-        .await
-        .context(publisher_error::PublishSnafu {
-            publisher: publisher.to_string(),
-        })
+    let publish = {
+        let mut endpoints = view.endpoints(scope.selector());
+        publisher.publish(name.as_str(), &mut endpoints)
+    };
+    publish.await.context(publisher_error::PublishSnafu {
+        publisher: publisher.to_string(),
+    })
 }
 
 #[cfg(all(feature = "mdns", feature = "dquic-network"))]
@@ -210,18 +203,15 @@ mod tests {
     };
     use futures::FutureExt;
 
-    use crate::{
-        core::parser::{packet::be_packet, record::RData},
-        publishers::{PublishScope, Publisher},
-    };
+    use crate::publishers::{PublishScope, Publisher};
 
     #[derive(Debug, Default)]
     struct RecordingPublisher {
-        calls: Mutex<Vec<(String, Vec<u8>)>>,
+        calls: Mutex<Vec<(String, Vec<EndpointAddr>)>>,
     }
 
     impl RecordingPublisher {
-        fn calls(&self) -> Vec<(String, Vec<u8>)> {
+        fn calls(&self) -> Vec<(String, Vec<EndpointAddr>)> {
             self.calls.lock().expect("calls lock poisoned").clone()
         }
     }
@@ -233,12 +223,17 @@ mod tests {
     }
 
     impl Publish for RecordingPublisher {
-        fn publish<'a>(&'a self, name: &'a str, packet: &'a [u8]) -> PublishFuture<'a> {
+        fn publish<'a>(
+            &'a self,
+            name: &'a str,
+            endpoints: &mut dyn Iterator<Item = EndpointAddr>,
+        ) -> PublishFuture<'a> {
+            let endpoints: Vec<_> = endpoints.collect();
             async move {
                 self.calls
                     .lock()
                     .expect("calls lock poisoned")
-                    .push((name.to_owned(), packet.to_vec()));
+                    .push((name.to_owned(), endpoints));
                 Ok(())
             }
             .boxed()
@@ -255,7 +250,12 @@ mod tests {
     }
 
     impl Publish for FailingPublisher {
-        fn publish<'a>(&'a self, _name: &'a str, _packet: &'a [u8]) -> PublishFuture<'a> {
+        fn publish<'a>(
+            &'a self,
+            _name: &'a str,
+            endpoints: &mut dyn Iterator<Item = EndpointAddr>,
+        ) -> PublishFuture<'a> {
+            let _endpoints: Vec<_> = endpoints.collect();
             async move { Err(io::Error::other("publish rejected")) }.boxed()
         }
     }
@@ -280,24 +280,9 @@ mod tests {
             .await
             .expect("publish succeeds");
 
-        let calls = recorder.calls();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "alice.dhttp.net");
-        let (_, packet) = be_packet(&calls[0].1).expect("packet parses");
-        let endpoints: Vec<_> = packet
-            .answers
-            .iter()
-            .filter_map(|answer| match answer.data() {
-                RData::E(endpoint) => Some(endpoint.primary),
-                _ => None,
-            })
-            .collect();
         assert_eq!(
-            endpoints,
-            vec![SocketAddr::V4(SocketAddrV4::new(
-                Ipv4Addr::new(203, 0, 113, 10),
-                4433
-            ))]
+            recorder.calls(),
+            vec![("alice.dhttp.net".to_owned(), vec![wide])]
         );
     }
 
@@ -323,23 +308,9 @@ mod tests {
             .await
             .expect("publish succeeds");
 
-        let calls = recorder.calls();
-        assert_eq!(calls.len(), 1);
-        let (_, packet) = be_packet(&calls[0].1).expect("packet parses");
-        let endpoints: Vec<_> = packet
-            .answers
-            .iter()
-            .filter_map(|answer| match answer.data() {
-                RData::E(endpoint) => Some(endpoint.primary),
-                _ => None,
-            })
-            .collect();
         assert_eq!(
-            endpoints,
-            vec![SocketAddr::V4(SocketAddrV4::new(
-                Ipv4Addr::new(192, 168, 2, 20),
-                4433
-            ))]
+            recorder.calls(),
+            vec![("alice.dhttp.net".to_owned(), vec![en1])]
         );
     }
 
@@ -356,7 +327,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "failed to publish dns packet with failing publisher"
+            "failed to publish dns records with failing publisher"
         );
         assert_eq!(
             std::error::Error::source(&error)
