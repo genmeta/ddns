@@ -1,8 +1,10 @@
 use std::{fmt, io, sync::Arc};
 
-use dhttp_identity::name::Name;
+use dhttp_identity::{certificate::CertificateChainKey, name::Name};
 use dquic::qresolve::Publish;
-use snafu::{IntoError, ResultExt, Snafu};
+#[cfg(all(feature = "mdns", feature = "dquic-network"))]
+use snafu::IntoError;
+use snafu::{ResultExt, Snafu};
 
 use super::{AddressView, PublishScope, packet};
 
@@ -117,13 +119,18 @@ impl Publisher {
         }
     }
 
-    pub async fn publish<V>(&self, name: &Name<'_>, view: &V) -> Result<(), PublisherError>
+    pub async fn publish<V>(
+        &self,
+        name: &Name<'_>,
+        view: &V,
+        chain_key: Option<&CertificateChainKey>,
+    ) -> Result<(), PublisherError>
     where
         V: AddressView + Sync,
     {
         match &self.inner {
             PublisherKind::Custom { scope, publisher } => {
-                publish_selected(publisher.as_ref(), scope, name, view).await
+                publish_selected(publisher.as_ref(), scope, name, view, chain_key).await
             }
             #[cfg(all(feature = "mdns", feature = "dquic-network"))]
             PublisherKind::Mdns(resolvers) => publish_mdns(resolvers, name, view).await,
@@ -136,13 +143,18 @@ async fn publish_selected<V>(
     scope: &PublishScope,
     name: &Name<'_>,
     view: &V,
+    chain_key: Option<&CertificateChainKey>,
 ) -> Result<(), PublisherError>
 where
     V: AddressView + Sync,
 {
     let endpoints: Vec<_> = view.endpoints(scope.selector()).collect();
-    let packet =
-        packet::endpoint_packet(name, endpoints).context(publisher_error::EncodePacketSnafu)?;
+    let packet = if let Some(chain_key) = chain_key {
+        packet::endpoint_packet_with_chain_key(name, endpoints, Some(chain_key))
+    } else {
+        packet::endpoint_packet(name, endpoints)
+    }
+    .context(publisher_error::EncodePacketSnafu)?;
     tracing::debug!(
         publisher = %publisher,
         name = %name,
@@ -179,7 +191,7 @@ where
             device: bound.device.clone().into(),
             family: bound.family,
         };
-        match publish_selected(&bound.resolver, &scope, name, view).await {
+        match publish_selected(&bound.resolver, &scope, name, view, None).await {
             Ok(()) => succeeded = true,
             Err(PublisherError::Publish { source, .. }) => {
                 errors.push((bound.resolver.to_string(), source));
@@ -203,7 +215,10 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use dhttp_identity::name::Name;
+    use dhttp_identity::{
+        certificate::{CertificateChainKey, CertificateChainKind, CertificateSequence},
+        name::Name,
+    };
     use dquic::{
         qbase::net::{Family, addr::EndpointAddr},
         qresolve::{Publish, PublishFuture},
@@ -276,7 +291,7 @@ mod tests {
         let name = Name::try_from("alice.dhttp.net").expect("valid name");
 
         publisher
-            .publish(&name, &view)
+            .publish(&name, &view, None)
             .await
             .expect("publish succeeds");
 
@@ -319,7 +334,7 @@ mod tests {
         let name = Name::try_from("alice.dhttp.net").expect("valid name");
 
         publisher
-            .publish(&name, &view)
+            .publish(&name, &view, None)
             .await
             .expect("publish succeeds");
 
@@ -350,7 +365,7 @@ mod tests {
         let name = Name::try_from("alice.dhttp.net").expect("valid name");
 
         let error = publisher
-            .publish(&name, &view)
+            .publish(&name, &view, None)
             .await
             .expect_err("publish should fail");
 
@@ -364,5 +379,30 @@ mod tests {
                 .to_string(),
             "publish rejected"
         );
+    }
+
+    #[tokio::test]
+    async fn custom_publisher_uses_certificate_chain_key_for_endpoint_packet() {
+        let wide = endpoint([203, 0, 113, 10], 4433);
+        let recorder = Arc::new(RecordingPublisher::default());
+        let chain_key = CertificateChainKey::new(
+            CertificateSequence::try_from(0u32).expect("sequence"),
+            CertificateChainKind::Primary,
+        );
+        let publisher = Publisher::new(PublishScope::WideArea, recorder.clone());
+        let view = crate::publishers::PublishAddresses::new().wide_area([wide]);
+        let name = Name::try_from("alice.dhttp.net").expect("valid name");
+
+        publisher
+            .publish(&name, &view, Some(&chain_key))
+            .await
+            .expect("publish succeeds");
+
+        let calls = recorder.calls();
+        let (_, packet) = be_packet(&calls[0].1).expect("packet parses");
+        let RData::E(endpoint) = packet.answers[0].data() else {
+            panic!("answer must be an E record");
+        };
+        assert_eq!(endpoint.certificate_chain_key(), chain_key);
     }
 }

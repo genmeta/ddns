@@ -28,7 +28,9 @@ pub use address::{
 pub use address::{AddressViewSource, EndpointBindingAddresses};
 #[cfg(feature = "publishers")]
 pub use aggregate::{Publishers, PublishersError};
-#[cfg(feature = "publishers")]
+#[cfg(all(feature = "publishers", feature = "dquic-network"))]
+use dhttp_identity::certificate::CertificateChainKey;
+#[cfg(all(feature = "publishers", feature = "dquic-network"))]
 use dhttp_identity::name::Name;
 #[cfg(all(feature = "publishers", feature = "dquic-network"))]
 use dquic::qinterface::component::local_endpoint::InterfaceEndpointUpdate;
@@ -86,6 +88,7 @@ pub struct EndpointPublicationLoop<S> {
     name: Name<'static>,
     publishers: Publishers,
     source: S,
+    chain_key: Option<CertificateChainKey>,
     interval: Duration,
     publish_timeout: Duration,
 }
@@ -100,6 +103,7 @@ where
             .field("name", &self.name)
             .field("publishers", &self.publishers)
             .field("source", &self.source)
+            .field("chain_key", &self.chain_key)
             .field("interval", &self.interval)
             .field("publish_timeout", &self.publish_timeout)
             .finish()
@@ -116,6 +120,7 @@ where
             name,
             publishers,
             source,
+            chain_key: None,
             interval: DEFAULT_PUBLISH_INTERVAL,
             publish_timeout: DEFAULT_PUBLISH_TIMEOUT,
         }
@@ -136,6 +141,11 @@ where
 
     pub fn with_publish_timeout(mut self, timeout: Duration) -> Self {
         self.publish_timeout = timeout;
+        self
+    }
+
+    pub fn with_certificate_chain_key(mut self, chain_key: CertificateChainKey) -> Self {
+        self.chain_key = Some(chain_key);
         self
     }
 
@@ -204,7 +214,8 @@ where
         let view = self.source.address_view();
         match tokio::time::timeout(
             self.publish_timeout,
-            self.publishers.publish(&self.name, &view),
+            self.publishers
+                .publish(&self.name, &view, self.chain_key.as_ref()),
         )
         .await
         {

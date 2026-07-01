@@ -1,6 +1,6 @@
 use std::{error::Error, fmt};
 
-use dhttp_identity::name::Name;
+use dhttp_identity::{certificate::CertificateChainKey, name::Name};
 use snafu::Report;
 
 use super::{AddressView, Publisher, PublisherError};
@@ -63,7 +63,12 @@ impl Publishers {
         self.publishers.iter()
     }
 
-    pub async fn publish<V>(&self, name: &Name<'_>, view: &V) -> Result<(), PublishersError>
+    pub async fn publish<V>(
+        &self,
+        name: &Name<'_>,
+        view: &V,
+        chain_key: Option<&CertificateChainKey>,
+    ) -> Result<(), PublishersError>
     where
         V: AddressView + Sync,
     {
@@ -74,7 +79,7 @@ impl Publishers {
         let mut errors = Vec::new();
         let mut succeeded = false;
         for publisher in &self.publishers {
-            match publisher.publish(name, view).await {
+            match publisher.publish(name, view, chain_key).await {
                 Ok(()) => succeeded = true,
                 Err(error) => {
                     let publisher_name = publisher.to_string();
@@ -149,7 +154,7 @@ mod tests {
         let view = crate::publishers::PublishAddresses::new();
 
         let error = publishers
-            .publish(&name(), &view)
+            .publish(&name(), &view, None)
             .await
             .expect_err("empty aggregate should fail");
 
@@ -170,7 +175,7 @@ mod tests {
         let view = crate::publishers::PublishAddresses::new();
 
         publishers
-            .publish(&name(), &view)
+            .publish(&name(), &view, None)
             .await
             .expect("one success is enough");
     }
@@ -189,7 +194,7 @@ mod tests {
         let view = crate::publishers::PublishAddresses::new();
 
         let error = publishers
-            .publish(&name(), &view)
+            .publish(&name(), &view, None)
             .await
             .expect_err("all publishers fail");
 
