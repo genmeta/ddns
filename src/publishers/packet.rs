@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use dhttp_identity::name::Name;
+use dhttp_identity::{
+    certificate::{CertificateChainKey, CertificateChainKind},
+    name::Name,
+};
 use dquic::qbase::net::addr::EndpointAddr;
 use snafu::Snafu;
 
@@ -17,11 +20,23 @@ pub(crate) fn endpoint_packet(
     name: &Name<'_>,
     endpoints: impl IntoIterator<Item = EndpointAddr>,
 ) -> Result<Vec<u8>, EncodeEndpointPacketError> {
+    endpoint_packet_with_chain_key(name, endpoints, None)
+}
+
+pub(crate) fn endpoint_packet_with_chain_key(
+    name: &Name<'_>,
+    endpoints: impl IntoIterator<Item = EndpointAddr>,
+    chain_key: Option<&CertificateChainKey>,
+) -> Result<Vec<u8>, EncodeEndpointPacketError> {
     let mut encoded = Vec::new();
     for endpoint in endpoints {
-        let Ok(endpoint) = DnsEndpointAddr::try_from(endpoint) else {
+        let Ok(mut endpoint) = DnsEndpointAddr::try_from(endpoint) else {
             return encode_endpoint_packet_error::EncodeEndpointSnafu.fail();
         };
+        if let Some(chain_key) = chain_key {
+            endpoint.set_main(matches!(chain_key.kind(), CertificateChainKind::Primary));
+            endpoint.set_sequence(chain_key.sequence());
+        }
         encoded.push(endpoint);
     }
 
@@ -34,10 +49,13 @@ pub(crate) fn endpoint_packet(
 mod tests {
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
-    use dhttp_identity::name::Name;
+    use dhttp_identity::{
+        certificate::{CertificateChainKey, CertificateChainKind, CertificateSequence},
+        name::Name,
+    };
     use dquic::qbase::net::addr::EndpointAddr as DquicEndpointAddr;
 
-    use super::endpoint_packet;
+    use super::{endpoint_packet, endpoint_packet_with_chain_key};
     use crate::core::parser::{
         packet::be_packet,
         record::{RData, Type},
@@ -72,5 +90,29 @@ mod tests {
         let (remain, parsed) = be_packet(&packet).expect("dns packet parses");
         assert!(remain.is_empty());
         assert!(parsed.answers.is_empty());
+    }
+
+    #[test]
+    fn endpoint_packet_uses_publisher_chain_key() {
+        let name = Name::try_from("alice.dhttp.net").expect("valid dns owner name");
+        let endpoint = DquicEndpointAddr::direct(SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::new(203, 0, 113, 10),
+            4433,
+        )));
+        let chain_key = CertificateChainKey::new(
+            CertificateSequence::try_from(0u32).expect("sequence"),
+            CertificateChainKind::Primary,
+        );
+
+        let packet = endpoint_packet_with_chain_key(&name, [endpoint], Some(&chain_key))
+            .expect("endpoint packet");
+        let (remain, parsed) = be_packet(&packet).expect("dns packet parses");
+        assert!(remain.is_empty());
+
+        let RData::E(encoded) = parsed.answers[0].data() else {
+            panic!("answer must be an E record");
+        };
+        assert!(encoded.is_main());
+        assert_eq!(encoded.certificate_chain_key(), chain_key);
     }
 }

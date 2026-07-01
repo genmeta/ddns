@@ -102,9 +102,21 @@ where
         let resp = self.execute_request(request).await?;
 
         if resp.status() != http::StatusCode::OK {
-            return Err(H3PublishError::Status {
-                status: resp.status(),
-            });
+            let status = resp.status();
+            let body = http_body_util::BodyExt::collect(resp.into_body())
+                .await
+                .ok()
+                .map(|collected| collected.to_bytes())
+                .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok())
+                .unwrap_or_default();
+            tracing::warn!(
+                name,
+                url = %self.base_url,
+                %status,
+                body = %body,
+                "h3 dns publish rejected by server"
+            );
+            return Err(H3PublishError::Status { status });
         }
 
         Ok(())

@@ -225,7 +225,7 @@ impl EndpointBindingAddressView {
                 continue;
             };
             for iface in ifaces {
-                bindings.push(BindingAddress::new(network.clone(), pattern.clone(), iface));
+                bindings.push(BindingAddress::new(pattern.clone(), iface));
             }
         }
         Self { bindings }
@@ -249,7 +249,6 @@ impl AddressView for EndpointBindingAddressView {
 
 #[cfg(feature = "dquic-network")]
 struct BindingAddress {
-    network: Arc<Network>,
     pattern: BindPattern,
     bind_uri: BindUri,
     iface: BindInterface,
@@ -259,10 +258,9 @@ struct BindingAddress {
 
 #[cfg(feature = "dquic-network")]
 impl BindingAddress {
-    fn new(network: Arc<Network>, pattern: BindPattern, iface: BindInterface) -> Self {
+    fn new(pattern: BindPattern, iface: BindInterface) -> Self {
         let bind_uri = iface.bind_uri();
         Self {
-            network,
             pattern,
             bind_uri,
             iface,
@@ -288,7 +286,7 @@ impl BindingAddress {
         let endpoints = match selector {
             AddressSelector::WideArea => self
                 .wide_area
-                .get_or_init(|| public_endpoints_from_iface(&self.network, &self.iface)),
+                .get_or_init(|| public_endpoints_from_iface(&self.iface)),
             AddressSelector::LocalLink { family, .. } => self
                 .local_link
                 .get_or_init(|| local_endpoints_from_iface(&self.iface, family)),
@@ -322,11 +320,10 @@ fn bind_uri_matches_local_link(bind_uri: &BindUri, device: &str, family: Family)
 }
 
 #[cfg(feature = "dquic-network")]
-fn public_endpoints_from_iface(network: &Network, iface: &BindInterface) -> Vec<EndpointAddr> {
+fn public_endpoints_from_iface(iface: &BindInterface) -> Vec<EndpointAddr> {
     iface.with_components(|components, current| {
         let bind_uri = current.bind_uri();
-        let addr = current.bound_addr().ok();
-        let mut endpoints: Vec<EndpointAddr> = components
+        let endpoints: Vec<EndpointAddr> = components
             .get::<StunClientsComponent>()
             .map(|stun| {
                 stun.with_clients(|clients| {
@@ -352,17 +349,11 @@ fn public_endpoints_from_iface(network: &Network, iface: &BindInterface) -> Vec<
             .unwrap_or_default();
         let stun_endpoint_count = endpoints.len();
 
-        if let Some(addr) = addr
-            && network.bound_addr_is_on_default_route(&bind_uri, addr)
-        {
-            endpoints.push(EndpointAddr::direct(addr));
-        }
-
         tracing::trace!(
             bind_uri = %bind_uri,
-            bound_addr = ?addr,
+            bound_addr = ?current.bound_addr().ok(),
             stun_endpoint_count,
-            endpoint_count = endpoints.len(),
+            endpoint_count = stun_endpoint_count,
             endpoints = ?endpoints,
             "collected wide-area endpoints from interface"
         );
