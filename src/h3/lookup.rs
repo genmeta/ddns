@@ -172,7 +172,10 @@ where
                 }
                 Ok(Err(error)) => return Err(error),
                 Err(_elapsed) if attempt < LOOKUP_REQUEST_ATTEMPTS => {
-                    self.endpoint.clear_pool();
+                    // A lookup timeout cancels only this request future. It is
+                    // not proof that the shared endpoint pool is stale, and
+                    // clearing the pool here can drop an in-flight connection
+                    // attempt that concurrent lookups are waiting on.
                     tracing::debug!(
                         attempt,
                         timeout_ms = LOOKUP_REQUEST_TIMEOUT.as_millis(),
@@ -180,7 +183,6 @@ where
                     );
                 }
                 Err(_elapsed) => {
-                    self.endpoint.clear_pool();
                     return Err(H3LookupError::RequestTimeout {
                         timeout: LOOKUP_REQUEST_TIMEOUT,
                     });
