@@ -357,6 +357,78 @@ impl MdnsResolvers {
 }
 
 #[cfg(feature = "dquic-network")]
+impl crate::resolvers::endpoint_candidates::ResolveEndpointCandidates for MdnsResolvers {
+    fn lookup_endpoint_candidates<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> crate::resolvers::endpoint_candidates::EndpointCandidateFuture<'a> {
+        Box::pin(async move {
+            let Some((domain, _sequence)) = crate::resolvers::endpoint_lookup_name_and_sequence(name)
+            else {
+                return Err(io::Error::other("no DNS record found"));
+            };
+
+            let mut lookup_futures = FuturesUnordered::new();
+            let mut has_resolver = false;
+            self.for_each_resolver(|resolver| {
+                has_resolver = true;
+                let source = resolver.source();
+                lookup_futures.push(
+                    resolver
+                        .query(domain.to_owned())
+                        .map_ok(move |eps| (source, eps)),
+                );
+            });
+            if !has_resolver {
+                return Err(io::Error::other("no mdns resolvers available"));
+            }
+
+            let mut last_error = None;
+            let mut records = Vec::new();
+            while let Some(result) = lookup_futures.next().await {
+                match result {
+                    Ok((source, endpoints)) => {
+                        records.extend(endpoints.into_iter().map(|record| {
+                            crate::resolvers::endpoint_candidates::TaggedEndpointCandidate {
+                                tag: source.clone(),
+                                record,
+                                fallback_chain_key: None,
+                            }
+                        }));
+                    }
+                    Err(error) => last_error = Some(error),
+                }
+            }
+
+            if records.is_empty() {
+                return Err(last_error.unwrap_or_else(|| io::Error::other("no DNS record found")));
+            }
+
+            let groups = crate::resolvers::endpoint_candidates::grouped_endpoint_candidates(records)
+                .into_iter()
+                .map(|(chain, tagged)| {
+                    let mut sources = Vec::new();
+                    let mut endpoints = Vec::new();
+                    for (source, endpoint) in tagged {
+                        if !sources.contains(&source) {
+                            sources.push(source);
+                        }
+                        endpoints.push(endpoint);
+                    }
+                    crate::resolvers::endpoint_candidates::EndpointCandidateGroup {
+                        chain,
+                        endpoints,
+                        sources,
+                    }
+                })
+                .collect();
+
+            Ok(crate::resolvers::endpoint_candidates::EndpointCandidates { groups })
+        })
+    }
+}
+
+#[cfg(feature = "dquic-network")]
 impl Publish for MdnsResolvers {
     fn publish<'a>(
         &'a self,

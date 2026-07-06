@@ -260,6 +260,69 @@ impl Publish for HttpResolver {
     }
 }
 
+fn decode_candidate_groups(
+    domain: &str,
+    response: &[u8],
+) -> Result<
+    Vec<(
+        dhttp_identity::certificate::CertificateChainKey,
+        Vec<((), EndpointAddr)>,
+    )>,
+    Error,
+> {
+    use crate::core::parser::record;
+
+    let (remain, multi) = be_multi_response(response).map_err(|_| Error::ParseMultiResponse)?;
+    if !remain.is_empty() {
+        return Err(Error::ParseMultiResponse);
+    }
+
+    let mut endpoint_records = Vec::new();
+    for r in multi.records {
+        let publisher_chain_key = r.publisher_certificate_chain_key();
+        if !r.signature_fields.is_empty() {
+            match r.signature_fields.verify(&r.dns, &r.cert) {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::debug!("ignored record with invalid DNS packet signature");
+                    continue;
+                }
+                Err(error) => {
+                    tracing::debug!(error = %snafu::Report::from_error(&error), "ignored record with malformed DNS packet signature");
+                    continue;
+                }
+            }
+        }
+        let (_remain, packet) = be_packet(&r.dns).map_err(|source| Error::ParseRecords {
+            source: source.to_owned(),
+        })?;
+
+        endpoint_records.extend(packet.answers.iter().filter_map(|answer| match answer.data() {
+            record::RData::E(ep) => {
+                if answer.name() != domain {
+                    tracing::debug!(
+                        answer_name = %answer.name(),
+                        query = domain,
+                        "ignored endpoint answer for different name"
+                    );
+                    return None;
+                }
+                Some(crate::resolvers::endpoint_candidates::TaggedEndpointCandidate {
+                    tag: (),
+                    record: ep.clone(),
+                    fallback_chain_key: publisher_chain_key.clone(),
+                })
+            }
+            _ => {
+                tracing::debug!(?answer, "ignored record");
+                None
+            }
+        }));
+    }
+
+    Ok(crate::resolvers::endpoint_candidates::grouped_endpoint_candidates(endpoint_records))
+}
+
 impl Resolve for HttpResolver {
     fn lookup<'l>(&'l self, name: &'l str) -> ResolveFuture<'l> {
         let lookup = async move {
@@ -273,7 +336,6 @@ impl Resolve for HttpResolver {
             let server = Arc::from(self.base_url.host_str().unwrap_or("<unknown server>"));
             let source = Source::Http { server };
 
-            use crate::core::parser::record;
             self.cached_records
                 .retain(|_host, Record { expire, .. }| *expire > now);
             if let Some(record) = self.cached_records.get(name) {
@@ -284,70 +346,32 @@ impl Resolve for HttpResolver {
                     .collect();
                 return Ok(stream::iter(endpoint_addrs).boxed());
             }
+
             let response = self
                 .http_client
                 .get(lookup_url(&self.base_url, domain, sequence))
                 .send()
-                .await;
+                .await?
+                .error_for_status()?
+                .bytes()
+                .await?;
 
-            let response = response?.error_for_status()?.bytes().await?;
-            let (remain, multi) =
-                be_multi_response(response.as_ref()).map_err(|_| Error::ParseMultiResponse)?;
-            if !remain.is_empty() {
-                return Err(Error::ParseMultiResponse);
-            }
-
-            let mut endpoint_records = Vec::new();
-            for r in multi.records {
-                let publisher_chain_key = r.publisher_certificate_chain_key();
-                if !r.signature_fields.is_empty() {
-                    match r.signature_fields.verify(&r.dns, &r.cert) {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            tracing::debug!("ignored record with invalid DNS packet signature");
-                            continue;
-                        }
-                        Err(error) => {
-                            tracing::debug!(error = %snafu::Report::from_error(&error), "ignored record with malformed DNS packet signature");
-                            continue;
-                        }
-                    }
-                }
-                let (_remain, packet) =
-                    be_packet(&r.dns).map_err(|source| Error::ParseRecords {
-                        source: source.to_owned(),
-                    })?;
-
-                endpoint_records.extend(packet.answers.iter().filter_map(|answer| {
-                    match answer.data() {
-                        record::RData::E(ep) => {
-                            if answer.name() != domain {
-                                tracing::debug!(
-                                    answer_name = %answer.name(),
-                                    query = domain,
-                                    "ignored endpoint answer for different name"
-                                );
-                                return None;
-                            }
-                            Some((ep.clone(), publisher_chain_key.clone()))
-                        }
-                        _ => {
-                            tracing::debug!(?answer, "ignored record");
-                            None
-                        }
-                    }
-                }));
-            }
-            let addrs =
-                crate::resolvers::endpoint_group::selected_endpoint_records_with_fallback_chain_keys(
-                    endpoint_records
-                        .into_iter()
-                        .map(|(endpoint, fallback_chain_key)| ((), endpoint, fallback_chain_key)),
-                    sequence,
-                )
+            let addrs = decode_candidate_groups(domain, response.as_ref())?
                 .into_iter()
-                .map(|((), endpoint)| endpoint)
-                .collect::<Vec<_>>();
+                .find(|(chain_key, _)| match sequence {
+                    Some(sequence) => {
+                        chain_key.kind() == dhttp_identity::certificate::CertificateChainKind::Primary
+                            && chain_key.sequence() == sequence
+                    }
+                    None => true,
+                })
+                .map(|(_, endpoints)| {
+                    endpoints
+                        .into_iter()
+                        .map(|((), endpoint)| endpoint)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             if addrs.is_empty() {
                 return Err(Error::NoRecordFound);
             }
@@ -367,9 +391,92 @@ impl Resolve for HttpResolver {
     }
 }
 
+impl crate::resolvers::endpoint_candidates::ResolveEndpointCandidates for HttpResolver {
+    fn lookup_endpoint_candidates<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> crate::resolvers::endpoint_candidates::EndpointCandidateFuture<'a> {
+        let lookup = async move {
+            let Some((domain, _sequence)) =
+                crate::resolvers::endpoint_lookup_name_and_sequence(name)
+            else {
+                return Err(Error::NoRecordFound);
+            };
+            let server = Arc::from(self.base_url.host_str().unwrap_or("<unknown server>"));
+            let source = Source::Http { server };
+            let response = self
+                .http_client
+                .get(lookup_url(&self.base_url, domain, None))
+                .send()
+                .await?
+                .error_for_status()?
+                .bytes()
+                .await?;
+            let groups = decode_candidate_groups(domain, response.as_ref())?
+                .into_iter()
+                .map(|(chain, endpoints)| {
+                    crate::resolvers::endpoint_candidates::EndpointCandidateGroup {
+                        chain,
+                        endpoints: endpoints.into_iter().map(|((), endpoint)| endpoint).collect(),
+                        sources: vec![source.clone()],
+                    }
+                })
+                .collect();
+            Ok(crate::resolvers::endpoint_candidates::EndpointCandidates { groups })
+        };
+        Box::pin(lookup.map_err(io::Error::other))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn direct(
+        addr: &str,
+        main: bool,
+        sequence: u32,
+    ) -> crate::core::parser::record::endpoint::EndpointAddr {
+        let socket: std::net::SocketAddrV4 = addr.parse().expect("socket addr");
+        let mut endpoint = crate::core::parser::record::endpoint::EndpointAddr::direct_v4(socket);
+        endpoint.set_main(main);
+        endpoint.set_sequence(
+            dhttp_identity::certificate::CertificateSequence::try_from(sequence).unwrap(),
+        );
+        endpoint
+    }
+
+    fn response_for(
+        name: &str,
+        endpoints: Vec<crate::core::parser::record::endpoint::EndpointAddr>,
+    ) -> Vec<u8> {
+        let mut hosts = std::collections::HashMap::new();
+        hosts.insert(name.to_owned(), endpoints);
+        let packet = crate::core::MdnsPacket::answer(0, &hosts).to_bytes();
+        crate::core::wire::MultiResponse::new([crate::core::wire::ResponseRecord::unsigned(
+            packet,
+            Vec::new(),
+        )])
+        .encode()
+    }
+
+    #[test]
+    fn http_decode_candidate_groups_returns_all_primary_sequences() {
+        let response = response_for(
+            "demo.dhttp.net",
+            vec![
+                direct("192.0.2.10:4433", true, 0),
+                direct("192.0.2.20:4433", true, 1),
+            ],
+        );
+
+        let groups = decode_candidate_groups("demo.dhttp.net", response.as_ref())
+            .expect("candidate groups decode");
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0.to_string(), "primary:0");
+        assert_eq!(groups[1].0.to_string(), "primary:1");
+    }
 
     #[test]
     fn http_publish_url_targets_v2_api_from_origin_base() {
