@@ -30,9 +30,17 @@ pub trait ResolveEndpointCandidates: Resolve {
 pub type ArcEndpointCandidateResolver =
     std::sync::Arc<dyn ResolveEndpointCandidates + Send + Sync + 'static>;
 
+#[cfg_attr(
+    not(any(feature = "h3", feature = "http", feature = "mdns", test)),
+    allow(dead_code)
+)]
 pub(crate) type EndpointCandidateGroups<T> =
     Vec<(CertificateChainKey, Vec<(T, DquicEndpointAddr)>)>;
 
+#[cfg_attr(
+    not(any(feature = "h3", feature = "http", feature = "mdns", test)),
+    allow(dead_code)
+)]
 #[derive(Debug, Clone)]
 pub(crate) struct TaggedEndpointCandidate<T> {
     pub(crate) tag: T,
@@ -40,6 +48,10 @@ pub(crate) struct TaggedEndpointCandidate<T> {
     pub(crate) fallback_chain_key: Option<CertificateChainKey>,
 }
 
+#[cfg_attr(
+    not(any(feature = "h3", feature = "http", feature = "mdns", test)),
+    allow(dead_code)
+)]
 pub(crate) fn grouped_endpoint_candidates<T>(
     records: impl IntoIterator<Item = TaggedEndpointCandidate<T>>,
 ) -> EndpointCandidateGroups<T> {
@@ -74,6 +86,10 @@ pub(crate) fn grouped_endpoint_candidates<T>(
     groups
 }
 
+#[cfg_attr(
+    not(any(feature = "h3", feature = "http", feature = "mdns", test)),
+    allow(dead_code)
+)]
 fn effective_chain_key(
     record: &DnsEndpointAddr,
     fallback_chain_key: Option<CertificateChainKey>,
