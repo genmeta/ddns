@@ -126,9 +126,30 @@ pub mod weak;
 type ArcResolver = Arc<dyn Resolve + Send + Sync + 'static>;
 
 #[cfg(feature = "resolvers")]
+#[derive(Clone)]
+struct ResolverEntry {
+    resolver: ArcResolver,
+    endpoint_candidates:
+        Option<crate::resolvers::endpoint_candidates::ArcEndpointCandidateResolver>,
+}
+
+#[cfg(feature = "resolvers")]
+impl fmt::Debug for ResolverEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResolverEntry")
+            .field("resolver", &self.resolver.to_string())
+            .field(
+                "supports_endpoint_candidates",
+                &self.endpoint_candidates.is_some(),
+            )
+            .finish()
+    }
+}
+
+#[cfg(feature = "resolvers")]
 #[derive(Default, Clone, Debug)]
 pub struct Resolvers {
-    resolvers: Vec<ArcResolver>,
+    resolvers: Vec<ResolverEntry>,
 }
 
 #[cfg(feature = "resolvers")]
@@ -138,11 +159,11 @@ impl Display for Resolvers {
         if self.resolvers.is_empty() {
             f.write_str("empty")?;
         } else {
-            for (i, resolver) in self.resolvers.iter().enumerate() {
+            for (i, entry) in self.resolvers.iter().enumerate() {
                 if i > 0 {
                     f.write_str(", ")?;
                 }
-                fmt::Display::fmt(resolver.as_ref(), f)?;
+                fmt::Display::fmt(entry.resolver.as_ref(), f)?;
             }
         }
         f.write_str(")")
@@ -213,15 +234,22 @@ impl ResolversBuilder {
         self
     }
 
+    pub fn candidate_resolver<R>(mut self, resolver: Arc<R>) -> Self
+    where
+        R: crate::resolvers::endpoint_candidates::ResolveEndpointCandidates + Send + Sync + 'static,
+    {
+        self.resolvers.push_candidate_resolver(resolver);
+        self
+    }
+
     #[cfg(all(feature = "mdns", feature = "dquic-network"))]
     pub async fn mdns(
         mut self,
         network: Arc<h3x::dquic::Network>,
         patterns: Arc<Vec<h3x::dquic::binds::BindPattern>>,
     ) -> Self {
-        let mdns: ArcResolver =
-            Arc::new(MdnsResolvers::bind(network, patterns, DHTTP_MDNS_SERVICE).await);
-        self.resolvers.push(mdns);
+        let mdns = Arc::new(MdnsResolvers::bind(network, patterns, DHTTP_MDNS_SERVICE).await);
+        self.resolvers.push_candidate_resolver(mdns);
         self
     }
 
@@ -249,8 +277,8 @@ impl ResolversBuilder {
         C::Error: Send + Sync + 'static,
         C::Connection: Send + 'static,
     {
-        let resolver = H3Resolver::from_endpoint(base_url, endpoint)?;
-        self.resolvers.push(Arc::new(resolver));
+        let resolver = Arc::new(H3Resolver::from_endpoint(base_url, endpoint)?);
+        self.resolvers.push_candidate_resolver(resolver);
         Ok(self)
     }
 
@@ -261,8 +289,8 @@ impl ResolversBuilder {
 
     #[cfg(feature = "http")]
     pub fn http_with_base_url(mut self, base_url: impl AsRef<str>) -> io::Result<Self> {
-        let resolver = HttpResolver::new(base_url.as_ref())?;
-        self.resolvers.push(Arc::new(resolver));
+        let resolver = Arc::new(HttpResolver::new(base_url.as_ref())?);
+        self.resolvers.push_candidate_resolver(resolver);
         Ok(self)
     }
 
@@ -292,12 +320,74 @@ impl Resolvers {
         self
     }
 
+    pub fn with_candidate_resolver<R>(mut self, resolver: Arc<R>) -> Self
+    where
+        R: crate::resolvers::endpoint_candidates::ResolveEndpointCandidates + Send + Sync + 'static,
+    {
+        self.push_candidate_resolver(resolver);
+        self
+    }
+
     pub fn push(&mut self, resolver: ArcResolver) {
-        self.resolvers.push(resolver);
+        self.resolvers.push(ResolverEntry {
+            resolver,
+            endpoint_candidates: None,
+        });
+    }
+
+    pub fn push_candidate_resolver<R>(&mut self, resolver: Arc<R>)
+    where
+        R: crate::resolvers::endpoint_candidates::ResolveEndpointCandidates + Send + Sync + 'static,
+    {
+        let endpoint_candidates =
+            Some(resolver.clone()
+                as crate::resolvers::endpoint_candidates::ArcEndpointCandidateResolver);
+        let resolver = resolver as ArcResolver;
+        self.resolvers.push(ResolverEntry {
+            resolver,
+            endpoint_candidates,
+        });
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &ArcResolver> {
-        self.resolvers.iter()
+        self.resolvers.iter().map(|entry| &entry.resolver)
+    }
+
+    pub async fn lookup_endpoint_candidates(
+        &self,
+        name: &str,
+    ) -> Result<crate::resolvers::endpoint_candidates::EndpointCandidates, ResolversError> {
+        let mut errors = vec![];
+        let mut groups = Vec::new();
+
+        for entry in self.resolvers.clone() {
+            let Some(candidate_resolver) = entry.endpoint_candidates else {
+                errors.push((
+                    entry.resolver.to_string(),
+                    io::Error::other("resolver does not support endpoint candidate lookup"),
+                ));
+                continue;
+            };
+
+            match candidate_resolver.lookup_endpoint_candidates(name).await {
+                Ok(candidates) => groups.extend(candidates.groups),
+                Err(error) => errors.push((entry.resolver.to_string(), error)),
+            }
+        }
+
+        if groups.is_empty() && !errors.is_empty() {
+            return Err(ResolversError { errors });
+        }
+
+        groups.sort_by_key(|group| {
+            let primary_rank = match group.chain.kind() {
+                dhttp_identity::certificate::CertificateChainKind::Primary => 0,
+                dhttp_identity::certificate::CertificateChainKind::Secondary => 1,
+            };
+            (primary_rank, group.chain.sequence().get())
+        });
+
+        Ok(crate::resolvers::endpoint_candidates::EndpointCandidates { groups })
     }
 
     pub async fn lookup(
@@ -307,8 +397,8 @@ impl Resolvers {
         let mut errors = vec![];
 
         let mut lookups = stream::FuturesUnordered::from_iter(
-            (self.resolvers.clone().into_iter()).map(|resolver| {
-                let resolver = resolver.clone();
+            (self.resolvers.clone().into_iter()).map(|entry| {
+                let resolver = entry.resolver.clone();
                 let name = name.to_string();
                 async move { (resolver.lookup(&name).await, resolver.clone()) }
             }),
@@ -341,7 +431,7 @@ mod tests {
     #[cfg(all(feature = "mdns", feature = "dquic-network", feature = "resolvers"))]
     use std::str::FromStr;
     #[cfg(feature = "resolvers")]
-    use std::{error::Error as StdError, fmt, io};
+    use std::{error::Error as StdError, fmt, io, sync::Arc};
 
     #[cfg(all(feature = "mdns", feature = "dquic-network", feature = "resolvers"))]
     use super::MdnsResolvers;
@@ -463,6 +553,82 @@ mod tests {
         let invalid = format!("example.dhttp.net:{}", (1u64 << 62) + 1);
 
         assert_eq!(super::endpoint_lookup_name_and_sequence(&invalid), None);
+    }
+
+    #[cfg(feature = "resolvers")]
+    #[derive(Debug)]
+    struct CandidateResolver {
+        label: &'static str,
+        sequence: u8,
+    }
+
+    #[cfg(feature = "resolvers")]
+    impl fmt::Display for CandidateResolver {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.label)
+        }
+    }
+
+    #[cfg(feature = "resolvers")]
+    impl dquic::qresolve::Resolve for CandidateResolver {
+        fn lookup<'l>(&'l self, _name: &'l str) -> dquic::qresolve::ResolveFuture<'l> {
+            use futures::{FutureExt, StreamExt, stream};
+            async { Ok(stream::empty().boxed()) }.boxed()
+        }
+    }
+
+    #[cfg(feature = "resolvers")]
+    impl crate::resolvers::endpoint_candidates::ResolveEndpointCandidates for CandidateResolver {
+        fn lookup_endpoint_candidates<'a>(
+            &'a self,
+            _name: &'a str,
+        ) -> crate::resolvers::endpoint_candidates::EndpointCandidateFuture<'a> {
+            use dhttp_identity::certificate::{
+                CertificateChainKey, CertificateChainKind, CertificateSequence,
+            };
+            use dquic::qresolve::Source;
+            use futures::FutureExt;
+
+            let sequence = self.sequence;
+            async move {
+                Ok(crate::resolvers::endpoint_candidates::EndpointCandidates {
+                    groups: vec![
+                        crate::resolvers::endpoint_candidates::EndpointCandidateGroup {
+                            chain: CertificateChainKey::new(
+                                CertificateSequence::from(sequence),
+                                CertificateChainKind::Primary,
+                            ),
+                            endpoints: Vec::new(),
+                            sources: vec![Source::Dht],
+                        },
+                    ],
+                })
+            }
+            .boxed()
+        }
+    }
+
+    #[cfg(feature = "resolvers")]
+    #[tokio::test]
+    async fn aggregate_endpoint_candidates_merge_supported_resolvers() {
+        let resolvers = Resolvers::new()
+            .with_candidate_resolver(Arc::new(CandidateResolver {
+                label: "a",
+                sequence: 0,
+            }))
+            .with_candidate_resolver(Arc::new(CandidateResolver {
+                label: "b",
+                sequence: 1,
+            }));
+
+        let candidates = resolvers
+            .lookup_endpoint_candidates("demo.dhttp.net")
+            .await
+            .expect("candidate lookup succeeds");
+
+        assert_eq!(candidates.groups.len(), 2);
+        assert_eq!(candidates.groups[0].chain.to_string(), "primary:0");
+        assert_eq!(candidates.groups[1].chain.to_string(), "primary:1");
     }
 
     #[cfg(feature = "resolvers")]

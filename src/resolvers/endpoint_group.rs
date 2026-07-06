@@ -3,7 +3,6 @@ use dquic::qbase::net::addr::EndpointAddr as DquicEndpointAddr;
 
 use crate::core::parser::record::endpoint::EndpointAddr as DnsEndpointAddr;
 
-
 pub(crate) fn selected_endpoint_addrs(
     records: impl IntoIterator<Item = DnsEndpointAddr>,
 ) -> Vec<DquicEndpointAddr> {

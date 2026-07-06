@@ -100,11 +100,13 @@ impl LookupRecords {
                             );
                             return None;
                         }
-                        Some(crate::resolvers::endpoint_candidates::TaggedEndpointCandidate {
-                            tag: (),
-                            record: ep.clone(),
-                            fallback_chain_key: publisher_chain_key.clone(),
-                        })
+                        Some(
+                            crate::resolvers::endpoint_candidates::TaggedEndpointCandidate {
+                                tag: (),
+                                record: ep.clone(),
+                                fallback_chain_key: publisher_chain_key.clone(),
+                            },
+                        )
                     }
                     _ => {
                         tracing::debug!(?answer, "ignored record");
@@ -140,7 +142,10 @@ impl LookupRecords {
         };
 
         Ok(Self {
-            endpoints: endpoints.into_iter().map(|((), endpoint)| endpoint).collect(),
+            endpoints: endpoints
+                .into_iter()
+                .map(|((), endpoint)| endpoint)
+                .collect(),
         })
     }
 }
@@ -283,7 +288,8 @@ where
         name: &'a str,
     ) -> crate::resolvers::endpoint_candidates::EndpointCandidateFuture<'a> {
         Box::pin(async move {
-            let Some((domain, _sequence)) = crate::resolvers::endpoint_lookup_name_and_sequence(name)
+            let Some((domain, _sequence)) =
+                crate::resolvers::endpoint_lookup_name_and_sequence(name)
             else {
                 return Err(io::Error::other("no DNS record found"));
             };
@@ -302,7 +308,10 @@ where
                 .into_iter()
                 .map(|(chain, endpoints)| EndpointCandidateGroup {
                     chain,
-                    endpoints: endpoints.into_iter().map(|((), endpoint)| endpoint).collect(),
+                    endpoints: endpoints
+                        .into_iter()
+                        .map(|((), endpoint)| endpoint)
+                        .collect(),
                     sources: vec![source.clone()],
                 })
                 .collect();
@@ -339,7 +348,6 @@ mod tests {
         let packet = MdnsPacket::answer(0, &hosts).to_bytes();
         MultiResponse::new([ResponseRecord::unsigned(packet, Vec::new())]).encode()
     }
-
 
     #[test]
     fn lookup_records_decode_candidate_groups_returns_all_primary_sequences() {

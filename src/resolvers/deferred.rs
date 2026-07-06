@@ -5,6 +5,8 @@ use futures::{FutureExt, future::BoxFuture};
 use snafu::{ResultExt, Snafu};
 use tokio::sync::{Notify, OnceCell};
 
+use crate::resolvers::endpoint_candidates::{EndpointCandidateFuture, ResolveEndpointCandidates};
+
 #[derive(Debug, Snafu)]
 #[snafu(module, visibility(pub))]
 pub enum DeferredLookupError {
@@ -115,6 +117,15 @@ where
 {
     fn lookup<'a>(&'a self, name: &'a str) -> ResolveFuture<'a> {
         async move { self.wait().await.lookup(name).await }.boxed()
+    }
+}
+
+impl<R> ResolveEndpointCandidates for DeferredResolver<R>
+where
+    R: ResolveEndpointCandidates + 'static,
+{
+    fn lookup_endpoint_candidates<'a>(&'a self, name: &'a str) -> EndpointCandidateFuture<'a> {
+        async move { self.wait().await.lookup_endpoint_candidates(name).await }.boxed()
     }
 }
 

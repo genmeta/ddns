@@ -297,27 +297,34 @@ fn decode_candidate_groups(
             source: source.to_owned(),
         })?;
 
-        endpoint_records.extend(packet.answers.iter().filter_map(|answer| match answer.data() {
-            record::RData::E(ep) => {
-                if answer.name() != domain {
-                    tracing::debug!(
-                        answer_name = %answer.name(),
-                        query = domain,
-                        "ignored endpoint answer for different name"
-                    );
-                    return None;
-                }
-                Some(crate::resolvers::endpoint_candidates::TaggedEndpointCandidate {
-                    tag: (),
-                    record: ep.clone(),
-                    fallback_chain_key: publisher_chain_key.clone(),
-                })
-            }
-            _ => {
-                tracing::debug!(?answer, "ignored record");
-                None
-            }
-        }));
+        endpoint_records.extend(
+            packet
+                .answers
+                .iter()
+                .filter_map(|answer| match answer.data() {
+                    record::RData::E(ep) => {
+                        if answer.name() != domain {
+                            tracing::debug!(
+                                answer_name = %answer.name(),
+                                query = domain,
+                                "ignored endpoint answer for different name"
+                            );
+                            return None;
+                        }
+                        Some(
+                            crate::resolvers::endpoint_candidates::TaggedEndpointCandidate {
+                                tag: (),
+                                record: ep.clone(),
+                                fallback_chain_key: publisher_chain_key.clone(),
+                            },
+                        )
+                    }
+                    _ => {
+                        tracing::debug!(?answer, "ignored record");
+                        None
+                    }
+                }),
+        );
     }
 
     Ok(crate::resolvers::endpoint_candidates::grouped_endpoint_candidates(endpoint_records))
@@ -360,7 +367,8 @@ impl Resolve for HttpResolver {
                 .into_iter()
                 .find(|(chain_key, _)| match sequence {
                     Some(sequence) => {
-                        chain_key.kind() == dhttp_identity::certificate::CertificateChainKind::Primary
+                        chain_key.kind()
+                            == dhttp_identity::certificate::CertificateChainKind::Primary
                             && chain_key.sequence() == sequence
                     }
                     None => true,
@@ -417,7 +425,10 @@ impl crate::resolvers::endpoint_candidates::ResolveEndpointCandidates for HttpRe
                 .map(|(chain, endpoints)| {
                     crate::resolvers::endpoint_candidates::EndpointCandidateGroup {
                         chain,
-                        endpoints: endpoints.into_iter().map(|((), endpoint)| endpoint).collect(),
+                        endpoints: endpoints
+                            .into_iter()
+                            .map(|((), endpoint)| endpoint)
+                            .collect(),
                         sources: vec![source.clone()],
                     }
                 })
