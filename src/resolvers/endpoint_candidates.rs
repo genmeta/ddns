@@ -30,6 +30,9 @@ pub trait ResolveEndpointCandidates: Resolve {
 pub type ArcEndpointCandidateResolver =
     std::sync::Arc<dyn ResolveEndpointCandidates + Send + Sync + 'static>;
 
+pub(crate) type EndpointCandidateGroups<T> =
+    Vec<(CertificateChainKey, Vec<(T, DquicEndpointAddr)>)>;
+
 #[derive(Debug, Clone)]
 pub(crate) struct TaggedEndpointCandidate<T> {
     pub(crate) tag: T,
@@ -39,7 +42,7 @@ pub(crate) struct TaggedEndpointCandidate<T> {
 
 pub(crate) fn grouped_endpoint_candidates<T>(
     records: impl IntoIterator<Item = TaggedEndpointCandidate<T>>,
-) -> Vec<(CertificateChainKey, Vec<(T, DquicEndpointAddr)>)> {
+) -> EndpointCandidateGroups<T> {
     let mut groups: Vec<(CertificateChainKey, Vec<(T, DquicEndpointAddr)>)> = Vec::new();
 
     for TaggedEndpointCandidate {

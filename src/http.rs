@@ -263,13 +263,7 @@ impl Publish for HttpResolver {
 fn decode_candidate_groups(
     domain: &str,
     response: &[u8],
-) -> Result<
-    Vec<(
-        dhttp_identity::certificate::CertificateChainKey,
-        Vec<((), EndpointAddr)>,
-    )>,
-    Error,
-> {
+) -> Result<crate::resolvers::endpoint_candidates::EndpointCandidateGroups<()>, Error> {
     use crate::core::parser::record;
 
     let (remain, multi) = be_multi_response(response).map_err(|_| Error::ParseMultiResponse)?;

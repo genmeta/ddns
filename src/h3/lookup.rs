@@ -43,13 +43,8 @@ impl LookupRecords {
     pub(super) fn decode_candidate_groups(
         domain: &str,
         response: &[u8],
-    ) -> Result<
-        Vec<(
-            dhttp_identity::certificate::CertificateChainKey,
-            Vec<((), dquic::qbase::net::addr::EndpointAddr)>,
-        )>,
-        LookupDecodeError,
-    > {
+    ) -> Result<crate::resolvers::endpoint_candidates::EndpointCandidateGroups<()>, LookupDecodeError>
+    {
         use crate::core::parser::record;
 
         let (remain, multi) = match be_multi_response(response) {
