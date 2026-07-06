@@ -3,8 +3,6 @@ use dquic::qbase::net::addr::EndpointAddr as DquicEndpointAddr;
 
 use crate::core::parser::record::endpoint::EndpointAddr as DnsEndpointAddr;
 
-type TaggedEndpoint<T> = (T, DquicEndpointAddr);
-type EndpointGroup<T> = (CertificateChainKey, Vec<TaggedEndpoint<T>>);
 
 pub(crate) fn selected_endpoint_addrs(
     records: impl IntoIterator<Item = DnsEndpointAddr>,
@@ -54,28 +52,17 @@ pub(crate) fn selected_endpoint_records_with_fallback_chain_keys<T>(
     records: impl IntoIterator<Item = (T, DnsEndpointAddr, Option<CertificateChainKey>)>,
     sequence: Option<CertificateSequence>,
 ) -> Vec<(T, DquicEndpointAddr)> {
-    let mut groups: Vec<EndpointGroup<T>> = Vec::new();
-
-    for (tag, record, fallback_chain_key) in records {
-        let chain_key = effective_chain_key(&record, fallback_chain_key);
-        let Ok(endpoint) = DquicEndpointAddr::try_from(record) else {
-            continue;
-        };
-
-        if let Some((_key, endpoints)) = groups.iter_mut().find(|(key, _)| *key == chain_key) {
-            endpoints.push((tag, endpoint));
-        } else {
-            groups.push((chain_key, vec![(tag, endpoint)]));
-        }
-    }
-
-    groups.sort_by_key(|(chain_key, _)| {
-        let primary_rank = match chain_key.kind() {
-            CertificateChainKind::Primary => 0,
-            CertificateChainKind::Secondary => 1,
-        };
-        (primary_rank, chain_key.sequence().get())
-    });
+    let groups = crate::resolvers::endpoint_candidates::grouped_endpoint_candidates(
+        records
+            .into_iter()
+            .map(|(tag, record, fallback_chain_key)| {
+                crate::resolvers::endpoint_candidates::TaggedEndpointCandidate {
+                    tag,
+                    record,
+                    fallback_chain_key,
+                }
+            }),
+    );
 
     if let Some(sequence) = sequence {
         return groups
@@ -93,17 +80,6 @@ pub(crate) fn selected_endpoint_records_with_fallback_chain_keys<T>(
         .next()
         .map(|(_, endpoints)| endpoints)
         .unwrap_or_default()
-}
-
-fn effective_chain_key(
-    record: &DnsEndpointAddr,
-    fallback_chain_key: Option<CertificateChainKey>,
-) -> CertificateChainKey {
-    if record.is_main() || record.sequence().is_some() {
-        return record.certificate_chain_key();
-    }
-
-    fallback_chain_key.unwrap_or_else(|| record.certificate_chain_key())
 }
 
 #[cfg(test)]

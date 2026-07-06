@@ -117,6 +117,7 @@ impl std::str::FromStr for DnsScheme {
 }
 
 pub mod deferred;
+pub mod endpoint_candidates;
 #[cfg(any(feature = "h3", feature = "mdns", test))]
 pub(crate) mod endpoint_group;
 pub mod weak;
