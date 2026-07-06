@@ -417,6 +417,21 @@ impl Resolvers {
 }
 
 #[cfg(feature = "resolvers")]
+impl crate::resolvers::endpoint_candidates::ResolveEndpointCandidates for Resolvers {
+    fn lookup_endpoint_candidates<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> crate::resolvers::endpoint_candidates::EndpointCandidateFuture<'a> {
+        async move {
+            Resolvers::lookup_endpoint_candidates(self, name)
+                .await
+                .map_err(io::Error::other)
+        }
+        .boxed()
+    }
+}
+
+#[cfg(feature = "resolvers")]
 impl Resolve for Resolvers {
     fn lookup<'l>(&'l self, name: &'l str) -> ResolveFuture<'l> {
         self.lookup(name)
