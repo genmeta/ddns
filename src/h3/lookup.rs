@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{io, sync::Arc};
 
 use dhttp_identity::certificate::CertificateSequence;
 use dquic::qresolve::{RecordStream, Source};
@@ -12,7 +12,12 @@ use super::{
     H3LookupError, H3Resolver, LOOKUP_REQUEST_ATTEMPTS, LOOKUP_REQUEST_TIMEOUT, LookupDecodeError,
     h3_lookup_error, lookup_decode_error,
 };
-use crate::core::{parser::packet::be_packet, wire::be_multi_response};
+use crate::{
+    core::{parser::packet::be_packet, wire::be_multi_response},
+    resolvers::endpoint_candidates::{
+        EndpointCandidateGroup, EndpointCandidates, ResolveEndpointCandidates,
+    },
+};
 
 const LOOKUP_API_PATH: &str = "/api/v2/lookup";
 
@@ -35,11 +40,16 @@ pub(super) struct LookupRecords {
 }
 
 impl LookupRecords {
-    pub(super) fn decode(
+    pub(super) fn decode_candidate_groups(
         domain: &str,
-        sequence: Option<CertificateSequence>,
         response: &[u8],
-    ) -> Result<Self, LookupDecodeError> {
+    ) -> Result<
+        Vec<(
+            dhttp_identity::certificate::CertificateChainKey,
+            Vec<((), dquic::qbase::net::addr::EndpointAddr)>,
+        )>,
+        LookupDecodeError,
+    > {
         use crate::core::parser::record;
 
         let (remain, multi) = match be_multi_response(response) {
@@ -90,7 +100,11 @@ impl LookupRecords {
                             );
                             return None;
                         }
-                        Some((ep.clone(), publisher_chain_key.clone()))
+                        Some(crate::resolvers::endpoint_candidates::TaggedEndpointCandidate {
+                            tag: (),
+                            record: ep.clone(),
+                            fallback_chain_key: publisher_chain_key.clone(),
+                        })
                     }
                     _ => {
                         tracing::debug!(?answer, "ignored record");
@@ -100,17 +114,33 @@ impl LookupRecords {
             ));
         }
 
-        Ok(Self {
-            endpoints:
-                crate::resolvers::endpoint_group::selected_endpoint_records_with_fallback_chain_keys(
-                    endpoint_records
-                        .into_iter()
-                        .map(|(endpoint, fallback_chain_key)| ((), endpoint, fallback_chain_key)),
-                    sequence,
-                )
+        Ok(crate::resolvers::endpoint_candidates::grouped_endpoint_candidates(endpoint_records))
+    }
+
+    pub(super) fn decode(
+        domain: &str,
+        sequence: Option<CertificateSequence>,
+        response: &[u8],
+    ) -> Result<Self, LookupDecodeError> {
+        let groups = Self::decode_candidate_groups(domain, response)?;
+        let endpoints = match sequence {
+            Some(sequence) => groups
                 .into_iter()
-                .map(|((), endpoint)| endpoint)
-                .collect(),
+                .find(|(chain_key, _)| {
+                    chain_key.kind() == dhttp_identity::certificate::CertificateChainKind::Primary
+                        && chain_key.sequence() == sequence
+                })
+                .map(|(_, endpoints)| endpoints)
+                .unwrap_or_default(),
+            None => groups
+                .into_iter()
+                .next()
+                .map(|(_, endpoints)| endpoints)
+                .unwrap_or_default(),
+        };
+
+        Ok(Self {
+            endpoints: endpoints.into_iter().map(|((), endpoint)| endpoint).collect(),
         })
     }
 }
@@ -242,6 +272,46 @@ where
     }
 }
 
+impl<C> ResolveEndpointCandidates for H3Resolver<C>
+where
+    C: quic::Connect + quic::WithLocalAuthority + Send + Sync + 'static,
+    C::Error: Send + Sync + 'static,
+    C::Connection: Send + 'static,
+{
+    fn lookup_endpoint_candidates<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> crate::resolvers::endpoint_candidates::EndpointCandidateFuture<'a> {
+        Box::pin(async move {
+            let Some((domain, _sequence)) = crate::resolvers::endpoint_lookup_name_and_sequence(name)
+            else {
+                return Err(io::Error::other("no DNS record found"));
+            };
+
+            let url = lookup_url(&self.base_url, domain, None);
+            let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
+            let response = self
+                .lookup_response_with_retry(uri)
+                .await
+                .map_err(io::Error::other)?;
+            let source = Source::H3 {
+                server: Arc::from(self.base_url.origin().ascii_serialization()),
+            };
+            let groups = LookupRecords::decode_candidate_groups(domain, response.as_ref())
+                .map_err(io::Error::other)?
+                .into_iter()
+                .map(|(chain, endpoints)| EndpointCandidateGroup {
+                    chain,
+                    endpoints: endpoints.into_iter().map(|((), endpoint)| endpoint).collect(),
+                    sources: vec![source.clone()],
+                })
+                .collect();
+
+            Ok(EndpointCandidates { groups })
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, net::SocketAddrV4};
@@ -268,6 +338,28 @@ mod tests {
         hosts.insert(name.to_owned(), endpoints);
         let packet = MdnsPacket::answer(0, &hosts).to_bytes();
         MultiResponse::new([ResponseRecord::unsigned(packet, Vec::new())]).encode()
+    }
+
+
+    #[test]
+    fn lookup_records_decode_candidate_groups_returns_all_primary_sequences() {
+        let response = response_for(
+            "demo.dhttp.net",
+            vec![
+                direct("192.0.2.10:4433", true, 0),
+                direct("192.0.2.20:4433", true, 1),
+                direct("192.0.2.21:4433", true, 1),
+            ],
+        );
+
+        let groups = LookupRecords::decode_candidate_groups("demo.dhttp.net", response.as_ref())
+            .expect("candidate groups decode");
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0.to_string(), "primary:0");
+        assert_eq!(groups[0].1.len(), 1);
+        assert_eq!(groups[1].0.to_string(), "primary:1");
+        assert_eq!(groups[1].1.len(), 2);
     }
 
     #[test]
