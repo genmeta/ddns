@@ -209,7 +209,7 @@ where
         .await
         {
             Ok(Ok(report)) if report.is_complete() => {
-                tracing::info!(name = %self.name, publishers = %report, "published resolver endpoints");
+                tracing::debug!(name = %self.name, publishers = %report, "published resolver endpoints");
                 true
             }
             Ok(Ok(report)) => {
@@ -218,7 +218,7 @@ where
             }
             Ok(Err(error)) => {
                 let report = snafu::Report::from_error(&error);
-                tracing::warn!(error = %report, name = %self.name, "dns publish failed");
+                tracing::error!(error = %report, name = %self.name, "dns publish failed");
                 false
             }
             Err(_elapsed) => {
@@ -244,9 +244,9 @@ where
 #[cfg(all(test, feature = "publishers", feature = "dquic-network"))]
 mod tests {
     use std::{
-        fmt,
+        fmt, io,
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         time::Duration,
@@ -263,6 +263,8 @@ mod tests {
     use futures::FutureExt;
     use h3x::dquic::net::BindUri;
     use tokio::sync::Notify;
+    use tracing::{Event, Level, Subscriber, field::Visit};
+    use tracing_subscriber::{Layer, layer::Context, prelude::*};
 
     use super::{
         AddressView, AddressViewSource, EndpointPublicationLoop, PublishAddresses, PublishScope,
@@ -375,6 +377,99 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct OkPublisher(&'static str);
+
+    impl fmt::Display for OkPublisher {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl Publish for OkPublisher {
+        fn publish<'a>(
+            &'a self,
+            _name: &'a str,
+            endpoints: &mut dyn Iterator<Item = EndpointAddr>,
+        ) -> PublishFuture<'a> {
+            let _endpoints: Vec<_> = endpoints.collect();
+            async move { Ok(()) }.boxed()
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingPublisher(&'static str);
+
+    impl fmt::Display for FailingPublisher {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl Publish for FailingPublisher {
+        fn publish<'a>(
+            &'a self,
+            _name: &'a str,
+            endpoints: &mut dyn Iterator<Item = EndpointAddr>,
+        ) -> PublishFuture<'a> {
+            let _endpoints: Vec<_> = endpoints.collect();
+            async move { Err(io::Error::other("publish rejected")) }.boxed()
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct CapturedLog {
+        level: Level,
+        message: String,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct CapturedLogs {
+        logs: Arc<Mutex<Vec<CapturedLog>>>,
+    }
+
+    impl CapturedLogs {
+        fn records(&self) -> Vec<CapturedLog> {
+            self.logs.lock().expect("captured logs lock").clone()
+        }
+    }
+
+    impl<S> Layer<S> for CapturedLogs
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            let mut visitor = MessageVisitor::default();
+            event.record(&mut visitor);
+            self.logs
+                .lock()
+                .expect("captured logs lock")
+                .push(CapturedLog {
+                    level: *event.metadata().level(),
+                    message: visitor.message.unwrap_or_default(),
+                });
+        }
+    }
+
+    #[derive(Default)]
+    struct MessageVisitor {
+        message: Option<String>,
+    }
+
+    impl Visit for MessageVisitor {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "message" {
+                self.message = Some(value.to_owned());
+            }
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+            if field.name() == "message" {
+                self.message = Some(format!("{value:?}"));
+            }
+        }
+    }
+
     #[derive(Clone)]
     struct TestSource {
         bind_uri: BindUri,
@@ -433,6 +528,77 @@ mod tests {
 
     fn name() -> Name<'static> {
         "alice.dhttp.net".parse().expect("valid name")
+    }
+
+    fn bind_uri() -> BindUri {
+        "iface://v4.eth0:0/".parse().expect("bind uri")
+    }
+
+    async fn capture_publish_attempt_logs(publishers: Publishers) -> Vec<CapturedLog> {
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::registry().with(logs.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let loop_ = EndpointPublicationLoop::new(name(), publishers, TestSource::new(bind_uri()));
+
+        let _ = loop_.publish_attempt().await;
+
+        logs.records()
+    }
+
+    fn level_for_message(logs: &[CapturedLog], message: &str) -> Option<Level> {
+        logs.iter()
+            .find(|log| log.message == message)
+            .map(|log| log.level)
+    }
+
+    #[tokio::test]
+    async fn publication_loop_logs_complete_success_at_debug() {
+        let publishers = Publishers::new().with(Publisher::new(
+            PublishScope::WideArea,
+            Arc::new(OkPublisher("working publisher")),
+        ));
+
+        let logs = capture_publish_attempt_logs(publishers).await;
+
+        assert_eq!(
+            level_for_message(&logs, "published resolver endpoints"),
+            Some(Level::DEBUG)
+        );
+    }
+
+    #[tokio::test]
+    async fn publication_loop_logs_partial_success_at_warn() {
+        let publishers = Publishers::new()
+            .with(Publisher::new(
+                PublishScope::WideArea,
+                Arc::new(OkPublisher("working publisher")),
+            ))
+            .with(Publisher::new(
+                PublishScope::WideArea,
+                Arc::new(FailingPublisher("failing publisher")),
+            ));
+
+        let logs = capture_publish_attempt_logs(publishers).await;
+
+        assert_eq!(
+            level_for_message(&logs, "dns publish partially failed"),
+            Some(Level::WARN)
+        );
+    }
+
+    #[tokio::test]
+    async fn publication_loop_logs_all_failures_at_error() {
+        let publishers = Publishers::new().with(Publisher::new(
+            PublishScope::WideArea,
+            Arc::new(FailingPublisher("failing publisher")),
+        ));
+
+        let logs = capture_publish_attempt_logs(publishers).await;
+
+        assert_eq!(
+            level_for_message(&logs, "dns publish failed"),
+            Some(Level::ERROR)
+        );
     }
 
     #[test]
