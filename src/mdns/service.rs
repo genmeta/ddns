@@ -97,7 +97,7 @@ impl Mdns {
         }
 
         let Ok((proto, route)) = MdnsProtocol::new(device, ip) else {
-            tracing::debug!(target: "mdns", device, %ip, "failed to reinit mdns protocol");
+            tracing::debug!(device, %ip, "failed to reinit mdns protocol");
             return;
         };
         inner.proto = Arc::new(proto);
@@ -140,7 +140,10 @@ impl Mdns {
                         interval.tick().await;
                         let packet = Packet::query(service_name.clone());
                         if let Err(e) = proto.broadcast_packet(packet).await {
-                            tracing::debug!(target: "mdns", error = %snafu::Report::from_error(&e), "broadcast packet error");
+                            tracing::debug!(
+                                error = %snafu::Report::from_error(&e),
+                                "broadcast packet error"
+                            );
                         }
                     }
                 }
@@ -179,7 +182,10 @@ impl Mdns {
                         if let Some(packet) = packet
                             && let Err(e) = proto.broadcast_packet(packet).await
                         {
-                            tracing::debug!(target: "mdns", error = %snafu::Report::from_error(&e), "send response error");
+                            tracing::debug!(
+                                error = %snafu::Report::from_error(&e),
+                                "send response error"
+                            );
                         }
                     }
                 }
@@ -216,11 +222,7 @@ impl Mdns {
     pub fn insert_host(&self, host_name: String, eps: Vec<EndpointAddr>) {
         let local_name = Self::local_name(self.service_name.clone(), host_name.clone());
         let mut guard = self.hosts.lock().unwrap();
-        tracing::trace!(
-            target: "mdns",
-            %local_name, ?eps,
-            "adding host with addresses",
-        );
+        tracing::trace!(%local_name, ?eps, "adding host with addresses");
         guard.insert(local_name, eps);
     }
 

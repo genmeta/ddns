@@ -55,7 +55,7 @@ pub fn put_name(buf: &mut Vec<u8>, name: &Name, ctx: &mut NameCompression) -> us
     for (i, part) in parts.iter().enumerate() {
         if part.is_empty() {
             if i != parts.len() - 1 {
-                tracing::warn!(target: "mdns", name, "invalid empty label in middle");
+                tracing::warn!(name, "invalid empty label in middle");
             }
             continue;
         }
@@ -95,7 +95,7 @@ pub fn put_name(buf: &mut Vec<u8>, name: &Name, ctx: &mut NameCompression) -> us
         let label = labels[i];
         let len = label.len();
         if len > 63 {
-            tracing::warn!(target: "mdns", name, "label exceeds 63 bytes");
+            tracing::warn!(name, "label exceeds 63 bytes");
         }
         buf.put_u8(len as u8);
         buf.put_slice(label.as_bytes());
