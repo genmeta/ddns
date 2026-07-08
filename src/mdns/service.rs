@@ -121,7 +121,12 @@ impl Mdns {
         hosts: Arc<Mutex<HashMap<String, Vec<EndpointAddr>>>>,
         service_name: String,
     ) {
-        let span = tracing::info_span!(target: "mdns", "mdns_tasks", service_name, nic = proto.bound_nic(), ip = %proto.bound_ip());
+        let span = tracing::debug_span!(
+            "mdns_tasks",
+            service_name,
+            nic = proto.bound_nic(),
+            ip = %proto.bound_ip()
+        );
 
         // (1) periodic broadcaster
         tasks.spawn(
