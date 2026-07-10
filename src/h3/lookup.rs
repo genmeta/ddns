@@ -403,14 +403,14 @@ mod tests {
     }
 
     #[test]
-    fn lookup_records_select_primary_group() {
+    fn lookup_records_selects_first_server_ordered_group() {
         let response = response_for(
             "demo.dhttp.net",
             vec![
-                direct("192.0.2.20:4433", false, 1),
                 direct("192.0.2.10:4433", true, 2),
                 direct("192.0.2.11:4433", true, 2),
                 direct("192.0.2.30:4433", true, 3),
+                direct("192.0.2.20:4433", false, 1),
             ],
         );
 
