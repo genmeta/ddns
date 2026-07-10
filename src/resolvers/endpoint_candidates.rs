@@ -1,6 +1,6 @@
 use std::io;
 
-use dhttp_identity::certificate::{CertificateChainKey, CertificateChainKind};
+use dhttp_identity::certificate::CertificateChainKey;
 use dquic::{
     qbase::net::addr::EndpointAddr as DquicEndpointAddr,
     qresolve::{Resolve, Source},
@@ -75,14 +75,6 @@ pub(crate) fn grouped_endpoint_candidates<T>(
         }
     }
 
-    groups.sort_by_key(|(chain_key, _)| {
-        let primary_rank = match chain_key.kind() {
-            CertificateChainKind::Primary => 0,
-            CertificateChainKind::Secondary => 1,
-        };
-        (primary_rank, chain_key.sequence().get())
-    });
-
     groups
 }
 
@@ -105,7 +97,7 @@ fn effective_chain_key(
 mod tests {
     use std::net::SocketAddrV4;
 
-    use dhttp_identity::certificate::CertificateSequence;
+    use dhttp_identity::certificate::{CertificateChainKind, CertificateSequence};
 
     use super::*;
 
@@ -118,11 +110,11 @@ mod tests {
     }
 
     #[test]
-    fn grouping_returns_multiple_primary_sequences() {
+    fn grouping_preserves_input_order_between_primary_sequences() {
         let groups = grouped_endpoint_candidates([
             TaggedEndpointCandidate {
                 tag: "wifi",
-                record: direct("192.0.2.10:4433", true, 0),
+                record: direct("192.0.2.10:4433", true, 2),
                 fallback_chain_key: None,
             },
             TaggedEndpointCandidate {
@@ -132,13 +124,13 @@ mod tests {
             },
             TaggedEndpointCandidate {
                 tag: "wifi-backup",
-                record: direct("192.0.2.11:4433", true, 0),
+                record: direct("192.0.2.11:4433", true, 2),
                 fallback_chain_key: None,
             },
         ]);
 
         assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].0.to_string(), "primary:0");
+        assert_eq!(groups[0].0.to_string(), "primary:2");
         assert_eq!(groups[0].1.len(), 2);
         assert_eq!(groups[1].0.to_string(), "primary:1");
         assert_eq!(groups[1].1.len(), 1);

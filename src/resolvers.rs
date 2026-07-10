@@ -379,14 +379,6 @@ impl Resolvers {
             return Err(ResolversError { errors });
         }
 
-        groups.sort_by_key(|group| {
-            let primary_rank = match group.chain.kind() {
-                dhttp_identity::certificate::CertificateChainKind::Primary => 0,
-                dhttp_identity::certificate::CertificateChainKind::Secondary => 1,
-            };
-            (primary_rank, group.chain.sequence().get())
-        });
-
         Ok(crate::resolvers::endpoint_candidates::EndpointCandidates { groups })
     }
 
@@ -625,15 +617,15 @@ mod tests {
 
     #[cfg(feature = "resolvers")]
     #[tokio::test]
-    async fn aggregate_endpoint_candidates_merge_supported_resolvers() {
+    async fn aggregate_endpoint_candidates_preserve_resolver_order() {
         let resolvers = Resolvers::new()
             .with_candidate_resolver(Arc::new(CandidateResolver {
                 label: "a",
-                sequence: 0,
+                sequence: 1,
             }))
             .with_candidate_resolver(Arc::new(CandidateResolver {
                 label: "b",
-                sequence: 1,
+                sequence: 0,
             }));
 
         let candidates = resolvers
@@ -642,8 +634,8 @@ mod tests {
             .expect("candidate lookup succeeds");
 
         assert_eq!(candidates.groups.len(), 2);
-        assert_eq!(candidates.groups[0].chain.to_string(), "primary:0");
-        assert_eq!(candidates.groups[1].chain.to_string(), "primary:1");
+        assert_eq!(candidates.groups[0].chain.to_string(), "primary:1");
+        assert_eq!(candidates.groups[1].chain.to_string(), "primary:0");
     }
 
     #[cfg(feature = "resolvers")]
