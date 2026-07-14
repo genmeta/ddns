@@ -334,10 +334,8 @@ fn public_endpoints_from_iface(network: &Network, iface: &BindInterface) -> Vec<
                         .values()
                         .filter_map(|client| {
                             let outer = client.get_outer_addr()?.ok()?;
-                            let bound = current.bound_addr().ok()?;
                             match client.get_nat_type() {
                                 Some(Ok(nat_type)) => Some(publish_endpoint_from_stun(
-                                    bound,
                                     client.agent_addr(),
                                     outer,
                                     nat_type,
@@ -373,12 +371,11 @@ fn public_endpoints_from_iface(network: &Network, iface: &BindInterface) -> Vec<
 
 #[cfg(feature = "dquic-network")]
 fn publish_endpoint_from_stun(
-    bound: SocketAddr,
     agent: SocketAddr,
     outer: SocketAddr,
     nat_type: NatType,
 ) -> EndpointAddr {
-    if nat_type == NatType::FullCone && bound == outer {
+    if nat_type == NatType::FullCone {
         EndpointAddr::direct(outer)
     } else {
         EndpointAddr::with_agent(agent, outer)
@@ -476,14 +473,13 @@ mod tests {
 
     #[cfg(feature = "dquic-network")]
     #[test]
-    fn full_cone_nat_endpoint_preserves_agent_when_outer_differs_from_bound_addr() {
-        let bound = "10.110.0.10:45635".parse().expect("valid bound addr");
+    fn full_cone_nat_endpoint_is_direct_when_public_addr_differs_from_bound_addr() {
         let agent = "10.10.0.2:20004".parse().expect("valid agent addr");
         let outer = "10.10.0.10:45635".parse().expect("valid outer addr");
 
-        let endpoint = publish_endpoint_from_stun(bound, agent, outer, NatType::FullCone);
+        let endpoint = publish_endpoint_from_stun(agent, outer, NatType::FullCone);
 
-        assert_eq!(endpoint, EndpointAddr::with_agent(agent, outer));
+        assert_eq!(endpoint, EndpointAddr::direct(outer));
     }
 
     #[cfg(feature = "dquic-network")]
@@ -492,8 +488,19 @@ mod tests {
         let bound = "10.10.0.100:45635".parse().expect("valid bound addr");
         let agent = "10.10.0.2:20004".parse().expect("valid agent addr");
 
-        let endpoint = publish_endpoint_from_stun(bound, agent, bound, NatType::FullCone);
+        let endpoint = publish_endpoint_from_stun(agent, bound, NatType::FullCone);
 
         assert_eq!(endpoint, EndpointAddr::direct(bound));
+    }
+
+    #[cfg(feature = "dquic-network")]
+    #[test]
+    fn non_full_cone_endpoint_preserves_agent() {
+        let agent = "10.10.0.2:20004".parse().expect("valid agent addr");
+        let outer = "10.10.0.10:45635".parse().expect("valid outer addr");
+
+        let endpoint = publish_endpoint_from_stun(agent, outer, NatType::RestrictedCone);
+
+        assert_eq!(endpoint, EndpointAddr::with_agent(agent, outer));
     }
 }
