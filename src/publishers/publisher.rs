@@ -2,7 +2,7 @@ use std::{fmt, io, sync::Arc};
 
 use dhttp_identity::name::Name;
 use dquic::qresolve::Publish;
-use snafu::{IntoError, ResultExt, Snafu};
+use snafu::{OptionExt, ResultExt, Snafu};
 
 use super::{AddressView, PublishScope};
 
@@ -17,6 +17,17 @@ pub enum PublisherError {
     #[cfg(all(feature = "mdns", feature = "dquic-network"))]
     #[snafu(display("all mdns publishers failed"))]
     Mdns { source: MdnsPublishersError },
+    #[cfg(all(feature = "mdns", feature = "dquic-network"))]
+    #[snafu(display("failed to get mdns publisher local authority"))]
+    MdnsLocalAuthority { source: h3x::quic::ConnectionError },
+    #[cfg(all(feature = "mdns", feature = "dquic-network"))]
+    #[snafu(display("anonymous endpoint cannot publish mdns records"))]
+    MdnsAnonymousEndpoint,
+    #[cfg(all(feature = "mdns", feature = "dquic-network"))]
+    #[snafu(display("failed to encode mdns dns records"))]
+    MdnsEncode {
+        source: crate::publishers::packet::EncodeAuthorityDnsPacketError,
+    },
 }
 
 #[derive(Clone)]
@@ -31,7 +42,10 @@ enum PublisherKind {
         publisher: Arc<dyn Publish + Send + Sync>,
     },
     #[cfg(all(feature = "mdns", feature = "dquic-network"))]
-    Mdns(Arc<crate::mdns::MdnsResolvers>),
+    Mdns {
+        resolvers: Arc<crate::mdns::MdnsResolvers>,
+        authority: Arc<dyn h3x::quic::DynWithLocalAuthority>,
+    },
 }
 
 #[cfg(all(feature = "mdns", feature = "dquic-network"))]
@@ -67,7 +81,7 @@ impl fmt::Debug for Publisher {
                 .field("publisher", publisher)
                 .finish(),
             #[cfg(all(feature = "mdns", feature = "dquic-network"))]
-            PublisherKind::Mdns(resolvers) => f
+            PublisherKind::Mdns { resolvers, .. } => f
                 .debug_struct("Publisher")
                 .field("mdns", resolvers)
                 .finish(),
@@ -80,7 +94,7 @@ impl fmt::Display for Publisher {
         match &self.inner {
             PublisherKind::Custom { publisher, .. } => fmt::Display::fmt(publisher, f),
             #[cfg(all(feature = "mdns", feature = "dquic-network"))]
-            PublisherKind::Mdns(resolvers) => fmt::Display::fmt(resolvers, f),
+            PublisherKind::Mdns { resolvers, .. } => fmt::Display::fmt(resolvers, f),
         }
     }
 }
@@ -107,9 +121,15 @@ impl Publisher {
     }
 
     #[cfg(all(feature = "mdns", feature = "dquic-network"))]
-    pub fn mdns(resolvers: Arc<crate::mdns::MdnsResolvers>) -> Self {
+    pub fn mdns<A>(resolvers: Arc<crate::mdns::MdnsResolvers>, authority: Arc<A>) -> Self
+    where
+        A: h3x::quic::DynWithLocalAuthority + 'static,
+    {
         Self {
-            inner: PublisherKind::Mdns(resolvers),
+            inner: PublisherKind::Mdns {
+                resolvers,
+                authority,
+            },
         }
     }
 
@@ -122,7 +142,10 @@ impl Publisher {
                 publish_selected(publisher.as_ref(), scope, name, view).await
             }
             #[cfg(all(feature = "mdns", feature = "dquic-network"))]
-            PublisherKind::Mdns(resolvers) => publish_mdns(resolvers, name, view).await,
+            PublisherKind::Mdns {
+                resolvers,
+                authority,
+            } => publish_mdns(resolvers, authority.as_ref(), name, view).await,
         }
     }
 }
@@ -153,43 +176,53 @@ where
 #[cfg(all(feature = "mdns", feature = "dquic-network"))]
 async fn publish_mdns<V>(
     resolvers: &crate::mdns::MdnsResolvers,
+    authority_provider: &dyn h3x::quic::DynWithLocalAuthority,
     name: &Name<'_>,
     view: &V,
 ) -> Result<(), PublisherError>
 where
     V: AddressView + Sync,
 {
+    let authority = authority_provider
+        .local_authority()
+        .await
+        .context(publisher_error::MdnsLocalAuthoritySnafu)?
+        .context(publisher_error::MdnsAnonymousEndpointSnafu)?;
+    let mut no_endpoints = std::iter::empty();
+    crate::publishers::packet::dns_endpoints_for_authority(
+        authority.as_ref(),
+        name.as_str(),
+        &mut no_endpoints,
+    )
+    .context(publisher_error::MdnsEncodeSnafu)?;
     let bound_resolvers = resolvers.bound_resolvers();
     if bound_resolvers.is_empty() {
         tracing::debug!(name = %name, "no mdns publishers currently bound");
         return Ok(());
     }
 
-    let mut errors = Vec::new();
-    let mut succeeded = false;
     for bound in bound_resolvers {
         let scope = PublishScope::LocalLink {
             device: bound.device.clone().into(),
             family: bound.family,
         };
-        match publish_selected(&bound.resolver, &scope, name, view).await {
-            Ok(()) => succeeded = true,
-            Err(PublisherError::Publish { source, .. }) => {
-                errors.push((bound.resolver.to_string(), source));
-            }
-            Err(error) => return Err(error),
-        }
+        let mut endpoints = view.endpoints(scope.selector());
+        let endpoints = crate::publishers::packet::dns_endpoints_for_authority(
+            authority.as_ref(),
+            name.as_str(),
+            &mut endpoints,
+        )
+        .context(publisher_error::MdnsEncodeSnafu)?;
+        bound.resolver.insert_host(name.to_string(), endpoints);
     }
 
-    if succeeded {
-        Ok(())
-    } else {
-        Err(publisher_error::MdnsSnafu.into_error(MdnsPublishersError { errors }))
-    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(feature = "mdns", feature = "dquic-network"))]
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::{
         fmt, io,
         net::{Ipv4Addr, SocketAddr, SocketAddrV4},
@@ -262,6 +295,109 @@ mod tests {
 
     fn endpoint(ip: [u8; 4], port: u16) -> EndpointAddr {
         EndpointAddr::direct(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(ip), port)))
+    }
+
+    #[cfg(all(feature = "mdns", feature = "dquic-network"))]
+    #[derive(Debug)]
+    struct RecordingAuthorityProvider {
+        calls: AtomicUsize,
+        authority: Arc<dyn dhttp_identity::identity::LocalAuthority>,
+    }
+
+    #[cfg(all(feature = "mdns", feature = "dquic-network"))]
+    impl h3x::quic::DynWithLocalAuthority for RecordingAuthorityProvider {
+        fn local_authority(
+            &self,
+        ) -> futures::future::BoxFuture<
+            '_,
+            Result<
+                Option<Arc<dyn dhttp_identity::identity::LocalAuthority>>,
+                h3x::quic::ConnectionError,
+            >,
+        > {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            futures::future::ready(Ok(Some(self.authority.clone()))).boxed()
+        }
+    }
+
+    #[cfg(all(feature = "mdns", feature = "dquic-network"))]
+    #[derive(Debug)]
+    struct MdnsTestAuthority {
+        cert_chain: Vec<rustls::pki_types::CertificateDer<'static>>,
+    }
+
+    #[cfg(all(feature = "mdns", feature = "dquic-network"))]
+    impl dhttp_identity::identity::LocalAuthority for MdnsTestAuthority {
+        fn name(&self) -> &str {
+            "alice.dhttp.net"
+        }
+
+        fn cert_chain(&self) -> &[rustls::pki_types::CertificateDer<'static>] {
+            &self.cert_chain
+        }
+
+        fn sign(
+            &self,
+            _data: &[u8],
+        ) -> futures::future::BoxFuture<'_, Result<Vec<u8>, dhttp_identity::identity::SignError>>
+        {
+            futures::future::ready(Ok(Vec::new())).boxed()
+        }
+    }
+
+    #[cfg(all(feature = "mdns", feature = "dquic-network"))]
+    #[tokio::test]
+    async fn mdns_publish_uses_publisher_owned_authority() {
+        use std::str::FromStr;
+
+        let mut certificate = include_bytes!("../../tests/fixtures/valid.der").to_vec();
+        let marker = b"0:0:0123456789abcdef";
+        let offset = certificate
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .expect("fixture contains dhttp subject key identifier");
+        certificate[offset] = b'7';
+        let authority = Arc::new(MdnsTestAuthority {
+            cert_chain: vec![rustls::pki_types::CertificateDer::from(certificate)],
+        });
+        let provider = Arc::new(RecordingAuthorityProvider {
+            calls: AtomicUsize::new(0),
+            authority,
+        });
+        let pattern = h3x::dquic::binds::BindPattern::from_str("iface://v4.lo:0")
+            .expect("valid loopback pattern");
+        let resolvers = Arc::new(
+            crate::mdns::MdnsResolvers::bind(
+                h3x::dquic::Network::builder().build(),
+                Arc::new(vec![pattern]),
+                "_test._udp.local",
+            )
+            .await,
+        );
+        let publisher = Publisher::mdns(resolvers.clone(), provider.clone());
+        let view = crate::publishers::PublishAddresses::new().local_link(
+            "lo",
+            Family::V4,
+            [endpoint([127, 0, 0, 1], 4433)],
+        );
+        let name = Name::try_from("alice.dhttp.net").expect("valid name");
+
+        publisher
+            .publish(&name, &view)
+            .await
+            .expect("empty mdns publication succeeds");
+
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        let bound = resolvers.bound_resolvers();
+        assert!(!bound.is_empty(), "loopback mDNS resolver must be bound");
+        let records = bound[0]
+            .resolver
+            .published_endpoints("alice.dhttp.net")
+            .expect("published host exists");
+        assert_eq!(records.len(), 1);
+        assert!(!records[0].is_signed());
+        assert!(records[0].is_main());
+        assert_eq!(records[0].normalized_sequence().get(), 7);
     }
 
     #[tokio::test]

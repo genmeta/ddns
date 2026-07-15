@@ -20,13 +20,15 @@ pub enum EncodeAuthorityDnsPacketError {
     },
     #[snafu(display("failed to encode endpoint address"))]
     EncodeEndpoint,
+    #[snafu(display("secondary authority cannot publish dns endpoints"))]
+    SecondaryAuthority,
 }
 
-pub(crate) fn dns_packet_for_authority(
+pub(crate) fn dns_endpoints_for_authority(
     authority: &dyn LocalAuthority,
     name: &str,
     endpoints: &mut dyn Iterator<Item = EndpointAddr>,
-) -> Result<Vec<u8>, EncodeAuthorityDnsPacketError> {
+) -> Result<Vec<DnsEndpointAddr>, EncodeAuthorityDnsPacketError> {
     ensure!(
         authority.name() == name,
         encode_authority_dns_packet_error::AuthorityNameMismatchSnafu
@@ -42,10 +44,25 @@ pub(crate) fn dns_packet_for_authority(
         let Ok(mut endpoint) = DnsEndpointAddr::try_from(endpoint) else {
             return encode_authority_dns_packet_error::EncodeEndpointSnafu.fail();
         };
-        endpoint.set_main(chain.kind() == CertificateChainKind::Primary);
+        endpoint.set_main(true);
         endpoint.set_sequence(chain.sequence());
         encoded.push(endpoint);
     }
+
+    ensure!(
+        encoded.is_empty() || chain.kind() == CertificateChainKind::Primary,
+        encode_authority_dns_packet_error::SecondaryAuthoritySnafu
+    );
+
+    Ok(encoded)
+}
+
+pub(crate) fn dns_packet_for_authority(
+    authority: &dyn LocalAuthority,
+    name: &str,
+    endpoints: &mut dyn Iterator<Item = EndpointAddr>,
+) -> Result<Vec<u8>, EncodeAuthorityDnsPacketError> {
+    let encoded = dns_endpoints_for_authority(authority, name, endpoints)?;
 
     let mut hosts = HashMap::new();
     hosts.insert(name.to_owned(), encoded);
@@ -61,7 +78,7 @@ mod tests {
     use futures::future::BoxFuture;
     use rustls::pki_types::CertificateDer;
 
-    use super::dns_packet_for_authority;
+    use super::{dns_endpoints_for_authority, dns_packet_for_authority};
     use crate::core::parser::{
         packet::be_packet,
         record::{RData, Type},
@@ -96,6 +113,28 @@ mod tests {
             cert_chain: vec![CertificateDer::from(
                 include_bytes!("../../tests/fixtures/valid.der").to_vec(),
             )],
+        }
+    }
+
+    fn authority_with_chain(
+        name: &'static str,
+        sequence: u8,
+        kind: dhttp_identity::certificate::CertificateChainKind,
+    ) -> TestAuthority {
+        let mut certificate = include_bytes!("../../tests/fixtures/valid.der").to_vec();
+        let marker = b"0:0:0123456789abcdef";
+        let offset = certificate
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .expect("fixture contains dhttp subject key identifier");
+        certificate[offset] = b'0' + sequence;
+        certificate[offset + 2] = match kind {
+            dhttp_identity::certificate::CertificateChainKind::Primary => b'0',
+            dhttp_identity::certificate::CertificateChainKind::Secondary => b'1',
+        };
+        TestAuthority {
+            name,
+            cert_chain: vec![CertificateDer::from(certificate)],
         }
     }
 
@@ -156,5 +195,58 @@ mod tests {
         let (remain, parsed) = be_packet(&packet).expect("dns packet parses");
         assert!(remain.is_empty());
         assert!(parsed.answers.is_empty());
+    }
+
+    #[test]
+    fn dns_endpoints_for_primary_authority_stamp_sequence_metadata() {
+        let authority = authority_with_chain(
+            "client.example.com.dhttp.net",
+            7,
+            dhttp_identity::certificate::CertificateChainKind::Primary,
+        );
+        let mut endpoints = std::iter::once(endpoint());
+
+        let encoded =
+            dns_endpoints_for_authority(&authority, "client.example.com.dhttp.net", &mut endpoints)
+                .expect("primary endpoints encode");
+
+        assert_eq!(encoded.len(), 1);
+        assert!(encoded[0].is_main());
+        assert_eq!(encoded[0].normalized_sequence().get(), 7);
+    }
+
+    #[test]
+    fn dns_endpoints_for_secondary_authority_reject_non_empty_publication() {
+        let authority = authority_with_chain(
+            "client.example.com.dhttp.net",
+            7,
+            dhttp_identity::certificate::CertificateChainKind::Secondary,
+        );
+        let mut endpoints = std::iter::once(endpoint());
+
+        let error =
+            dns_endpoints_for_authority(&authority, "client.example.com.dhttp.net", &mut endpoints)
+                .expect_err("secondary publication is rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "secondary authority cannot publish dns endpoints"
+        );
+    }
+
+    #[test]
+    fn dns_endpoints_for_secondary_authority_allows_empty_clear() {
+        let authority = authority_with_chain(
+            "client.example.com.dhttp.net",
+            7,
+            dhttp_identity::certificate::CertificateChainKind::Secondary,
+        );
+        let mut endpoints = std::iter::empty();
+
+        let encoded =
+            dns_endpoints_for_authority(&authority, "client.example.com.dhttp.net", &mut endpoints)
+                .expect("empty secondary clear is allowed");
+
+        assert!(encoded.is_empty());
     }
 }

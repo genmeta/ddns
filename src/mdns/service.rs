@@ -226,6 +226,12 @@ impl Mdns {
         guard.insert(local_name, eps);
     }
 
+    #[cfg(test)]
+    pub(crate) fn published_endpoints(&self, host_name: &str) -> Option<Vec<EndpointAddr>> {
+        let local_name = Self::local_name(self.service_name.clone(), host_name.to_owned());
+        self.hosts.lock().unwrap().get(&local_name).cloned()
+    }
+
     #[inline]
     pub(crate) fn protocol(&self) -> Arc<MdnsProtocol> {
         self.inner
