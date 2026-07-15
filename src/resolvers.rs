@@ -359,7 +359,8 @@ impl Resolvers {
         lookup: crate::resolvers::endpoint_candidates::EndpointLookup,
     ) -> Result<crate::resolvers::endpoint_candidates::EndpointCandidates, ResolversError> {
         let mut errors = vec![];
-        let mut groups = Vec::new();
+        let mut groups =
+            Vec::<crate::resolvers::endpoint_candidates::EndpointCandidateGroup>::new();
 
         for entry in self.resolvers.clone() {
             let Some(candidate_resolver) = entry.endpoint_candidates else {
@@ -374,7 +375,27 @@ impl Resolvers {
                 .lookup_endpoint_candidates(name, lookup)
                 .await
             {
-                Ok(candidates) => groups.extend(candidates.groups),
+                Ok(candidates) => {
+                    for mut group in candidates.groups {
+                        if let Some(existing) = groups
+                            .iter_mut()
+                            .find(|existing| existing.chain == group.chain)
+                        {
+                            for endpoint in group.endpoints.drain(..) {
+                                if !existing.endpoints.contains(&endpoint) {
+                                    existing.endpoints.push(endpoint);
+                                }
+                            }
+                            for source in group.sources.drain(..) {
+                                if !existing.sources.contains(&source) {
+                                    existing.sources.push(source);
+                                }
+                            }
+                        } else {
+                            groups.push(group);
+                        }
+                    }
+                }
                 Err(error) => errors.push((entry.resolver.to_string(), error)),
             }
         }
@@ -645,6 +666,103 @@ mod tests {
         assert_eq!(candidates.groups.len(), 2);
         assert_eq!(candidates.groups[0].chain.to_string(), "primary:1");
         assert_eq!(candidates.groups[1].chain.to_string(), "primary:0");
+    }
+
+    #[cfg(feature = "resolvers")]
+    #[derive(Debug)]
+    struct CandidateSetResolver {
+        label: &'static str,
+        groups: Vec<(u8, &'static str, dquic::qresolve::Source)>,
+    }
+
+    #[cfg(feature = "resolvers")]
+    impl fmt::Display for CandidateSetResolver {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.label)
+        }
+    }
+
+    #[cfg(feature = "resolvers")]
+    impl dquic::qresolve::Resolve for CandidateSetResolver {
+        fn lookup<'l>(&'l self, _name: &'l str) -> dquic::qresolve::ResolveFuture<'l> {
+            use futures::{FutureExt, StreamExt, stream};
+            async { Ok(stream::empty().boxed()) }.boxed()
+        }
+    }
+
+    #[cfg(feature = "resolvers")]
+    impl crate::resolvers::endpoint_candidates::ResolveEndpointCandidates for CandidateSetResolver {
+        fn lookup_endpoint_candidates<'a>(
+            &'a self,
+            _name: &'a str,
+            _lookup: crate::resolvers::endpoint_candidates::EndpointLookup,
+        ) -> crate::resolvers::endpoint_candidates::EndpointCandidateFuture<'a> {
+            use dhttp_identity::certificate::{
+                CertificateChainKey, CertificateChainKind, CertificateSequence,
+            };
+            use futures::FutureExt;
+
+            let groups = self
+                .groups
+                .iter()
+                .map(|(sequence, endpoint, source)| {
+                    crate::resolvers::endpoint_candidates::EndpointCandidateGroup {
+                        chain: CertificateChainKey::new(
+                            CertificateSequence::from(*sequence),
+                            CertificateChainKind::Primary,
+                        ),
+                        endpoints: vec![dquic::qbase::net::addr::EndpointAddr::direct(
+                            endpoint.parse().unwrap(),
+                        )],
+                        sources: vec![source.clone()],
+                    }
+                })
+                .collect();
+            async move { Ok(crate::resolvers::endpoint_candidates::EndpointCandidates { groups }) }
+                .boxed()
+        }
+    }
+
+    #[cfg(feature = "resolvers")]
+    #[tokio::test]
+    async fn aggregate_endpoint_candidates_merge_duplicate_sequences_stably() {
+        use dquic::qresolve::Source;
+
+        let resolvers = Resolvers::new()
+            .with_candidate_resolver(Arc::new(CandidateSetResolver {
+                label: "a",
+                groups: vec![
+                    (2, "192.0.2.20:4433", Source::System),
+                    (1, "192.0.2.10:4433", Source::System),
+                ],
+            }))
+            .with_candidate_resolver(Arc::new(CandidateSetResolver {
+                label: "b",
+                groups: vec![
+                    (2, "192.0.2.21:4433", Source::Dht),
+                    (3, "192.0.2.30:4433", Source::Dht),
+                ],
+            }));
+
+        let candidates = resolvers
+            .lookup_endpoint_candidates(
+                "demo.dhttp.net",
+                crate::resolvers::endpoint_candidates::EndpointLookup::all(),
+            )
+            .await
+            .expect("candidate lookup succeeds");
+
+        let sequences = candidates
+            .groups
+            .iter()
+            .map(|group| group.chain.sequence().get())
+            .collect::<Vec<_>>();
+        assert_eq!(sequences, vec![2, 1, 3]);
+        assert_eq!(candidates.groups[0].endpoints.len(), 2);
+        assert_eq!(
+            candidates.groups[0].sources,
+            vec![Source::System, Source::Dht]
+        );
     }
 
     #[cfg(feature = "resolvers")]

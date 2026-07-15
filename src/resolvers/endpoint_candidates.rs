@@ -87,6 +87,21 @@ pub(crate) fn append_endpoint_lookup_query(url: &mut url::Url, lookup: EndpointL
     }
 }
 
+pub(crate) fn select_group_pairs<T>(
+    groups: Vec<(CertificateChainKey, T)>,
+    query: SequenceQuery,
+) -> Vec<(CertificateChainKey, T)> {
+    match query {
+        SequenceQuery::Default => groups.into_iter().take(3).collect(),
+        SequenceQuery::Exact(sequence) => groups
+            .into_iter()
+            .filter(|(chain, _)| chain.sequence() == sequence)
+            .collect(),
+        SequenceQuery::Limit(limit) => groups.into_iter().take(limit.get()).collect(),
+        SequenceQuery::All => groups,
+    }
+}
+
 pub type EndpointCandidateFuture<'a> = BoxFuture<'a, io::Result<EndpointCandidates>>;
 
 pub trait ResolveEndpointCandidates: Resolve {
@@ -248,6 +263,56 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].0.to_string(), "primary:2");
         assert_eq!(groups[0].1[0].0, "primary");
+    }
+
+    #[test]
+    fn sequence_query_selects_ordered_group_pairs() {
+        let pairs = || {
+            vec![
+                (
+                    CertificateChainKey::new(
+                        CertificateSequence::from(2u8),
+                        CertificateChainKind::Primary,
+                    ),
+                    "two",
+                ),
+                (
+                    CertificateChainKey::new(
+                        CertificateSequence::from(1u8),
+                        CertificateChainKind::Primary,
+                    ),
+                    "one",
+                ),
+                (
+                    CertificateChainKey::new(
+                        CertificateSequence::from(3u8),
+                        CertificateChainKind::Primary,
+                    ),
+                    "three",
+                ),
+            ]
+        };
+
+        assert_eq!(
+            select_group_pairs(
+                pairs(),
+                SequenceQuery::Exact(CertificateSequence::from(1u8)),
+            ),
+            vec![(
+                CertificateChainKey::new(
+                    CertificateSequence::from(1u8),
+                    CertificateChainKind::Primary,
+                ),
+                "one",
+            )]
+        );
+        assert_eq!(
+            select_group_pairs(pairs(), SequenceQuery::Limit(NonZeroUsize::new(2).unwrap()),)
+                .into_iter()
+                .map(|(_, value)| value)
+                .collect::<Vec<_>>(),
+            vec!["two", "one"]
+        );
     }
 
     #[test]

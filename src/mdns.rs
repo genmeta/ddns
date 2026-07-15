@@ -357,18 +357,39 @@ impl MdnsResolvers {
 }
 
 #[cfg(feature = "dquic-network")]
+fn select_candidate_groups(
+    groups: Vec<crate::resolvers::endpoint_candidates::EndpointCandidateGroup>,
+    query: crate::resolvers::endpoint_candidates::SequenceQuery,
+) -> Vec<crate::resolvers::endpoint_candidates::EndpointCandidateGroup> {
+    use crate::resolvers::endpoint_candidates::SequenceQuery;
+
+    match query {
+        SequenceQuery::Default => groups.into_iter().take(3).collect(),
+        SequenceQuery::Exact(sequence) => groups
+            .into_iter()
+            .filter(|group| group.chain.sequence() == sequence)
+            .collect(),
+        SequenceQuery::Limit(limit) => groups.into_iter().take(limit.get()).collect(),
+        SequenceQuery::All => groups,
+    }
+}
+
+#[cfg(feature = "dquic-network")]
 impl crate::resolvers::endpoint_candidates::ResolveEndpointCandidates for MdnsResolvers {
     fn lookup_endpoint_candidates<'a>(
         &'a self,
         name: &'a str,
-        _lookup: crate::resolvers::endpoint_candidates::EndpointLookup,
+        lookup: crate::resolvers::endpoint_candidates::EndpointLookup,
     ) -> crate::resolvers::endpoint_candidates::EndpointCandidateFuture<'a> {
         Box::pin(async move {
-            let Some((domain, _sequence)) =
+            let Some((domain, sequence)) =
                 crate::resolvers::endpoint_lookup_name_and_sequence(name)
             else {
                 return Err(io::Error::other("no DNS record found"));
             };
+            let lookup = sequence
+                .map(crate::resolvers::endpoint_candidates::EndpointLookup::exact)
+                .unwrap_or(lookup);
 
             let mut lookup_futures = FuturesUnordered::new();
             let mut has_resolver = false;
@@ -425,6 +446,7 @@ impl crate::resolvers::endpoint_candidates::ResolveEndpointCandidates for MdnsRe
                         }
                     })
                     .collect();
+            let groups = select_candidate_groups(groups, lookup.sequences);
 
             Ok(crate::resolvers::endpoint_candidates::EndpointCandidates { groups })
         })
@@ -459,5 +481,70 @@ impl Resolve for MdnsResolvers {
             return future::ready(Err(io::Error::other("no DNS record found"))).boxed();
         };
         self.query_with_sequence(domain, sequence).boxed()
+    }
+}
+
+#[cfg(all(test, feature = "dquic-network"))]
+mod tests {
+    use std::num::NonZeroUsize;
+
+    use dhttp_identity::certificate::{
+        CertificateChainKey, CertificateChainKind, CertificateSequence,
+    };
+
+    use super::*;
+    use crate::resolvers::endpoint_candidates::{
+        EndpointCandidateGroup, EndpointLookup, SequenceQuery,
+    };
+
+    fn group(sequence: u8) -> EndpointCandidateGroup {
+        EndpointCandidateGroup {
+            chain: CertificateChainKey::new(
+                CertificateSequence::from(sequence),
+                CertificateChainKind::Primary,
+            ),
+            endpoints: Vec::new(),
+            sources: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn mdns_candidate_selection_applies_sequence_query_locally() {
+        let groups = || vec![group(2), group(1), group(3), group(4)];
+        let sequences = |groups: Vec<EndpointCandidateGroup>| {
+            groups
+                .into_iter()
+                .map(|group| group.chain.sequence().get())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            sequences(select_candidate_groups(groups(), SequenceQuery::Default)),
+            vec![2, 1, 3]
+        );
+        assert_eq!(
+            sequences(select_candidate_groups(
+                groups(),
+                SequenceQuery::Limit(NonZeroUsize::new(2).unwrap()),
+            )),
+            vec![2, 1]
+        );
+        assert_eq!(
+            sequences(select_candidate_groups(
+                groups(),
+                SequenceQuery::Exact(CertificateSequence::from(3u8)),
+            )),
+            vec![3]
+        );
+        assert_eq!(
+            sequences(select_candidate_groups(groups(), SequenceQuery::All)),
+            vec![2, 1, 3, 4]
+        );
+
+        let lookup = EndpointLookup::all().with_record_limit(NonZeroUsize::new(1).unwrap());
+        assert_eq!(
+            sequences(select_candidate_groups(groups(), lookup.sequences)),
+            vec![2, 1, 3, 4]
+        );
     }
 }

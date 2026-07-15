@@ -305,18 +305,21 @@ where
             let source = Source::H3 {
                 server: Arc::from(self.base_url.origin().ascii_serialization()),
             };
-            let groups = LookupRecords::decode_candidate_groups(domain, response.as_ref())
-                .map_err(io::Error::other)?
-                .into_iter()
-                .map(|(chain, endpoints)| EndpointCandidateGroup {
-                    chain,
-                    endpoints: endpoints
-                        .into_iter()
-                        .map(|((), endpoint)| endpoint)
-                        .collect(),
-                    sources: vec![source.clone()],
-                })
-                .collect();
+            let groups = crate::resolvers::endpoint_candidates::select_group_pairs(
+                LookupRecords::decode_candidate_groups(domain, response.as_ref())
+                    .map_err(io::Error::other)?,
+                lookup.sequences,
+            )
+            .into_iter()
+            .map(|(chain, endpoints)| EndpointCandidateGroup {
+                chain,
+                endpoints: endpoints
+                    .into_iter()
+                    .map(|((), endpoint)| endpoint)
+                    .collect(),
+                sources: vec![source.clone()],
+            })
+            .collect();
 
             Ok(EndpointCandidates { groups })
         })

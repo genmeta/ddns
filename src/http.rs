@@ -412,33 +412,33 @@ impl crate::resolvers::endpoint_candidates::ResolveEndpointCandidates for HttpRe
             };
             let server = Arc::from(self.base_url.host_str().unwrap_or("<unknown server>"));
             let source = Source::Http { server };
+            let lookup = sequence
+                .map(crate::resolvers::endpoint_candidates::EndpointLookup::exact)
+                .unwrap_or(lookup);
             let response = self
                 .http_client
-                .get(lookup_url(
-                    &self.base_url,
-                    domain,
-                    sequence
-                        .map(crate::resolvers::endpoint_candidates::EndpointLookup::exact)
-                        .unwrap_or(lookup),
-                ))
+                .get(lookup_url(&self.base_url, domain, lookup))
                 .send()
                 .await?
                 .error_for_status()?
                 .bytes()
                 .await?;
-            let groups = decode_candidate_groups(domain, response.as_ref())?
-                .into_iter()
-                .map(|(chain, endpoints)| {
-                    crate::resolvers::endpoint_candidates::EndpointCandidateGroup {
-                        chain,
-                        endpoints: endpoints
-                            .into_iter()
-                            .map(|((), endpoint)| endpoint)
-                            .collect(),
-                        sources: vec![source.clone()],
-                    }
-                })
-                .collect();
+            let groups = crate::resolvers::endpoint_candidates::select_group_pairs(
+                decode_candidate_groups(domain, response.as_ref())?,
+                lookup.sequences,
+            )
+            .into_iter()
+            .map(|(chain, endpoints)| {
+                crate::resolvers::endpoint_candidates::EndpointCandidateGroup {
+                    chain,
+                    endpoints: endpoints
+                        .into_iter()
+                        .map(|((), endpoint)| endpoint)
+                        .collect(),
+                    sources: vec![source.clone()],
+                }
+            })
+            .collect();
             Ok(crate::resolvers::endpoint_candidates::EndpointCandidates { groups })
         };
         Box::pin(lookup.map_err(io::Error::other))
