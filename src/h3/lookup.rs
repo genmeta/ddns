@@ -21,16 +21,16 @@ use crate::{
 
 const LOOKUP_API_PATH: &str = "/api/v2/lookup";
 
-fn lookup_url(base_url: &url::Url, name: &str, sequence: Option<CertificateSequence>) -> url::Url {
+fn lookup_url(
+    base_url: &url::Url,
+    name: &str,
+    lookup: crate::resolvers::endpoint_candidates::EndpointLookup,
+) -> url::Url {
     let mut url = base_url
         .join(LOOKUP_API_PATH)
         .expect("h3 dns lookup api path must be valid");
     url.query_pairs_mut().append_pair("host", name);
-    if let Some(sequence) = sequence {
-        let sequence_text = sequence.get().to_string();
-        url.query_pairs_mut()
-            .append_pair("sequence", &sequence_text);
-    }
+    crate::resolvers::endpoint_candidates::append_endpoint_lookup_query(&mut url, lookup);
     url
 }
 
@@ -244,7 +244,10 @@ where
             return Ok(stream.boxed());
         }
 
-        let url = lookup_url(&self.base_url, domain, sequence);
+        let endpoint_lookup = sequence
+            .map(crate::resolvers::endpoint_candidates::EndpointLookup::exact)
+            .unwrap_or_default();
+        let url = lookup_url(&self.base_url, domain, endpoint_lookup);
         let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
 
         tracing::trace!("sending lookup request to {}", self.base_url);
@@ -281,16 +284,19 @@ where
     fn lookup_endpoint_candidates<'a>(
         &'a self,
         name: &'a str,
-        _lookup: crate::resolvers::endpoint_candidates::EndpointLookup,
+        lookup: crate::resolvers::endpoint_candidates::EndpointLookup,
     ) -> crate::resolvers::endpoint_candidates::EndpointCandidateFuture<'a> {
         Box::pin(async move {
-            let Some((domain, _sequence)) =
+            let Some((domain, sequence)) =
                 crate::resolvers::endpoint_lookup_name_and_sequence(name)
             else {
                 return Err(io::Error::other("no DNS record found"));
             };
 
-            let url = lookup_url(&self.base_url, domain, None);
+            let lookup = sequence
+                .map(crate::resolvers::endpoint_candidates::EndpointLookup::exact)
+                .unwrap_or(lookup);
+            let url = lookup_url(&self.base_url, domain, lookup);
             let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
             let response = self
                 .lookup_response_with_retry(uri)
@@ -319,13 +325,16 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, net::SocketAddrV4};
+    use std::{collections::HashMap, net::SocketAddrV4, num::NonZeroUsize};
 
     use super::*;
-    use crate::core::{
-        MdnsPacket,
-        parser::record::endpoint::EndpointAddr as DnsEndpointAddr,
-        wire::{MultiResponse, ResponseRecord},
+    use crate::{
+        core::{
+            MdnsPacket,
+            parser::record::endpoint::EndpointAddr as DnsEndpointAddr,
+            wire::{MultiResponse, ResponseRecord},
+        },
+        resolvers::endpoint_candidates::EndpointLookup,
     };
 
     fn direct(addr: &str, main: bool, sequence: u32) -> DnsEndpointAddr {
@@ -369,7 +378,7 @@ mod tests {
     #[test]
     fn h3_lookup_url_targets_v2_api_from_origin_base() {
         let base_url = url::Url::parse("https://dns.example.test:4433").expect("url");
-        let url = lookup_url(&base_url, "demo.dhttp.net", None);
+        let url = lookup_url(&base_url, "demo.dhttp.net", EndpointLookup::default());
 
         assert_eq!(
             url.as_str(),
@@ -380,7 +389,7 @@ mod tests {
     #[test]
     fn h3_lookup_url_does_not_duplicate_v2_base_path() {
         let base_url = url::Url::parse("https://dns.example.test:4433/api/v2/").expect("url");
-        let url = lookup_url(&base_url, "demo.dhttp.net", None);
+        let url = lookup_url(&base_url, "demo.dhttp.net", EndpointLookup::default());
 
         assert_eq!(
             url.as_str(),
@@ -394,13 +403,44 @@ mod tests {
         let url = lookup_url(
             &base_url,
             "demo.dhttp.net",
-            Some(CertificateSequence::from(3u8)),
+            EndpointLookup::exact(CertificateSequence::from(3u8)),
         );
 
         assert_eq!(
             url.as_str(),
             "https://dns.example.test:4433/api/v2/lookup?host=demo.dhttp.net&sequence=3"
         );
+    }
+
+    #[test]
+    fn h3_lookup_url_encodes_endpoint_lookup_matrix() {
+        let base_url = url::Url::parse("https://dns.example.test:4433").expect("url");
+        let one = NonZeroUsize::new(1).unwrap();
+        let cases = [
+            (
+                EndpointLookup::default(),
+                "https://dns.example.test:4433/api/v2/lookup?host=demo.dhttp.net",
+            ),
+            (
+                EndpointLookup::exact(CertificateSequence::from(2u8)),
+                "https://dns.example.test:4433/api/v2/lookup?host=demo.dhttp.net&sequence=2",
+            ),
+            (
+                EndpointLookup::limit(one),
+                "https://dns.example.test:4433/api/v2/lookup?host=demo.dhttp.net&sequence_limit=1",
+            ),
+            (
+                EndpointLookup::all().with_record_limit(one),
+                "https://dns.example.test:4433/api/v2/lookup?host=demo.dhttp.net&sequence_limit=all&record_limit=1",
+            ),
+        ];
+
+        for (lookup, expected) in cases {
+            assert_eq!(
+                lookup_url(&base_url, "demo.dhttp.net", lookup).as_str(),
+                expected
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::{io, num::NonZeroUsize};
 
-use dhttp_identity::certificate::{CertificateChainKey, CertificateSequence};
+use dhttp_identity::certificate::{CertificateChainKey, CertificateChainKind, CertificateSequence};
 use dquic::{
     qbase::net::addr::EndpointAddr as DquicEndpointAddr,
     qresolve::{Resolve, Source},
@@ -68,6 +68,25 @@ impl EndpointLookup {
     }
 }
 
+pub(crate) fn append_endpoint_lookup_query(url: &mut url::Url, lookup: EndpointLookup) {
+    let mut pairs = url.query_pairs_mut();
+    match lookup.sequences {
+        SequenceQuery::Default => {}
+        SequenceQuery::Exact(sequence) => {
+            pairs.append_pair("sequence", &sequence.get().to_string());
+        }
+        SequenceQuery::Limit(limit) => {
+            pairs.append_pair("sequence_limit", &limit.get().to_string());
+        }
+        SequenceQuery::All => {
+            pairs.append_pair("sequence_limit", "all");
+        }
+    }
+    if let Some(limit) = lookup.record_limit {
+        pairs.append_pair("record_limit", &limit.get().to_string());
+    }
+}
+
 pub type EndpointCandidateFuture<'a> = BoxFuture<'a, io::Result<EndpointCandidates>>;
 
 pub trait ResolveEndpointCandidates: Resolve {
@@ -115,6 +134,9 @@ pub(crate) fn grouped_endpoint_candidates<T>(
     } in records
     {
         let chain_key = effective_chain_key(&record, fallback_chain_key);
+        if chain_key.kind() != CertificateChainKind::Primary {
+            continue;
+        }
         let Ok(endpoint) = DquicEndpointAddr::try_from(record) else {
             continue;
         };
@@ -206,6 +228,26 @@ mod tests {
         assert_eq!(groups[0].1.len(), 2);
         assert_eq!(groups[1].0.to_string(), "primary:1");
         assert_eq!(groups[1].1.len(), 1);
+    }
+
+    #[test]
+    fn grouping_ignores_secondary_records() {
+        let groups = grouped_endpoint_candidates([
+            TaggedEndpointCandidate {
+                tag: "secondary",
+                record: direct("192.0.2.20:4433", false, 1),
+                fallback_chain_key: None,
+            },
+            TaggedEndpointCandidate {
+                tag: "primary",
+                record: direct("192.0.2.10:4433", true, 2),
+                fallback_chain_key: None,
+            },
+        ]);
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0.to_string(), "primary:2");
+        assert_eq!(groups[0].1[0].0, "primary");
     }
 
     #[test]

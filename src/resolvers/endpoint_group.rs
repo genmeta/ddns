@@ -100,37 +100,33 @@ mod tests {
     }
 
     #[test]
-    fn selected_endpoint_addrs_uses_first_chain_key_group() {
+    fn selected_endpoint_addrs_uses_first_primary_chain_key_group() {
         let secondary = direct("192.0.2.20:4433", false, 0);
         let primary_a = direct("192.0.2.10:4433", true, 2);
         let primary_b = direct("192.0.2.11:4433", true, 2);
 
         let selected = super::selected_endpoint_addrs([secondary, primary_a, primary_b]);
 
-        assert_eq!(selected.len(), 1);
+        assert_eq!(selected.len(), 2);
         assert_eq!(
             selected[0],
-            dquic::qbase::net::addr::EndpointAddr::direct("192.0.2.20:4433".parse().unwrap())
+            dquic::qbase::net::addr::EndpointAddr::direct("192.0.2.10:4433".parse().unwrap())
+        );
+        assert_eq!(
+            selected[1],
+            dquic::qbase::net::addr::EndpointAddr::direct("192.0.2.11:4433".parse().unwrap())
         );
     }
 
     #[test]
-    fn selected_endpoint_addrs_uses_one_secondary_chain_key_group_when_no_primary_exists() {
+    fn selected_endpoint_addrs_returns_empty_when_no_primary_exists() {
         let secondary_a = direct("192.0.2.20:4433", false, 5);
         let secondary_b = direct("192.0.2.21:4433", false, 5);
         let other_secondary = direct("192.0.2.30:4433", false, 6);
 
         let selected = super::selected_endpoint_addrs([secondary_a, secondary_b, other_secondary]);
 
-        assert_eq!(selected.len(), 2);
-        assert_eq!(
-            selected[0],
-            dquic::qbase::net::addr::EndpointAddr::direct("192.0.2.20:4433".parse().unwrap())
-        );
-        assert_eq!(
-            selected[1],
-            dquic::qbase::net::addr::EndpointAddr::direct("192.0.2.21:4433".parse().unwrap())
-        );
+        assert!(selected.is_empty());
     }
 
     #[test]
