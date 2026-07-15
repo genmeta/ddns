@@ -558,6 +558,14 @@ pub(crate) fn be_endpoint_addr_compat(
     ];
 
     if legacy_lengths.contains(&(rdlen as usize)) {
+        // Modern records have variable length, so a valid modern encoding can
+        // legitimately be 12, 18, or 36 bytes as well. Prefer a complete
+        // modern parse and only fall back to the legacy layout when it fails.
+        if let Ok((remaining, endpoint)) = be_endpoint_addr(input)
+            && remaining.is_empty()
+        {
+            return Ok((remaining, endpoint));
+        }
         return be_legacy_endpoint_addr_by_length(input, rdlen);
     }
 
@@ -1022,6 +1030,33 @@ mod tests {
             let (remain, decoded) = be_endpoint_addr(&buf).unwrap();
             assert!(remain.is_empty());
             assert_eq!(decoded, ep);
+        }
+    }
+
+    #[test]
+    fn compat_parser_does_not_misclassify_modern_lengths_as_legacy() {
+        let mut direct = EndpointAddr::direct_v4("203.0.113.10:4433".parse().unwrap());
+        direct.set_main(true);
+        direct.set_sequence(CertificateSequence::try_from(10u32).unwrap());
+        direct.set_load(Some(1.0));
+
+        let mut nat = EndpointAddr::nat_v4(
+            "198.51.100.10:4433".parse().unwrap(),
+            "192.0.2.10:4433".parse().unwrap(),
+        );
+        nat.set_main(true);
+        nat.set_sequence(CertificateSequence::from(1u8));
+        nat.set_load(Some(2.0));
+
+        for endpoint in [direct, nat] {
+            let mut buf = BytesMut::new();
+            buf.put_endpoint_addr(&endpoint);
+            assert!([12, 18].contains(&buf.len()));
+
+            let (remaining, decoded) =
+                be_endpoint_addr_compat(&buf, u16::try_from(buf.len()).unwrap()).unwrap();
+            assert!(remaining.is_empty());
+            assert_eq!(decoded, endpoint);
         }
     }
 
