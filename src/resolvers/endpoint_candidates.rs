@@ -1,6 +1,6 @@
-use std::io;
+use std::{io, num::NonZeroUsize};
 
-use dhttp_identity::certificate::CertificateChainKey;
+use dhttp_identity::certificate::{CertificateChainKey, CertificateSequence};
 use dquic::{
     qbase::net::addr::EndpointAddr as DquicEndpointAddr,
     qresolve::{Resolve, Source},
@@ -21,10 +21,61 @@ pub struct EndpointCandidates {
     pub groups: Vec<EndpointCandidateGroup>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SequenceQuery {
+    #[default]
+    Default,
+    Exact(CertificateSequence),
+    Limit(NonZeroUsize),
+    All,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EndpointLookup {
+    pub sequences: SequenceQuery,
+    pub record_limit: Option<NonZeroUsize>,
+}
+
+impl EndpointLookup {
+    #[must_use]
+    pub fn exact(sequence: CertificateSequence) -> Self {
+        Self {
+            sequences: SequenceQuery::Exact(sequence),
+            record_limit: None,
+        }
+    }
+
+    #[must_use]
+    pub fn limit(count: NonZeroUsize) -> Self {
+        Self {
+            sequences: SequenceQuery::Limit(count),
+            record_limit: None,
+        }
+    }
+
+    #[must_use]
+    pub fn all() -> Self {
+        Self {
+            sequences: SequenceQuery::All,
+            record_limit: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_record_limit(mut self, count: NonZeroUsize) -> Self {
+        self.record_limit = Some(count);
+        self
+    }
+}
+
 pub type EndpointCandidateFuture<'a> = BoxFuture<'a, io::Result<EndpointCandidates>>;
 
 pub trait ResolveEndpointCandidates: Resolve {
-    fn lookup_endpoint_candidates<'a>(&'a self, name: &'a str) -> EndpointCandidateFuture<'a>;
+    fn lookup_endpoint_candidates<'a>(
+        &'a self,
+        name: &'a str,
+        lookup: EndpointLookup,
+    ) -> EndpointCandidateFuture<'a>;
 }
 
 pub type ArcEndpointCandidateResolver =
@@ -95,11 +146,32 @@ fn effective_chain_key(
 
 #[cfg(test)]
 mod tests {
-    use std::net::SocketAddrV4;
+    use std::{net::SocketAddrV4, num::NonZeroUsize};
 
     use dhttp_identity::certificate::{CertificateChainKind, CertificateSequence};
 
     use super::*;
+
+    #[test]
+    fn endpoint_lookup_constructors_encode_valid_states() {
+        let one = NonZeroUsize::new(1).unwrap();
+        let exact = CertificateSequence::from(2u8);
+
+        assert_eq!(EndpointLookup::default().sequences, SequenceQuery::Default);
+        assert_eq!(
+            EndpointLookup::exact(exact).sequences,
+            SequenceQuery::Exact(exact)
+        );
+        assert_eq!(
+            EndpointLookup::limit(one).sequences,
+            SequenceQuery::Limit(one)
+        );
+        assert_eq!(EndpointLookup::all().sequences, SequenceQuery::All);
+        assert_eq!(
+            EndpointLookup::all().with_record_limit(one).record_limit,
+            Some(one)
+        );
+    }
 
     fn direct(addr: &str, main: bool, sequence: u32) -> DnsEndpointAddr {
         let socket: SocketAddrV4 = addr.parse().expect("socket addr");

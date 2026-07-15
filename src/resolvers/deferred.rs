@@ -5,7 +5,9 @@ use futures::{FutureExt, future::BoxFuture};
 use snafu::{ResultExt, Snafu};
 use tokio::sync::{Notify, OnceCell};
 
-use crate::resolvers::endpoint_candidates::{EndpointCandidateFuture, ResolveEndpointCandidates};
+use crate::resolvers::endpoint_candidates::{
+    EndpointCandidateFuture, EndpointLookup, ResolveEndpointCandidates,
+};
 
 #[derive(Debug, Snafu)]
 #[snafu(module, visibility(pub))]
@@ -124,8 +126,18 @@ impl<R> ResolveEndpointCandidates for DeferredResolver<R>
 where
     R: ResolveEndpointCandidates + 'static,
 {
-    fn lookup_endpoint_candidates<'a>(&'a self, name: &'a str) -> EndpointCandidateFuture<'a> {
-        async move { self.wait().await.lookup_endpoint_candidates(name).await }.boxed()
+    fn lookup_endpoint_candidates<'a>(
+        &'a self,
+        name: &'a str,
+        lookup: EndpointLookup,
+    ) -> EndpointCandidateFuture<'a> {
+        async move {
+            self.wait()
+                .await
+                .lookup_endpoint_candidates(name, lookup)
+                .await
+        }
+        .boxed()
     }
 }
 

@@ -361,6 +361,7 @@ impl crate::resolvers::endpoint_candidates::ResolveEndpointCandidates for MdnsRe
     fn lookup_endpoint_candidates<'a>(
         &'a self,
         name: &'a str,
+        _lookup: crate::resolvers::endpoint_candidates::EndpointLookup,
     ) -> crate::resolvers::endpoint_candidates::EndpointCandidateFuture<'a> {
         Box::pin(async move {
             let Some((domain, _sequence)) =

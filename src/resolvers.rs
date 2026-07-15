@@ -356,6 +356,7 @@ impl Resolvers {
     pub async fn lookup_endpoint_candidates(
         &self,
         name: &str,
+        lookup: crate::resolvers::endpoint_candidates::EndpointLookup,
     ) -> Result<crate::resolvers::endpoint_candidates::EndpointCandidates, ResolversError> {
         let mut errors = vec![];
         let mut groups = Vec::new();
@@ -369,7 +370,10 @@ impl Resolvers {
                 continue;
             };
 
-            match candidate_resolver.lookup_endpoint_candidates(name).await {
+            match candidate_resolver
+                .lookup_endpoint_candidates(name, lookup)
+                .await
+            {
                 Ok(candidates) => groups.extend(candidates.groups),
                 Err(error) => errors.push((entry.resolver.to_string(), error)),
             }
@@ -413,9 +417,10 @@ impl crate::resolvers::endpoint_candidates::ResolveEndpointCandidates for Resolv
     fn lookup_endpoint_candidates<'a>(
         &'a self,
         name: &'a str,
+        lookup: crate::resolvers::endpoint_candidates::EndpointLookup,
     ) -> crate::resolvers::endpoint_candidates::EndpointCandidateFuture<'a> {
         async move {
-            Resolvers::lookup_endpoint_candidates(self, name)
+            Resolvers::lookup_endpoint_candidates(self, name, lookup)
                 .await
                 .map_err(io::Error::other)
         }
@@ -589,6 +594,7 @@ mod tests {
         fn lookup_endpoint_candidates<'a>(
             &'a self,
             _name: &'a str,
+            _lookup: crate::resolvers::endpoint_candidates::EndpointLookup,
         ) -> crate::resolvers::endpoint_candidates::EndpointCandidateFuture<'a> {
             use dhttp_identity::certificate::{
                 CertificateChainKey, CertificateChainKind, CertificateSequence,
@@ -629,7 +635,10 @@ mod tests {
             }));
 
         let candidates = resolvers
-            .lookup_endpoint_candidates("demo.dhttp.net")
+            .lookup_endpoint_candidates(
+                "demo.dhttp.net",
+                crate::resolvers::endpoint_candidates::EndpointLookup::default(),
+            )
             .await
             .expect("candidate lookup succeeds");
 
