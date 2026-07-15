@@ -68,6 +68,7 @@ impl EndpointLookup {
     }
 }
 
+#[cfg(any(feature = "h3", feature = "http"))]
 pub(crate) fn append_endpoint_lookup_query(url: &mut url::Url, lookup: EndpointLookup) {
     let mut pairs = url.query_pairs_mut();
     match lookup.sequences {
@@ -87,6 +88,7 @@ pub(crate) fn append_endpoint_lookup_query(url: &mut url::Url, lookup: EndpointL
     }
 }
 
+#[cfg(any(feature = "h3", feature = "http", test))]
 pub(crate) fn select_group_pairs<T>(
     groups: Vec<(CertificateChainKey, T)>,
     query: SequenceQuery,
