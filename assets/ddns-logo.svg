@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="139" height="48" viewBox="0 0 139 48" role="img" aria-labelledby="title description">
+  <title id="title">DDns</title>
+  <desc id="description">DDns wordmark with five equal endpoints forming a decentralized D</desc>
+
+  <rect width="48" height="48" rx="4" fill="#171717"/>
+  <path d="M14 11V37H22C32.5 37 38 32 38 24C38 16 32.5 11 22 11H14Z"
+        fill="none" stroke="#ffffff" stroke-width="3.2"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <g fill="#ffffff">
+    <circle cx="14" cy="11" r="2.8"/>
+    <circle cx="14" cy="37" r="2.8"/>
+    <circle cx="31" cy="13.8" r="2.8"/>
+    <circle cx="38" cy="24" r="2.8"/>
+    <circle cx="31" cy="34.2" r="2.8"/>
+  </g>
+
+  <text x="55" y="36" fill="#171717"
+        font-family="Arial, Helvetica, sans-serif"
+        font-size="37" font-weight="700">Dns</text>
+</svg>
