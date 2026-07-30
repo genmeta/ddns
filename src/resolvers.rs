@@ -65,8 +65,8 @@ pub(crate) fn endpoint_lookup_name_and_sequence(
 /// Default DNS-over-H3 server for DHTTP endpoints.
 pub const DHTTP_H3_DNS_SERVER: &str = crate::bootstrap::DHTTP_H3_DNS_SERVER;
 
-/// Default DNS-over-HTTP server for DHTTP endpoints.
-pub const DHTTP_HTTP_DNS_SERVER: &str = crate::bootstrap::DHTTP_HTTP_DNS_SERVER;
+/// Default bootstrap service URL for DHTTP endpoints.
+pub const DHTTP_BOOTSTRAP_URL: &str = crate::bootstrap::DHTTP_BOOTSTRAP_URL;
 
 /// mDNS service type used by DHTTP endpoints.
 pub const DHTTP_MDNS_SERVICE: &str = crate::bootstrap::DHTTP_MDNS_SERVICE;
@@ -284,7 +284,7 @@ impl ResolversBuilder {
 
     #[cfg(feature = "http")]
     pub fn http(self) -> io::Result<Self> {
-        self.http_with_base_url(DHTTP_HTTP_DNS_SERVER)
+        self.http_with_base_url(DHTTP_BOOTSTRAP_URL)
     }
 
     #[cfg(feature = "http")]
@@ -470,7 +470,7 @@ mod tests {
     use super::MdnsResolvers;
     #[cfg(feature = "resolvers")]
     use super::Resolvers;
-    use super::{DHTTP_H3_DNS_SERVER, DHTTP_HTTP_DNS_SERVER, DHTTP_MDNS_SERVICE, resolvable_name};
+    use super::{DHTTP_BOOTSTRAP_URL, DHTTP_H3_DNS_SERVER, DHTTP_MDNS_SERVICE, resolvable_name};
     #[cfg(feature = "resolvers")]
     use super::{DnsScheme, ResolversError};
 
@@ -529,8 +529,8 @@ mod tests {
         if let Some(expected) = option_env!("DHTTP_H3_DNS_SERVER") {
             assert_eq!(DHTTP_H3_DNS_SERVER, expected);
         }
-        if let Some(expected) = option_env!("DHTTP_HTTP_DNS_SERVER") {
-            assert_eq!(DHTTP_HTTP_DNS_SERVER, expected);
+        if let Some(expected) = option_env!("DHTTP_BOOTSTRAP_URL") {
+            assert_eq!(DHTTP_BOOTSTRAP_URL, expected);
         }
         if let Some(expected) = option_env!("DHTTP_MDNS_SERVICE") {
             assert_eq!(DHTTP_MDNS_SERVICE, expected);
