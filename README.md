@@ -45,11 +45,11 @@ The aggregate `Resolvers` and endpoint-publication helper types are separately g
 
 | Environment variable | Public constant | Fallback when unset |
 | --- | --- | --- |
-| `DHTTP_H3_DNS_SERVER` | `DHTTP_H3_DNS_SERVER` | `https://dhttp.example.net` |
-| `DHTTP_HTTP_DNS_SERVER` | `DHTTP_HTTP_DNS_SERVER` | `https://dhttp.example.net` |
-| `DHTTP_MDNS_SERVICE` | `DHTTP_MDNS_SERVICE` | `dhttp.example.net` |
+| `DHTTP_BOOTSTRAP_URL` | `DHTTP_BOOTSTRAP_URL` | `https://bootstrap.genmeta.net:20002` |
+| `DHTTP_H3_DNS_SERVER` | `DHTTP_H3_DNS_SERVER` | `https://ddns.genmeta.net:4433` |
+| `DHTTP_MDNS_SERVICE` | `DHTTP_MDNS_SERVICE` | `_dhttp.local` |
 
-The fallbacks are docs/build placeholders, not operational defaults.
+These production fallbacks are used when the corresponding compile-time environment variables are unset.
 
 ## Quick start
 
