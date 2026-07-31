@@ -364,8 +364,14 @@ mod tests {
             calls: AtomicUsize::new(0),
             authority,
         });
-        let pattern = h3x::dquic::binds::BindPattern::from_str("iface://v4.lo:0")
-            .expect("valid loopback pattern");
+        let loopback_iface = if cfg!(target_os = "macos") {
+            "lo0"
+        } else {
+            "lo"
+        };
+        let pattern =
+            h3x::dquic::binds::BindPattern::from_str(&format!("iface://v4.{loopback_iface}:0"))
+                .expect("valid loopback pattern");
         let resolvers = Arc::new(
             crate::mdns::MdnsResolvers::bind(
                 h3x::dquic::Network::builder().build(),
@@ -376,7 +382,7 @@ mod tests {
         );
         let publisher = Publisher::mdns(resolvers.clone(), provider.clone());
         let view = crate::publishers::PublishAddresses::new().local_link(
-            "lo",
+            loopback_iface,
             Family::V4,
             [endpoint([127, 0, 0, 1], 4433)],
         );
