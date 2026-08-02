@@ -366,8 +366,7 @@ impl Resolve for HttpResolver {
                 .into_iter()
                 .find(|(chain_key, _)| match sequence {
                     Some(sequence) => {
-                        chain_key.kind()
-                            == dhttp_identity::certificate::CertificateChainKind::Primary
+                        crate::core::certificate::is_primary_chain_key(chain_key)
                             && chain_key.sequence() == sequence
                     }
                     None => true,
@@ -496,8 +495,10 @@ mod tests {
             .expect("candidate groups decode");
 
         assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].0.to_string(), "primary:0");
-        assert_eq!(groups[1].0.to_string(), "primary:1");
+        assert_eq!(groups[0].0.usage().kind_flag(), "0");
+        assert_eq!(groups[0].0.sequence().get(), 0);
+        assert_eq!(groups[1].0.usage().kind_flag(), "0");
+        assert_eq!(groups[1].0.sequence().get(), 1);
     }
 
     #[test]

@@ -617,9 +617,7 @@ mod tests {
             _name: &'a str,
             _lookup: crate::resolvers::endpoint_candidates::EndpointLookup,
         ) -> crate::resolvers::endpoint_candidates::EndpointCandidateFuture<'a> {
-            use dhttp_identity::certificate::{
-                CertificateChainKey, CertificateChainKind, CertificateSequence,
-            };
+            use dhttp_identity::certificate::CertificateSequence;
             use dquic::qresolve::Source;
             use futures::FutureExt;
 
@@ -628,9 +626,8 @@ mod tests {
                 Ok(crate::resolvers::endpoint_candidates::EndpointCandidates {
                     groups: vec![
                         crate::resolvers::endpoint_candidates::EndpointCandidateGroup {
-                            chain: CertificateChainKey::new(
+                            chain: crate::core::certificate::primary_chain_key(
                                 CertificateSequence::from(sequence),
-                                CertificateChainKind::Primary,
                             ),
                             endpoints: Vec::new(),
                             sources: vec![Source::Dht],
@@ -664,8 +661,10 @@ mod tests {
             .expect("candidate lookup succeeds");
 
         assert_eq!(candidates.groups.len(), 2);
-        assert_eq!(candidates.groups[0].chain.to_string(), "primary:1");
-        assert_eq!(candidates.groups[1].chain.to_string(), "primary:0");
+        assert_eq!(candidates.groups[0].chain.usage().kind_flag(), "0");
+        assert_eq!(candidates.groups[0].chain.sequence().get(), 1);
+        assert_eq!(candidates.groups[1].chain.usage().kind_flag(), "0");
+        assert_eq!(candidates.groups[1].chain.sequence().get(), 0);
     }
 
     #[cfg(feature = "resolvers")]
@@ -697,9 +696,7 @@ mod tests {
             _name: &'a str,
             _lookup: crate::resolvers::endpoint_candidates::EndpointLookup,
         ) -> crate::resolvers::endpoint_candidates::EndpointCandidateFuture<'a> {
-            use dhttp_identity::certificate::{
-                CertificateChainKey, CertificateChainKind, CertificateSequence,
-            };
+            use dhttp_identity::certificate::CertificateSequence;
             use futures::FutureExt;
 
             let groups = self
@@ -707,9 +704,8 @@ mod tests {
                 .iter()
                 .map(|(sequence, endpoint, source)| {
                     crate::resolvers::endpoint_candidates::EndpointCandidateGroup {
-                        chain: CertificateChainKey::new(
+                        chain: crate::core::certificate::primary_chain_key(
                             CertificateSequence::from(*sequence),
-                            CertificateChainKind::Primary,
                         ),
                         endpoints: vec![dquic::qbase::net::addr::EndpointAddr::direct(
                             endpoint.parse().unwrap(),

@@ -1,3 +1,4 @@
+pub(crate) mod certificate;
 pub mod parser;
 pub mod signature;
 pub mod wire;

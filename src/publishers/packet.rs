@@ -1,9 +1,6 @@
 use std::collections::HashMap;
 
-use dhttp_identity::{
-    certificate::CertificateChainKind,
-    identity::{LocalAuthority, LocalAuthorityCertificateExt},
-};
+use dhttp_identity::identity::{LocalAuthority, LocalAuthorityCertificateExt};
 use dquic::qbase::net::addr::EndpointAddr;
 use snafu::{ResultExt, Snafu, ensure};
 
@@ -50,7 +47,7 @@ pub(crate) fn dns_endpoints_for_authority(
     }
 
     ensure!(
-        encoded.is_empty() || chain.kind() == CertificateChainKind::Primary,
+        encoded.is_empty() || crate::core::certificate::is_primary_chain_key(chain),
         encode_authority_dns_packet_error::SecondaryAuthoritySnafu
     );
 
@@ -116,11 +113,8 @@ mod tests {
         }
     }
 
-    fn authority_with_chain(
-        name: &'static str,
-        sequence: u8,
-        kind: dhttp_identity::certificate::CertificateChainKind,
-    ) -> TestAuthority {
+    fn authority_with_chain(name: &'static str, sequence: u8, kind_flag: u8) -> TestAuthority {
+        assert!(kind_flag <= 1, "certificate kind flag must be 0 or 1");
         let mut certificate = include_bytes!("../../tests/fixtures/valid.der").to_vec();
         let marker = b"0:0:0123456789abcdef";
         let offset = certificate
@@ -128,10 +122,7 @@ mod tests {
             .position(|window| window == marker)
             .expect("fixture contains dhttp subject key identifier");
         certificate[offset] = b'0' + sequence;
-        certificate[offset + 2] = match kind {
-            dhttp_identity::certificate::CertificateChainKind::Primary => b'0',
-            dhttp_identity::certificate::CertificateChainKind::Secondary => b'1',
-        };
+        certificate[offset + 2] = b'0' + kind_flag;
         TestAuthority {
             name,
             cert_chain: vec![CertificateDer::from(certificate)],
@@ -199,11 +190,7 @@ mod tests {
 
     #[test]
     fn dns_endpoints_for_primary_authority_stamp_sequence_metadata() {
-        let authority = authority_with_chain(
-            "client.example.com.dhttp.net",
-            7,
-            dhttp_identity::certificate::CertificateChainKind::Primary,
-        );
+        let authority = authority_with_chain("client.example.com.dhttp.net", 7, 0);
         let mut endpoints = std::iter::once(endpoint());
 
         let encoded =
@@ -217,11 +204,7 @@ mod tests {
 
     #[test]
     fn dns_endpoints_for_secondary_authority_reject_non_empty_publication() {
-        let authority = authority_with_chain(
-            "client.example.com.dhttp.net",
-            7,
-            dhttp_identity::certificate::CertificateChainKind::Secondary,
-        );
+        let authority = authority_with_chain("client.example.com.dhttp.net", 7, 1);
         let mut endpoints = std::iter::once(endpoint());
 
         let error =
@@ -236,11 +219,7 @@ mod tests {
 
     #[test]
     fn dns_endpoints_for_secondary_authority_allows_empty_clear() {
-        let authority = authority_with_chain(
-            "client.example.com.dhttp.net",
-            7,
-            dhttp_identity::certificate::CertificateChainKind::Secondary,
-        );
+        let authority = authority_with_chain("client.example.com.dhttp.net", 7, 1);
         let mut endpoints = std::iter::empty();
 
         let encoded =

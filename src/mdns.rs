@@ -488,9 +488,7 @@ impl Resolve for MdnsResolvers {
 mod tests {
     use std::num::NonZeroUsize;
 
-    use dhttp_identity::certificate::{
-        CertificateChainKey, CertificateChainKind, CertificateSequence,
-    };
+    use dhttp_identity::certificate::CertificateSequence;
 
     use super::*;
     use crate::resolvers::endpoint_candidates::{
@@ -499,10 +497,7 @@ mod tests {
 
     fn group(sequence: u8) -> EndpointCandidateGroup {
         EndpointCandidateGroup {
-            chain: CertificateChainKey::new(
-                CertificateSequence::from(sequence),
-                CertificateChainKind::Primary,
-            ),
+            chain: crate::core::certificate::primary_chain_key(CertificateSequence::from(sequence)),
             endpoints: Vec::new(),
             sources: Vec::new(),
         }
