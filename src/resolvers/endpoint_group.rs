@@ -1,4 +1,4 @@
-use dhttp_identity::certificate::{CertificateChainKey, CertificateChainKind, CertificateSequence};
+use dhttp_identity::certificate::{CertificateChainKey, CertificateSequence};
 use dquic::qbase::net::addr::EndpointAddr as DquicEndpointAddr;
 
 use crate::core::parser::record::endpoint::EndpointAddr as DnsEndpointAddr;
@@ -67,7 +67,7 @@ pub(crate) fn selected_endpoint_records_with_fallback_chain_keys<T>(
         return groups
             .into_iter()
             .find(|(chain_key, _)| {
-                chain_key.kind() == CertificateChainKind::Primary
+                crate::core::certificate::is_primary_chain_key(chain_key)
                     && chain_key.sequence() == sequence
             })
             .map(|(_, endpoints)| endpoints)
@@ -83,9 +83,7 @@ pub(crate) fn selected_endpoint_records_with_fallback_chain_keys<T>(
 
 #[cfg(test)]
 mod tests {
-    use dhttp_identity::certificate::{
-        CertificateChainKey, CertificateChainKind, CertificateSequence,
-    };
+    use dhttp_identity::certificate::CertificateSequence;
 
     use crate::core::parser::record::endpoint::EndpointAddr;
 
@@ -201,9 +199,8 @@ mod tests {
             [(
                 "wifi",
                 endpoint,
-                Some(CertificateChainKey::new(
+                Some(crate::core::certificate::primary_chain_key(
                     CertificateSequence::from(1u8),
-                    CertificateChainKind::Primary,
                 )),
             )],
             Some(CertificateSequence::from(1u8)),

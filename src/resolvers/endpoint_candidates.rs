@@ -1,6 +1,6 @@
 use std::{io, num::NonZeroUsize};
 
-use dhttp_identity::certificate::{CertificateChainKey, CertificateChainKind, CertificateSequence};
+use dhttp_identity::certificate::{CertificateChainKey, CertificateSequence};
 use dquic::{
     qbase::net::addr::EndpointAddr as DquicEndpointAddr,
     qresolve::{Resolve, Source},
@@ -151,7 +151,7 @@ pub(crate) fn grouped_endpoint_candidates<T>(
     } in records
     {
         let chain_key = effective_chain_key(&record, fallback_chain_key);
-        if chain_key.kind() != CertificateChainKind::Primary {
+        if !crate::core::certificate::is_primary_chain_key(&chain_key) {
             continue;
         }
         let Ok(endpoint) = DquicEndpointAddr::try_from(record) else {
@@ -187,7 +187,7 @@ fn effective_chain_key(
 mod tests {
     use std::{net::SocketAddrV4, num::NonZeroUsize};
 
-    use dhttp_identity::certificate::{CertificateChainKind, CertificateSequence};
+    use dhttp_identity::certificate::CertificateSequence;
 
     use super::*;
 
@@ -241,9 +241,11 @@ mod tests {
         ]);
 
         assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].0.to_string(), "primary:2");
+        assert_eq!(groups[0].0.usage().kind_flag(), "0");
+        assert_eq!(groups[0].0.sequence().get(), 2);
         assert_eq!(groups[0].1.len(), 2);
-        assert_eq!(groups[1].0.to_string(), "primary:1");
+        assert_eq!(groups[1].0.usage().kind_flag(), "0");
+        assert_eq!(groups[1].0.sequence().get(), 1);
         assert_eq!(groups[1].1.len(), 1);
     }
 
@@ -263,7 +265,8 @@ mod tests {
         ]);
 
         assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].0.to_string(), "primary:2");
+        assert_eq!(groups[0].0.usage().kind_flag(), "0");
+        assert_eq!(groups[0].0.sequence().get(), 2);
         assert_eq!(groups[0].1[0].0, "primary");
     }
 
@@ -272,24 +275,15 @@ mod tests {
         let pairs = || {
             vec![
                 (
-                    CertificateChainKey::new(
-                        CertificateSequence::from(2u8),
-                        CertificateChainKind::Primary,
-                    ),
+                    crate::core::certificate::primary_chain_key(CertificateSequence::from(2u8)),
                     "two",
                 ),
                 (
-                    CertificateChainKey::new(
-                        CertificateSequence::from(1u8),
-                        CertificateChainKind::Primary,
-                    ),
+                    crate::core::certificate::primary_chain_key(CertificateSequence::from(1u8)),
                     "one",
                 ),
                 (
-                    CertificateChainKey::new(
-                        CertificateSequence::from(3u8),
-                        CertificateChainKind::Primary,
-                    ),
+                    crate::core::certificate::primary_chain_key(CertificateSequence::from(3u8)),
                     "three",
                 ),
             ]
@@ -301,10 +295,7 @@ mod tests {
                 SequenceQuery::Exact(CertificateSequence::from(1u8)),
             ),
             vec![(
-                CertificateChainKey::new(
-                    CertificateSequence::from(1u8),
-                    CertificateChainKind::Primary,
-                ),
+                crate::core::certificate::primary_chain_key(CertificateSequence::from(1u8)),
                 "one",
             )]
         );
@@ -323,14 +314,14 @@ mod tests {
         let groups = grouped_endpoint_candidates([TaggedEndpointCandidate {
             tag: "h3",
             record: endpoint,
-            fallback_chain_key: Some(CertificateChainKey::new(
+            fallback_chain_key: Some(crate::core::certificate::primary_chain_key(
                 CertificateSequence::from(3u8),
-                CertificateChainKind::Primary,
             )),
         }]);
 
         assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].0.to_string(), "primary:3");
+        assert_eq!(groups[0].0.usage().kind_flag(), "0");
+        assert_eq!(groups[0].0.sequence().get(), 3);
         assert_eq!(groups[0].1[0].0, "h3");
     }
 }

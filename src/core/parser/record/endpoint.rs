@@ -8,7 +8,7 @@ use std::{
 
 use base64::Engine;
 use bytes::BufMut;
-use dhttp_identity::certificate::{CertificateChainKey, CertificateChainKind, CertificateSequence};
+use dhttp_identity::certificate::{CertificateChainKey, CertificateSequence};
 use dquic::qbase::net::addr::EndpointAddr as DquicEndpointAddr;
 use nom::{
     IResult, Parser,
@@ -387,12 +387,11 @@ impl EndpointAddr {
     }
 
     pub fn certificate_chain_key(&self) -> CertificateChainKey {
-        let kind = if self.is_main() {
-            CertificateChainKind::Primary
+        if self.is_main() {
+            crate::core::certificate::primary_chain_key(self.normalized_sequence())
         } else {
-            CertificateChainKind::Secondary
-        };
-        CertificateChainKey::new(self.normalized_sequence(), kind)
+            crate::core::certificate::secondary_chain_key(self.normalized_sequence())
+        }
     }
 
     pub fn load(&self) -> Option<f32> {
@@ -826,12 +825,8 @@ mod tests {
 
         let key = endpoint.certificate_chain_key();
 
-        assert_eq!(
-            key.kind(),
-            dhttp_identity::certificate::CertificateChainKind::Primary
-        );
+        assert_eq!(key.usage().kind_flag(), "0");
         assert_eq!(key.sequence().get(), 0);
-        assert_eq!(key.to_string(), "primary:0");
     }
 
     #[test]
@@ -844,12 +839,8 @@ mod tests {
 
         let key = endpoint.certificate_chain_key();
 
-        assert_eq!(
-            key.kind(),
-            dhttp_identity::certificate::CertificateChainKind::Secondary
-        );
+        assert_eq!(key.usage().kind_flag(), "1");
         assert_eq!(key.sequence().get(), 7);
-        assert_eq!(key.to_string(), "secondary:7");
     }
 
     #[test]
