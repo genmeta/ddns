@@ -2,7 +2,7 @@
 mod address;
 #[cfg(feature = "publishers")]
 mod aggregate;
-#[cfg(feature = "publishers")]
+#[cfg(any(feature = "publishers", feature = "h3"))]
 pub(crate) mod packet;
 #[cfg(feature = "publishers")]
 mod publisher;

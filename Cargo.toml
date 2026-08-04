@@ -75,7 +75,7 @@ h3 = [
     "dep:http-body-util",
     "dep:url",
 ]
-http = ["dep:dashmap", "dep:reqwest", "dep:rustls-native-certs"]
+http = ["dep:dashmap", "dep:reqwest", "dep:rustls-native-certs", "dep:url"]
 mdns = ["dep:dashmap", "dep:flume", "dep:libc", "dep:socket2"]
 
 [dev-dependencies]
