@@ -17,8 +17,8 @@ pub(crate) fn is_primary_chain_key(chain_key: &CertificateChainKey) -> bool {
 
 fn chain_key(sequence: CertificateSequence, kind_flag: &str) -> CertificateChainKey {
     let usage = match kind_flag {
-        "0" => CertificateUsage::ClientOnly,
-        "1" => CertificateUsage::ClientAndServer,
+        "0" => CertificateUsage::ClientAndServer,
+        "1" => CertificateUsage::ClientOnly,
         _ => unreachable!("unsupported certificate kind flag"),
     };
     CertificateChainKey::new(sequence, usage)

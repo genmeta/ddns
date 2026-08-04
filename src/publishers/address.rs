@@ -12,7 +12,7 @@ use h3x::dquic::{
     Network,
     binds::BindPattern,
     net::{BindInterface, BindUri, IO, Scheme},
-    qtraversal::nat::client::{NatType, StunClientsComponent},
+    qtraversal::nat::client::{NatType, StunClientComponent},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -326,12 +326,11 @@ fn stun_endpoints_from_iface(iface: &BindInterface) -> Vec<EndpointAddr> {
         let bind_uri = current.bind_uri();
         let bound_addr = current.bound_addr().ok();
         let endpoints: Vec<EndpointAddr> = components
-            .get::<StunClientsComponent>()
+            .get::<StunClientComponent>()
             .map(|stun| {
-                stun.with_clients(|clients| {
-                    clients
-                        .values()
-                        .filter_map(|client| {
+                stun.with_client(|client| {
+                    client
+                        .and_then(|client| {
                             let outer = client.get_outer_addr()?.ok()?;
                             match client.get_nat_type() {
                                 Some(Ok(nat_type)) => Some(publish_endpoint_from_stun(
@@ -343,6 +342,7 @@ fn stun_endpoints_from_iface(iface: &BindInterface) -> Vec<EndpointAddr> {
                                 Some(Err(_)) => None,
                             }
                         })
+                        .into_iter()
                         .collect()
                 })
             })
