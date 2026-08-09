@@ -8,6 +8,27 @@ use snafu::IntoError;
 
 use super::{H3RequestError, H3Resolver, h3_request_error};
 
+fn request_authority(uri: &http::Uri) -> http::uri::Authority {
+    let authority = uri
+        .authority()
+        .expect("h3 dns request URL must include an authority");
+    if authority.port_u16().is_some() {
+        return authority.clone();
+    }
+
+    let default_port = match uri.scheme_str() {
+        Some("http") => Some(80),
+        Some("https") => Some(443),
+        _ => None,
+    };
+    match default_port {
+        Some(port) => format!("{authority}:{port}")
+            .parse()
+            .expect("a valid authority with a default port remains valid"),
+        None => authority.clone(),
+    }
+}
+
 impl<C> H3Resolver<C>
 where
     C: quic::Connect + quic::WithLocalAuthority + Send + Sync + 'static,
@@ -42,11 +63,7 @@ where
         http::Response<impl http_body::Body<Data = bytes::Bytes, Error = MessageStreamError>>,
         H3RequestError<C::Error>,
     > {
-        let authority = request
-            .uri()
-            .authority()
-            .expect("h3 dns request URL must include an authority")
-            .clone();
+        let authority = request_authority(request.uri());
         tracing::trace!(%authority, "connecting h3 dns endpoint");
         let connection = match self.endpoint.connect(authority.clone()).await {
             Ok(connection) => {
@@ -69,5 +86,33 @@ where
             }
             Err(source) => Err(self.request_error(source)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::request_authority;
+
+    #[test]
+    fn request_authority_applies_http_and_https_default_ports() {
+        let http: http::Uri = "http://dns.example.test/api".parse().unwrap();
+        let https: http::Uri = "https://dns.example.test/api".parse().unwrap();
+
+        assert_eq!(request_authority(&http).as_str(), "dns.example.test:80");
+        assert_eq!(request_authority(&https).as_str(), "dns.example.test:443");
+    }
+
+    #[test]
+    fn request_authority_preserves_explicit_port() {
+        let uri: http::Uri = "https://dns.example.test:8443/api".parse().unwrap();
+
+        assert_eq!(request_authority(&uri).as_str(), "dns.example.test:8443");
+    }
+
+    #[test]
+    fn request_authority_formats_ipv6_with_default_port() {
+        let uri: http::Uri = "https://[2001:db8::1]/api".parse().unwrap();
+
+        assert_eq!(request_authority(&uri).as_str(), "[2001:db8::1]:443");
     }
 }
