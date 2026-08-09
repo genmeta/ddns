@@ -37,7 +37,7 @@ impl MdnsSocket {
         let socket = match ip {
             #[cfg_attr(
                 not(any(target_os = "android", target_os = "fuchsia", target_os = "linux")),
-                allow(clippy::unused_variables)
+                allow(unused_variables)
             )]
             IpAddr::V4(ip) => {
                 let socket = Socket::new(Domain::IPV4, Type::DGRAM, None)?;
