@@ -225,7 +225,7 @@ impl EndpointBindingAddressView {
                 continue;
             };
             for iface in ifaces {
-                bindings.push(BindingAddress::new(pattern.clone(), iface));
+                bindings.push(BindingAddress::new(&network, pattern.clone(), iface));
             }
         }
         Self { bindings }
@@ -252,31 +252,43 @@ struct BindingAddress {
     pattern: BindPattern,
     bind_uri: BindUri,
     iface: BindInterface,
+    wide_area_egress: bool,
     wide_area: OnceLock<Vec<EndpointAddr>>,
     local_link: OnceLock<Vec<EndpointAddr>>,
 }
 
 #[cfg(feature = "dquic-network")]
 impl BindingAddress {
-    fn new(pattern: BindPattern, iface: BindInterface) -> Self {
+    fn new(network: &Network, pattern: BindPattern, iface: BindInterface) -> Self {
         let bind_uri = iface.bind_uri();
+        let bound_addr = iface.borrow().bound_addr().ok();
+        let wide_area_egress = bound_addr.is_some_and(|bound_addr| {
+            network.bound_addr_is_on_default_route(&bind_uri, bound_addr)
+        });
+        if !wide_area_egress {
+            tracing::trace!(
+                %bind_uri,
+                ?bound_addr,
+                "excluding non-default binding from wide-area publication"
+            );
+        }
         Self {
             pattern,
             bind_uri,
             iface,
+            wide_area_egress,
             wide_area: OnceLock::new(),
             local_link: OnceLock::new(),
         }
     }
 
     fn may_match(&self, selector: AddressSelector<'_>) -> bool {
-        match selector {
-            AddressSelector::WideArea => true,
-            AddressSelector::LocalLink { device, family } => {
-                pattern_may_match_local_link(&self.pattern, device, family)
-                    && bind_uri_matches_local_link(&self.bind_uri, device, family)
-            }
-        }
+        selector_may_match_binding(
+            selector,
+            self.wide_area_egress,
+            &self.pattern,
+            &self.bind_uri,
+        )
     }
 
     fn endpoints<'a>(
@@ -292,6 +304,22 @@ impl BindingAddress {
                 .get_or_init(|| local_endpoints_from_iface(&self.iface, family)),
         };
         endpoints.iter().copied()
+    }
+}
+
+#[cfg(feature = "dquic-network")]
+fn selector_may_match_binding(
+    selector: AddressSelector<'_>,
+    wide_area_egress: bool,
+    pattern: &BindPattern,
+    bind_uri: &BindUri,
+) -> bool {
+    match selector {
+        AddressSelector::WideArea => wide_area_egress,
+        AddressSelector::LocalLink { device, family } => {
+            pattern_may_match_local_link(pattern, device, family)
+                && bind_uri_matches_local_link(bind_uri, device, family)
+        }
     }
 }
 
@@ -493,5 +521,42 @@ mod tests {
         let endpoint = publish_endpoint_from_stun(agent, outer, NatType::RestrictedCone);
 
         assert_eq!(endpoint, EndpointAddr::with_agent(agent, outer));
+    }
+
+    #[cfg(feature = "dquic-network")]
+    #[test]
+    fn wide_area_selector_requires_default_route_egress() {
+        let pattern: BindPattern = "iface://v4.*:0".parse().expect("valid bind pattern");
+        let bind_uri: BindUri = "iface://v4.docker0:0".parse().expect("valid bind URI");
+
+        assert!(!selector_may_match_binding(
+            AddressSelector::WideArea,
+            false,
+            &pattern,
+            &bind_uri,
+        ));
+        assert!(selector_may_match_binding(
+            AddressSelector::WideArea,
+            true,
+            &pattern,
+            &bind_uri,
+        ));
+    }
+
+    #[cfg(feature = "dquic-network")]
+    #[test]
+    fn local_link_selector_does_not_require_default_route_egress() {
+        let pattern: BindPattern = "iface://v4.*:0".parse().expect("valid bind pattern");
+        let bind_uri: BindUri = "iface://v4.docker0:0".parse().expect("valid bind URI");
+
+        assert!(selector_may_match_binding(
+            AddressSelector::LocalLink {
+                device: "docker0",
+                family: Family::V4,
+            },
+            false,
+            &pattern,
+            &bind_uri,
+        ));
     }
 }
