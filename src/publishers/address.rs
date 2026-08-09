@@ -262,9 +262,10 @@ impl BindingAddress {
     fn new(network: &Network, pattern: BindPattern, iface: BindInterface) -> Self {
         let bind_uri = iface.bind_uri();
         let bound_addr = iface.borrow().bound_addr().ok();
-        let wide_area_egress = bound_addr.is_some_and(|bound_addr| {
+        let default_route_egress = bound_addr.is_some_and(|bound_addr| {
             network.bound_addr_is_on_default_route(&bind_uri, bound_addr)
         });
+        let wide_area_egress = wide_area_egress_allowed(&pattern, default_route_egress);
         if !wide_area_egress {
             tracing::trace!(
                 %bind_uri,
@@ -305,6 +306,13 @@ impl BindingAddress {
         };
         endpoints.iter().copied()
     }
+}
+
+#[cfg(feature = "dquic-network")]
+fn wide_area_egress_allowed(pattern: &BindPattern, default_route_egress: bool) -> bool {
+    // Automatic interface selection must follow the system's default route;
+    // explicit bindings are an operator request and remain eligible.
+    pattern.scheme != Scheme::Iface || !pattern.host.is_glob() || default_route_egress
 }
 
 #[cfg(feature = "dquic-network")]
@@ -525,22 +533,21 @@ mod tests {
 
     #[cfg(feature = "dquic-network")]
     #[test]
-    fn wide_area_selector_requires_default_route_egress() {
+    fn automatic_wide_area_binding_requires_default_route_egress() {
         let pattern: BindPattern = "iface://v4.*:0".parse().expect("valid bind pattern");
-        let bind_uri: BindUri = "iface://v4.docker0:0".parse().expect("valid bind URI");
 
-        assert!(!selector_may_match_binding(
-            AddressSelector::WideArea,
-            false,
-            &pattern,
-            &bind_uri,
-        ));
-        assert!(selector_may_match_binding(
-            AddressSelector::WideArea,
-            true,
-            &pattern,
-            &bind_uri,
-        ));
+        assert!(!wide_area_egress_allowed(&pattern, false));
+        assert!(wide_area_egress_allowed(&pattern, true));
+    }
+
+    #[cfg(feature = "dquic-network")]
+    #[test]
+    fn explicit_bindings_remain_eligible_without_default_route_egress() {
+        let iface: BindPattern = "iface://v4.docker0:0".parse().expect("valid iface pattern");
+        let inet: BindPattern = "inet://0.0.0.0:0".parse().expect("valid inet pattern");
+
+        assert!(wide_area_egress_allowed(&iface, false));
+        assert!(wide_area_egress_allowed(&inet, false));
     }
 
     #[cfg(feature = "dquic-network")]
