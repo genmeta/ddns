@@ -374,7 +374,7 @@ fn stun_endpoints_from_iface(iface: &BindInterface) -> Vec<EndpointAddr> {
                                     outer,
                                     nat_type,
                                 )),
-                                None => Some(EndpointAddr::with_agent(client.agent_addr(), outer)),
+                                None => Some(EndpointAddr::mediate(client.agent_addr(), outer)),
                                 Some(Err(_)) => None,
                             }
                         })
@@ -405,7 +405,7 @@ fn publish_endpoint_from_stun(
     if nat_type == NatType::FullCone {
         EndpointAddr::direct(outer)
     } else {
-        EndpointAddr::with_agent(agent, outer)
+        EndpointAddr::mediate(agent, outer)
     }
 }
 
@@ -528,7 +528,7 @@ mod tests {
 
         let endpoint = publish_endpoint_from_stun(agent, outer, NatType::RestrictedCone);
 
-        assert_eq!(endpoint, EndpointAddr::with_agent(agent, outer));
+        assert_eq!(endpoint, EndpointAddr::mediate(agent, outer));
     }
 
     #[cfg(feature = "dquic-network")]

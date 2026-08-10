@@ -196,9 +196,14 @@ where
     C::Error: Send + Sync + 'static,
     C::Connection: Send + 'static,
 {
-    fn lookup<'l>(&'l self, name: &'l str) -> ResolveFuture<'l> {
+    fn lookup<'l>(
+        &'l self,
+        hostname: &'l str,
+        _servname: &'l str,
+        family: Option<dquic::qresolve::Family>,
+    ) -> ResolveFuture<'l> {
         Box::pin(async move {
-            H3Resolver::lookup(self, name)
+            H3Resolver::lookup_with_family(self, hostname, family)
                 .await
                 .map_err(io::Error::other)
         })
@@ -237,6 +242,7 @@ mod tests {
         let resolver = H3Resolver::from_endpoint(DHTTP_H3_DNS_SERVER, endpoint).unwrap();
         resolver.cache.insert_positive(
             "car.lab.dhttp.net",
+            None,
             vec![EndpointAddr::direct("192.168.5.78:41748".parse().unwrap())],
         );
 
@@ -264,6 +270,7 @@ mod tests {
         let resolver = H3Resolver::from_endpoint(DHTTP_H3_DNS_SERVER, endpoint).unwrap();
         resolver.cache.insert_positive(
             "dns.genmeta.net",
+            None,
             vec![EndpointAddr::direct("192.0.2.53:4433".parse().unwrap())],
         );
 
@@ -285,6 +292,7 @@ mod tests {
         let resolver = H3Resolver::from_endpoint(DHTTP_H3_DNS_SERVER, endpoint).unwrap();
         resolver.cache.insert_positive(
             "nat.genmeta.net:20004",
+            None,
             vec![EndpointAddr::direct("192.0.2.10:21000".parse().unwrap())],
         );
 

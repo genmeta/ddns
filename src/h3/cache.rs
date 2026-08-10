@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use dashmap::DashMap;
-use dquic::qbase::net::addr::EndpointAddr;
+use dquic::{qbase::net::addr::EndpointAddr, qresolve::Family};
 use tokio::time::Instant;
 
 const POSITIVE_TTL: Duration = Duration::from_secs(10);
@@ -13,10 +13,25 @@ pub(super) struct CachedRecord {
     expire: Instant,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct LookupKey {
+    domain: String,
+    family: Option<Family>,
+}
+
+impl LookupKey {
+    fn new(domain: &str, family: Option<Family>) -> Self {
+        Self {
+            domain: domain.to_owned(),
+            family,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub(super) struct LookupCache {
-    positive: DashMap<String, CachedRecord>,
-    negative: DashMap<String, Instant>,
+    positive: DashMap<LookupKey, CachedRecord>,
+    negative: DashMap<LookupKey, Instant>,
 }
 
 impl LookupCache {
@@ -25,28 +40,42 @@ impl LookupCache {
         self.negative.retain(|_host, expire| *expire > now);
     }
 
-    pub(super) fn positive_hit(&self, domain: &str) -> Option<Vec<EndpointAddr>> {
-        self.positive.get(domain).map(|record| record.addrs.clone())
+    pub(super) fn positive_hit(
+        &self,
+        domain: &str,
+        family: Option<Family>,
+    ) -> Option<Vec<EndpointAddr>> {
+        self.positive
+            .get(&LookupKey::new(domain, family))
+            .map(|record| record.addrs.clone())
     }
 
-    pub(super) fn negative_hit(&self, domain: &str) -> bool {
-        self.negative.get(domain).is_some()
+    pub(super) fn negative_hit(&self, domain: &str, family: Option<Family>) -> bool {
+        self.negative.get(&LookupKey::new(domain, family)).is_some()
     }
 
-    pub(super) fn insert_positive(&self, domain: &str, addrs: Vec<EndpointAddr>) {
+    pub(super) fn insert_positive(
+        &self,
+        domain: &str,
+        family: Option<Family>,
+        addrs: Vec<EndpointAddr>,
+    ) {
+        let key = LookupKey::new(domain, family);
         self.positive.insert(
-            domain.to_owned(),
+            key.clone(),
             CachedRecord {
                 addrs,
                 expire: Instant::now() + POSITIVE_TTL,
             },
         );
-        self.negative.remove(domain);
+        self.negative.remove(&key);
     }
 
-    pub(super) fn insert_negative(&self, domain: &str) {
-        self.negative
-            .insert(domain.to_owned(), Instant::now() + NEGATIVE_TTL);
+    pub(super) fn insert_negative(&self, domain: &str, family: Option<Family>) {
+        self.negative.insert(
+            LookupKey::new(domain, family),
+            Instant::now() + NEGATIVE_TTL,
+        );
     }
 }
 
@@ -61,10 +90,10 @@ mod tests {
     #[test]
     fn positive_cache_hit_returns_endpoints() {
         let cache = LookupCache::default();
-        cache.insert_positive("demo.dhttp.net", vec![endpoint("192.0.2.10:4433")]);
+        cache.insert_positive("demo.dhttp.net", None, vec![endpoint("192.0.2.10:4433")]);
 
         assert_eq!(
-            cache.positive_hit("demo.dhttp.net").unwrap(),
+            cache.positive_hit("demo.dhttp.net", None).unwrap(),
             vec![endpoint("192.0.2.10:4433")]
         );
     }
@@ -72,24 +101,40 @@ mod tests {
     #[test]
     fn negative_cache_hit_blocks_lookup() {
         let cache = LookupCache::default();
-        cache.insert_negative("missing.dhttp.net");
+        cache.insert_negative("missing.dhttp.net", None);
 
-        assert!(cache.negative_hit("missing.dhttp.net"));
+        assert!(cache.negative_hit("missing.dhttp.net", None));
     }
 
     #[test]
     fn positive_cache_hit_keeps_selector_entries_separate() {
         let cache = LookupCache::default();
-        cache.insert_positive("demo.dhttp.net", vec![endpoint("192.0.2.10:4433")]);
-        cache.insert_positive("demo.dhttp.net:1", vec![endpoint("192.0.2.11:4433")]);
+        cache.insert_positive("demo.dhttp.net", None, vec![endpoint("192.0.2.10:4433")]);
+        cache.insert_positive("demo.dhttp.net:1", None, vec![endpoint("192.0.2.11:4433")]);
 
         assert_eq!(
-            cache.positive_hit("demo.dhttp.net").unwrap(),
+            cache.positive_hit("demo.dhttp.net", None).unwrap(),
             vec![endpoint("192.0.2.10:4433")]
         );
         assert_eq!(
-            cache.positive_hit("demo.dhttp.net:1").unwrap(),
+            cache.positive_hit("demo.dhttp.net:1", None).unwrap(),
             vec![endpoint("192.0.2.11:4433")]
+        );
+    }
+
+    #[test]
+    fn cache_keeps_address_families_separate() {
+        let cache = LookupCache::default();
+        cache.insert_positive(
+            "demo.dhttp.net",
+            Some(Family::V4),
+            vec![endpoint("192.0.2.10:4433")],
+        );
+
+        assert!(
+            cache
+                .positive_hit("demo.dhttp.net", Some(Family::V6))
+                .is_none()
         );
     }
 }

@@ -103,9 +103,19 @@ impl Publish for MdnsPublisher {
 }
 
 impl Resolve for MdnsResolver {
-    fn lookup<'l>(&'l self, name: &'l str) -> ResolveFuture<'l> {
+    fn lookup<'l>(
+        &'l self,
+        hostname: &'l str,
+        _servname: &'l str,
+        family: Option<Family>,
+    ) -> ResolveFuture<'l> {
         let source = self.source();
-        let Some((domain, sequence)) = mdns_lookup_parts(name) else {
+        if family.is_some_and(|family| {
+            !matches!(&source, Source::Mdns { family: source_family, .. } if *source_family == family)
+        }) {
+            return future::ready(Ok(stream::empty().boxed())).boxed();
+        }
+        let Some((domain, sequence)) = mdns_lookup_parts(hostname) else {
             return future::ready(Err(io::Error::other("no DNS record found"))).boxed();
         };
         self.query(domain.to_owned())
@@ -114,7 +124,17 @@ impl Resolve for MdnsResolver {
                     crate::resolvers::endpoint_group::selected_endpoint_addrs_for_sequence(
                         list, sequence,
                     );
-                stream::iter(endpoints.into_iter().map(move |ep| (source.clone(), ep))).boxed()
+                stream::iter(
+                    endpoints
+                        .into_iter()
+                        .filter(move |endpoint| {
+                            crate::resolvers::endpoint_candidates::endpoint_matches_family(
+                                endpoint, family,
+                            )
+                        })
+                        .map(move |ep| (source.clone(), ep)),
+                )
+                .boxed()
             })
             .boxed()
     }
@@ -355,17 +375,32 @@ impl MdnsResolvers {
         name: &str,
         sequence: Option<dhttp_identity::certificate::CertificateSequence>,
     ) -> io::Result<RecordStream> {
+        self.query_with_sequence_and_family(name, sequence, None)
+            .await
+    }
+
+    async fn query_with_sequence_and_family(
+        &self,
+        name: &str,
+        sequence: Option<dhttp_identity::certificate::CertificateSequence>,
+        family: Option<Family>,
+    ) -> io::Result<RecordStream> {
         let mut lookup_futures = FuturesUnordered::new();
         let mut has_resolver = false;
-        self.for_each_resolver(|resolver| {
+        for bound in self
+            .bound_resolvers()
+            .into_iter()
+            .filter(|bound| family.is_none_or(|family| bound.family == family))
+        {
             has_resolver = true;
-            let source = resolver.source();
+            let source = bound.resolver.source();
             lookup_futures.push(
-                resolver
+                bound
+                    .resolver
                     .query(name.to_owned())
                     .map_ok(move |eps| (source, eps)),
             );
-        });
+        }
         if !has_resolver {
             return Err(io::Error::other("no mdns resolvers available"));
         }
@@ -439,21 +474,32 @@ impl crate::resolvers::endpoint_candidates::ResolveEndpointCandidates for MdnsRe
             let Some((domain, sequence)) = mdns_lookup_parts(name) else {
                 return Err(io::Error::other("no DNS record found"));
             };
-            let lookup = sequence
-                .map(crate::resolvers::endpoint_candidates::EndpointLookup::exact)
-                .unwrap_or(lookup);
+            let lookup = match sequence {
+                Some(sequence) => crate::resolvers::endpoint_candidates::EndpointLookup {
+                    sequences: crate::resolvers::endpoint_candidates::SequenceQuery::Exact(
+                        sequence,
+                    ),
+                    ..lookup
+                },
+                None => lookup,
+            };
 
             let mut lookup_futures = FuturesUnordered::new();
             let mut has_resolver = false;
-            self.for_each_resolver(|resolver| {
+            for bound in self
+                .bound_resolvers()
+                .into_iter()
+                .filter(|bound| lookup.family.is_none_or(|family| bound.family == family))
+            {
                 has_resolver = true;
-                let source = resolver.source();
+                let source = bound.resolver.source();
                 lookup_futures.push(
-                    resolver
+                    bound
+                        .resolver
                         .query(domain.to_owned())
                         .map_ok(move |eps| (source, eps)),
                 );
-            });
+            }
             if !has_resolver {
                 return Err(io::Error::other("no mdns resolvers available"));
             }
@@ -479,25 +525,27 @@ impl crate::resolvers::endpoint_candidates::ResolveEndpointCandidates for MdnsRe
                 return Err(last_error.unwrap_or_else(|| io::Error::other("no DNS record found")));
             }
 
-            let groups =
-                crate::resolvers::endpoint_candidates::grouped_endpoint_candidates(records)
-                    .into_iter()
-                    .map(|(chain, tagged)| {
-                        let mut sources = Vec::new();
-                        let mut endpoints = Vec::new();
-                        for (source, endpoint) in tagged {
-                            if !sources.contains(&source) {
-                                sources.push(source);
-                            }
-                            endpoints.push(endpoint);
-                        }
-                        crate::resolvers::endpoint_candidates::EndpointCandidateGroup {
-                            chain,
-                            endpoints,
-                            sources,
-                        }
-                    })
-                    .collect();
+            let groups = crate::resolvers::endpoint_candidates::filter_endpoint_candidate_groups(
+                crate::resolvers::endpoint_candidates::grouped_endpoint_candidates(records),
+                lookup.family,
+            )
+            .into_iter()
+            .map(|(chain, tagged)| {
+                let mut sources = Vec::new();
+                let mut endpoints = Vec::new();
+                for (source, endpoint) in tagged {
+                    if !sources.contains(&source) {
+                        sources.push(source);
+                    }
+                    endpoints.push(endpoint);
+                }
+                crate::resolvers::endpoint_candidates::EndpointCandidateGroup {
+                    chain,
+                    endpoints,
+                    sources,
+                }
+            })
+            .collect();
             let groups = select_candidate_groups(groups, lookup.sequences);
 
             Ok(crate::resolvers::endpoint_candidates::EndpointCandidates { groups })
@@ -527,11 +575,17 @@ impl Publish for MdnsResolvers {
 
 #[cfg(feature = "dquic-network")]
 impl Resolve for MdnsResolvers {
-    fn lookup<'l>(&'l self, name: &'l str) -> ResolveFuture<'l> {
-        let Some((domain, sequence)) = mdns_lookup_parts(name) else {
+    fn lookup<'l>(
+        &'l self,
+        hostname: &'l str,
+        _servname: &'l str,
+        family: Option<Family>,
+    ) -> ResolveFuture<'l> {
+        let Some((domain, sequence)) = mdns_lookup_parts(hostname) else {
             return future::ready(Err(io::Error::other("no DNS record found"))).boxed();
         };
-        self.query_with_sequence(domain, sequence).boxed()
+        self.query_with_sequence_and_family(domain, sequence, family)
+            .boxed()
     }
 }
 

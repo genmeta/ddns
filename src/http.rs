@@ -3,7 +3,7 @@ use std::{fmt::Display, io, sync::Arc};
 use dashmap::DashMap;
 use dquic::{
     qbase::net::addr::EndpointAddr,
-    qresolve::{Publish, PublishFuture, Resolve, ResolveFuture, Source},
+    qresolve::{Family, Publish, PublishFuture, Resolve, ResolveFuture, Source},
 };
 use futures::{StreamExt, TryFutureExt, stream};
 use reqwest::{Client, IntoUrl, StatusCode, Url};
@@ -28,7 +28,7 @@ struct Record {
 pub struct HttpResolver {
     http_client: Client,
     base_url: Url,
-    cached_records: DashMap<String, Record>,
+    cached_records: DashMap<(String, Option<Family>), Record>,
 }
 
 fn lookup_url(
@@ -324,10 +324,15 @@ fn decode_candidate_groups(
 }
 
 impl Resolve for HttpResolver {
-    fn lookup<'l>(&'l self, name: &'l str) -> ResolveFuture<'l> {
+    fn lookup<'l>(
+        &'l self,
+        hostname: &'l str,
+        _servname: &'l str,
+        family: Option<Family>,
+    ) -> ResolveFuture<'l> {
         let lookup = async move {
             let Some((domain, sequence)) =
-                crate::resolvers::endpoint_lookup_name_and_sequence(name)
+                crate::resolvers::endpoint_lookup_name_and_sequence(hostname)
             else {
                 return Err(Error::NoRecordFound);
             };
@@ -338,7 +343,8 @@ impl Resolve for HttpResolver {
 
             self.cached_records
                 .retain(|_host, Record { expire, .. }| *expire > now);
-            if let Some(record) = self.cached_records.get(name) {
+            let cache_key = (hostname.to_owned(), family);
+            if let Some(record) = self.cached_records.get(&cache_key) {
                 let endpoint_addrs: Vec<_> = record
                     .addrs
                     .iter()
@@ -354,7 +360,8 @@ impl Resolve for HttpResolver {
                     domain,
                     sequence
                         .map(crate::resolvers::endpoint_candidates::EndpointLookup::exact)
-                        .unwrap_or_default(),
+                        .unwrap_or_default()
+                        .with_family(family),
                 ))
                 .send()
                 .await?
@@ -362,29 +369,32 @@ impl Resolve for HttpResolver {
                 .bytes()
                 .await?;
 
-            let addrs = decode_candidate_groups(domain, response.as_ref())?
-                .into_iter()
-                .find(|(chain_key, _)| match sequence {
-                    Some(sequence) => {
-                        crate::core::certificate::is_primary_chain_key(chain_key)
-                            && chain_key.sequence() == sequence
-                    }
-                    None => true,
-                })
-                .map(|(_, endpoints)| {
-                    endpoints
-                        .into_iter()
-                        .map(|((), endpoint)| endpoint)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            let addrs = crate::resolvers::endpoint_candidates::filter_endpoint_candidate_groups(
+                decode_candidate_groups(domain, response.as_ref())?,
+                family,
+            )
+            .into_iter()
+            .find(|(chain_key, _)| match sequence {
+                Some(sequence) => {
+                    crate::core::certificate::is_primary_chain_key(chain_key)
+                        && chain_key.sequence() == sequence
+                }
+                None => true,
+            })
+            .map(|(_, endpoints)| {
+                endpoints
+                    .into_iter()
+                    .map(|((), endpoint)| endpoint)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
             if addrs.is_empty() {
                 return Err(Error::NoRecordFound);
             }
 
             // cache the addrs
             self.cached_records.insert(
-                name.to_string(),
+                cache_key,
                 Record {
                     addrs: addrs.clone(),
                     expire: now + std::time::Duration::from_secs(300),
@@ -411,9 +421,15 @@ impl crate::resolvers::endpoint_candidates::ResolveEndpointCandidates for HttpRe
             };
             let server = Arc::from(self.base_url.host_str().unwrap_or("<unknown server>"));
             let source = Source::Http { server };
-            let lookup = sequence
-                .map(crate::resolvers::endpoint_candidates::EndpointLookup::exact)
-                .unwrap_or(lookup);
+            let lookup = match sequence {
+                Some(sequence) => crate::resolvers::endpoint_candidates::EndpointLookup {
+                    sequences: crate::resolvers::endpoint_candidates::SequenceQuery::Exact(
+                        sequence,
+                    ),
+                    ..lookup
+                },
+                None => lookup,
+            };
             let response = self
                 .http_client
                 .get(lookup_url(&self.base_url, domain, lookup))
@@ -423,7 +439,10 @@ impl crate::resolvers::endpoint_candidates::ResolveEndpointCandidates for HttpRe
                 .bytes()
                 .await?;
             let groups = crate::resolvers::endpoint_candidates::select_group_pairs(
-                decode_candidate_groups(domain, response.as_ref())?,
+                crate::resolvers::endpoint_candidates::filter_endpoint_candidate_groups(
+                    decode_candidate_groups(domain, response.as_ref())?,
+                    lookup.family,
+                ),
                 lookup.sequences,
             )
             .into_iter()
