@@ -216,6 +216,7 @@ fn put_srv(buf: &mut Vec<u8>, srv: &Srv, ctx: &mut NameCompression) {
 
 pub fn be_packet(input: &[u8]) -> nom::IResult<&[u8], Packet> {
     let (remain, header) = be_header(input)?;
+    let (remain, ()) = validate_section_counts(remain, &header)?;
 
     let (remain, questions) =
         parse::<Question>(remain, input, header.questions_count, be_question)?;
@@ -238,13 +239,47 @@ pub fn be_packet(input: &[u8]) -> nom::IResult<&[u8], Packet> {
     ))
 }
 
+/// Minimum possible wire length of one DNS question.
+const MIN_QUESTION_WIRE_LEN: usize = 5;
+/// Minimum possible wire length of one DNS resource record.
+const MIN_RESOURCE_RECORD_WIRE_LEN: usize = 11;
+
+/// Verify that the input can possibly hold every section declared by the header.
+fn validate_section_counts<'a>(input: &'a [u8], header: &Header) -> nom::IResult<&'a [u8], ()> {
+    let question_bytes = usize::from(header.questions_count).checked_mul(MIN_QUESTION_WIRE_LEN);
+    let record_count = usize::from(header.answers_count)
+        .checked_add(usize::from(header.nameservers_count))
+        .and_then(|count| count.checked_add(usize::from(header.additional_count)));
+    let minimum_wire_len = question_bytes.and_then(|question_bytes| {
+        record_count
+            .and_then(|count| count.checked_mul(MIN_RESOURCE_RECORD_WIRE_LEN))
+            .and_then(|record_bytes| question_bytes.checked_add(record_bytes))
+    });
+
+    let Some(minimum_wire_len) = minimum_wire_len else {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    };
+
+    if minimum_wire_len > input.len() {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+
+    Ok((input, ()))
+}
+
 fn parse<'a, T>(
     mut input: &'a [u8],
     original: &'a [u8],
     count: u16,
     parser: impl Fn(&'a [u8], &'a [u8]) -> nom::IResult<&'a [u8], T>,
 ) -> nom::IResult<&'a [u8], Vec<T>> {
-    let mut records = Vec::with_capacity(count as usize);
+    let mut records = Vec::new();
     for _ in 0..count {
         match parser(input, original) {
             Ok((new_input, record)) => {
@@ -465,6 +500,34 @@ mod test {
             let _ = be_packet(&data);
         });
         assert!(ret.is_ok());
+    }
+
+    #[test]
+    fn impossible_section_counts_are_rejected_before_parsing() {
+        let packet = [
+            0, 0, // ID
+            0, 0, // flags
+            0xff, 0xff, // questions
+            0, 0, // answers
+            0, 0, // nameservers
+            0, 0, // additional
+        ];
+
+        assert!(matches!(be_packet(&packet), Err(nom::Err::Failure(_))));
+    }
+
+    #[test]
+    fn aggregate_resource_record_counts_use_the_input_bound() {
+        let packet = [
+            0, 0, // ID
+            0, 0, // flags
+            0, 0, // questions
+            0, 1, // answers
+            0, 1, // nameservers
+            0, 1, // additional
+        ];
+
+        assert!(matches!(be_packet(&packet), Err(nom::Err::Failure(_))));
     }
 
     #[test]

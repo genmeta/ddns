@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt, io,
     net::{IpAddr, SocketAddr},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     task::{Context, Poll, ready},
     time::Duration,
 };
@@ -16,15 +16,28 @@ use tracing::Instrument;
 use super::protocol::MdnsProtocol;
 use crate::core::parser::{packet::Packet, record::endpoint::EndpointAddr};
 
+/// Host records served by one concrete mDNS binding.
+pub(crate) type HostRecords = Mutex<HashMap<String, Vec<EndpointAddr>>>;
+
+/// Runs mDNS on one concrete interface and address-family binding.
 #[derive(Clone)]
 pub struct Mdns {
+    /// Builds and matches local names served by this binding.
     service_name: String,
-    hosts: Arc<Mutex<HashMap<String, Vec<EndpointAddr>>>>,
+
+    /// Stores records published by every endpoint sharing this binding.
+    hosts: Arc<HostRecords>,
+
+    /// Owns the eager socket protocol and base tasks across clones.
     inner: Arc<Mutex<MdnsInner>>,
 }
 
+/// Mutable runtime state for one concrete mDNS binding.
 struct MdnsInner {
+    /// Owns the eagerly-created UDP 5353 socket.
     proto: Arc<MdnsProtocol>,
+
+    /// Runs packet routing and responses, but no unconditional discovery timer.
     tasks: JoinSet<()>,
 }
 
@@ -45,7 +58,7 @@ impl fmt::Debug for Mdns {
 impl Mdns {
     pub fn new(service_name: &str, ip: IpAddr, device: &str) -> io::Result<Self> {
         let service_name = service_name.to_string();
-        let hosts = Arc::new(Mutex::new(HashMap::<String, Vec<EndpointAddr>>::new()));
+        let hosts = Arc::new(HostRecords::new(HashMap::new()));
         let (proto, route) = MdnsProtocol::new(device, ip)?;
         let proto = Arc::new(proto);
         let mut tasks = JoinSet::new();
@@ -118,7 +131,7 @@ impl Mdns {
     fn spawn_tasks(
         tasks: &mut JoinSet<()>,
         proto: Arc<MdnsProtocol>,
-        hosts: Arc<Mutex<HashMap<String, Vec<EndpointAddr>>>>,
+        hosts: Arc<HostRecords>,
         service_name: String,
     ) {
         let span = tracing::debug_span!(
@@ -128,30 +141,8 @@ impl Mdns {
             ip = %proto.bound_ip()
         );
 
-        // (1) periodic broadcaster
-        tasks.spawn(
-            {
-                let proto = proto.clone();
-                let service_name = service_name.clone();
-                async move {
-                    let mut interval = time::interval(Duration::from_secs(10));
-                    interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
-                    loop {
-                        interval.tick().await;
-                        let packet = Packet::query(service_name.clone());
-                        if let Err(e) = proto.broadcast_packet(packet).await {
-                            tracing::debug!(
-                                error = %snafu::Report::from_error(&e),
-                                "broadcast packet error"
-                            );
-                        }
-                    }
-                }
-            }
-            .instrument(span.clone()),
-        );
-
-        // (2) responder
+        // The responder remains eager because a shared binding must answer external queries
+        // even when this process has not started an explicit discovery stream.
         tasks.spawn(
             {
                 let proto = proto.clone();
@@ -226,6 +217,20 @@ impl Mdns {
         guard.insert(local_name, eps);
     }
 
+    /// Insert a publication and return only the weak cleanup location it needs.
+    pub(crate) fn insert_host_for_publication(
+        &self,
+        host_name: String,
+        endpoints: Vec<EndpointAddr>,
+    ) -> (Weak<HostRecords>, String) {
+        let local_name = Self::local_name(self.service_name.clone(), host_name);
+        self.hosts
+            .lock()
+            .expect("mDNS host records lock poisoned")
+            .insert(local_name.clone(), endpoints);
+        (Arc::downgrade(&self.hosts), local_name)
+    }
+
     #[cfg(test)]
     pub(crate) fn published_endpoints(&self, host_name: &str) -> Option<Vec<EndpointAddr>> {
         let local_name = Self::local_name(self.service_name.clone(), host_name.to_owned());
@@ -262,11 +267,7 @@ impl Mdns {
 
     #[inline]
     pub fn discover(&self) -> impl Stream<Item = (SocketAddr, Packet)> + use<> {
-        let proto = self.protocol();
-
-        Box::pin(stream::unfold(proto, async move |proto| {
-            Some((proto.receive_boardcast().await.ok()?, proto))
-        }))
+        Box::pin(discovery_stream(self.protocol(), self.service_name.clone()))
     }
 
     #[inline]
@@ -275,6 +276,36 @@ impl Mdns {
             .map(|prefix| format!("{prefix}.{service_name}"))
             .unwrap_or_else(|| name)
     }
+}
+
+/// Receives answers and queries immediately and every ten seconds while polled.
+fn discovery_stream(
+    protocol: Arc<MdnsProtocol>,
+    service_name: String,
+) -> impl Stream<Item = (SocketAddr, Packet)> {
+    stream::unfold(
+        (
+            protocol,
+            service_name,
+            time::interval(Duration::from_secs(10)),
+        ),
+        |(protocol, service_name, mut interval)| async move {
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let packet = Packet::query(service_name.clone());
+                        let _ = protocol.broadcast_packet(packet).await;
+                    }
+                    answer = protocol.receive_boardcast() => {
+                        return Some((
+                            answer.ok()?,
+                            (protocol, service_name, interval),
+                        ));
+                    }
+                }
+            }
+        },
+    )
 }
 
 impl Component for Mdns {

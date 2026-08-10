@@ -1,4 +1,7 @@
-use std::{fmt, io, sync::Arc};
+use std::{
+    fmt, io,
+    sync::{Arc, Mutex, Weak},
+};
 
 use dhttp_identity::name::Name;
 use dquic::qresolve::Publish;
@@ -45,7 +48,55 @@ enum PublisherKind {
     Mdns {
         resolvers: Arc<crate::mdns::MdnsResolvers>,
         authority: Arc<dyn h3x::quic::DynWithLocalAuthority>,
+        publication: Arc<Publication>,
     },
+}
+
+/// Tracks host records written by one endpoint across shared mDNS bindings.
+struct Publication {
+    /// Weak cleanup locations do not retain protocol bindings or sockets.
+    records: Mutex<Vec<(Weak<crate::mdns::service::HostRecords>, String)>>,
+}
+
+impl Publication {
+    /// Create an empty endpoint publication tracker.
+    fn new() -> Self {
+        Self {
+            records: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Publish a record while retaining only weak cleanup locations.
+    fn publish(
+        &self,
+        mdns: &crate::mdns::MdnsResolver,
+        name: String,
+        endpoints: Vec<crate::core::parser::record::endpoint::EndpointAddr>,
+    ) {
+        let (records, local_name) = mdns.insert_host_for_publication(name, endpoints);
+        let mut published = self.records.lock().expect("publication lock poisoned");
+        if !published.iter().any(|(existing, existing_name)| {
+            existing_name == &local_name && Weak::ptr_eq(existing, &records)
+        }) {
+            published.push((records, local_name));
+        }
+    }
+}
+
+impl Drop for Publication {
+    /// Remove this endpoint's names from every host map that is still alive.
+    fn drop(&mut self) {
+        let records = std::mem::take(&mut *self.records.lock().expect("publication lock poisoned"));
+        for (weak_records, name) in records {
+            let Some(records) = weak_records.upgrade() else {
+                continue;
+            };
+            records
+                .lock()
+                .expect("mDNS host records lock poisoned")
+                .remove(&name);
+        }
+    }
 }
 
 #[cfg(all(feature = "mdns", feature = "dquic-network"))]
@@ -129,6 +180,7 @@ impl Publisher {
             inner: PublisherKind::Mdns {
                 resolvers,
                 authority,
+                publication: Arc::new(Publication::new()),
             },
         }
     }
@@ -145,7 +197,8 @@ impl Publisher {
             PublisherKind::Mdns {
                 resolvers,
                 authority,
-            } => publish_mdns(resolvers, authority.as_ref(), name, view).await,
+                publication,
+            } => publish_mdns(resolvers, authority.as_ref(), publication, name, view).await,
         }
     }
 }
@@ -177,6 +230,7 @@ where
 async fn publish_mdns<V>(
     resolvers: &crate::mdns::MdnsResolvers,
     authority_provider: &dyn h3x::quic::DynWithLocalAuthority,
+    publication: &Publication,
     name: &Name<'_>,
     view: &V,
 ) -> Result<(), PublisherError>
@@ -213,7 +267,7 @@ where
             &mut endpoints,
         )
         .context(publisher_error::MdnsEncodeSnafu)?;
-        bound.resolver.insert_host(name.to_string(), endpoints);
+        publication.publish(&bound.resolver, name.to_string(), endpoints);
     }
 
     Ok(())
@@ -221,6 +275,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(feature = "mdns", feature = "dquic-network"))]
+    use std::collections::HashMap;
     #[cfg(all(feature = "mdns", feature = "dquic-network"))]
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::{
@@ -236,6 +292,8 @@ mod tests {
     };
     use futures::FutureExt;
 
+    #[cfg(all(feature = "mdns", feature = "dquic-network"))]
+    use super::Publication;
     use crate::publishers::{PublishScope, Publisher};
 
     #[derive(Debug, Default)]
@@ -295,6 +353,41 @@ mod tests {
 
     fn endpoint(ip: [u8; 4], port: u16) -> EndpointAddr {
         EndpointAddr::direct(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(ip), port)))
+    }
+
+    #[cfg(all(feature = "mdns", feature = "dquic-network"))]
+    #[test]
+    fn last_publication_drop_removes_registered_names() {
+        let records = Arc::new(crate::mdns::service::HostRecords::new(HashMap::from([(
+            "alice._test._udp.local".to_owned(),
+            Vec::new(),
+        )])));
+        let publication = Arc::new(Publication::new());
+        publication
+            .records
+            .lock()
+            .expect("publication lock poisoned")
+            .push((
+                Arc::downgrade(&records),
+                "alice._test._udp.local".to_owned(),
+            ));
+        let clone = publication.clone();
+
+        drop(publication);
+        assert!(
+            records
+                .lock()
+                .expect("host records lock poisoned")
+                .contains_key("alice._test._udp.local")
+        );
+
+        drop(clone);
+        assert!(
+            records
+                .lock()
+                .expect("host records lock poisoned")
+                .is_empty()
+        );
     }
 
     #[cfg(all(feature = "mdns", feature = "dquic-network"))]
