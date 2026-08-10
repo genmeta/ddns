@@ -1,7 +1,7 @@
 use std::{io, sync::Arc};
 
 use dhttp_identity::certificate::CertificateSequence;
-use dquic::qresolve::{RecordStream, Source};
+use dquic::qresolve::{Family, RecordStream, Source};
 use futures::{StreamExt, stream};
 use h3x::quic;
 use http_body_util::BodyExt;
@@ -224,6 +224,14 @@ where
     }
 
     pub async fn lookup(&self, name: &str) -> Result<RecordStream, H3LookupError<C::Error>> {
+        self.lookup_with_family(name, None).await
+    }
+
+    pub async fn lookup_with_family(
+        &self,
+        name: &str,
+        family: Option<Family>,
+    ) -> Result<RecordStream, H3LookupError<C::Error>> {
         let server = Arc::from(self.base_url.origin().ascii_serialization());
         let source = Source::H3 { server };
 
@@ -235,18 +243,19 @@ where
         let now = Instant::now();
         self.cache.prune_expired(now);
 
-        if self.cache.negative_hit(name) {
+        if self.cache.negative_hit(name, family) {
             return Err(H3LookupError::NoRecordFound);
         }
 
-        if let Some(addrs) = self.cache.positive_hit(name) {
+        if let Some(addrs) = self.cache.positive_hit(name, family) {
             let stream = stream::iter(addrs.into_iter().map(move |ep| (source.clone(), ep)));
             return Ok(stream.boxed());
         }
 
         let endpoint_lookup = sequence
             .map(crate::resolvers::endpoint_candidates::EndpointLookup::exact)
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .with_family(family);
         let url = lookup_url(&self.base_url, domain, endpoint_lookup);
         let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
 
@@ -254,7 +263,7 @@ where
         let response = match self.lookup_response_with_retry(uri).await {
             Ok(response) => response,
             Err(H3LookupError::NoRecordFound) => {
-                self.cache.insert_negative(name);
+                self.cache.insert_negative(name, family);
                 return Err(H3LookupError::NoRecordFound);
             }
             Err(error) => return Err(error),
@@ -262,14 +271,20 @@ where
 
         let records = LookupRecords::decode(domain, sequence, response.as_ref())
             .context(h3_lookup_error::DecodeSnafu)?;
-        let addrs = records.endpoints;
+        let addrs = records
+            .endpoints
+            .into_iter()
+            .filter(|endpoint| {
+                crate::resolvers::endpoint_candidates::endpoint_matches_family(endpoint, family)
+            })
+            .collect::<Vec<_>>();
 
         if addrs.is_empty() {
-            self.cache.insert_negative(name);
+            self.cache.insert_negative(name, family);
             return Err(H3LookupError::NoRecordFound);
         }
 
-        self.cache.insert_positive(name, addrs.clone());
+        self.cache.insert_positive(name, family, addrs.clone());
 
         Ok(stream::iter(addrs.into_iter().map(move |ep| (source.clone(), ep))).boxed())
     }
@@ -293,9 +308,15 @@ where
                 return Err(io::Error::other("no DNS record found"));
             };
 
-            let lookup = sequence
-                .map(crate::resolvers::endpoint_candidates::EndpointLookup::exact)
-                .unwrap_or(lookup);
+            let lookup = match sequence {
+                Some(sequence) => crate::resolvers::endpoint_candidates::EndpointLookup {
+                    sequences: crate::resolvers::endpoint_candidates::SequenceQuery::Exact(
+                        sequence,
+                    ),
+                    ..lookup
+                },
+                None => lookup,
+            };
             let url = lookup_url(&self.base_url, domain, lookup);
             let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
             let response = self
@@ -306,8 +327,11 @@ where
                 server: Arc::from(self.base_url.origin().ascii_serialization()),
             };
             let groups = crate::resolvers::endpoint_candidates::select_group_pairs(
-                LookupRecords::decode_candidate_groups(domain, response.as_ref())
-                    .map_err(io::Error::other)?,
+                crate::resolvers::endpoint_candidates::filter_endpoint_candidate_groups(
+                    LookupRecords::decode_candidate_groups(domain, response.as_ref())
+                        .map_err(io::Error::other)?,
+                    lookup.family,
+                ),
                 lookup.sequences,
             )
             .into_iter()

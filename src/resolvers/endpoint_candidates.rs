@@ -2,7 +2,7 @@ use std::{io, num::NonZeroUsize};
 
 use dhttp_identity::certificate::{CertificateChainKey, CertificateSequence};
 use dquic::{
-    qbase::net::addr::EndpointAddr as DquicEndpointAddr,
+    qbase::net::{AddrFamily, Family, addr::EndpointAddr as DquicEndpointAddr},
     qresolve::{Resolve, Source},
 };
 use futures::future::BoxFuture;
@@ -34,6 +34,7 @@ pub enum SequenceQuery {
 pub struct EndpointLookup {
     pub sequences: SequenceQuery,
     pub record_limit: Option<NonZeroUsize>,
+    pub family: Option<Family>,
 }
 
 impl EndpointLookup {
@@ -42,6 +43,7 @@ impl EndpointLookup {
         Self {
             sequences: SequenceQuery::Exact(sequence),
             record_limit: None,
+            family: None,
         }
     }
 
@@ -50,6 +52,7 @@ impl EndpointLookup {
         Self {
             sequences: SequenceQuery::Limit(count),
             record_limit: None,
+            family: None,
         }
     }
 
@@ -58,6 +61,7 @@ impl EndpointLookup {
         Self {
             sequences: SequenceQuery::All,
             record_limit: None,
+            family: None,
         }
     }
 
@@ -66,6 +70,32 @@ impl EndpointLookup {
         self.record_limit = Some(count);
         self
     }
+
+    #[must_use]
+    pub fn with_family(mut self, family: Option<Family>) -> Self {
+        self.family = family;
+        self
+    }
+}
+
+pub(crate) fn endpoint_matches_family(
+    endpoint: &DquicEndpointAddr,
+    family: Option<Family>,
+) -> bool {
+    family.is_none_or(|family| endpoint.addr().family() == family)
+}
+
+pub(crate) fn filter_endpoint_candidate_groups<T>(
+    mut groups: EndpointCandidateGroups<T>,
+    family: Option<Family>,
+) -> EndpointCandidateGroups<T> {
+    if family.is_some() {
+        for (_, endpoints) in &mut groups {
+            endpoints.retain(|(_, endpoint)| endpoint_matches_family(endpoint, family));
+        }
+        groups.retain(|(_, endpoints)| !endpoints.is_empty());
+    }
+    groups
 }
 
 #[cfg(any(feature = "h3", feature = "http"))]
@@ -185,7 +215,10 @@ fn effective_chain_key(
 
 #[cfg(test)]
 mod tests {
-    use std::{net::SocketAddrV4, num::NonZeroUsize};
+    use std::{
+        net::{SocketAddrV4, SocketAddrV6},
+        num::NonZeroUsize,
+    };
 
     use dhttp_identity::certificate::CertificateSequence;
 
@@ -210,6 +243,12 @@ mod tests {
             EndpointLookup::all().with_record_limit(one).record_limit,
             Some(one)
         );
+        assert_eq!(
+            EndpointLookup::default()
+                .with_family(Some(Family::V6))
+                .family,
+            Some(Family::V6)
+        );
     }
 
     fn direct(addr: &str, main: bool, sequence: u32) -> DnsEndpointAddr {
@@ -218,6 +257,42 @@ mod tests {
         endpoint.set_main(main);
         endpoint.set_sequence(CertificateSequence::try_from(sequence).unwrap());
         endpoint
+    }
+
+    fn direct_v6(addr: &str, main: bool, sequence: u32) -> DnsEndpointAddr {
+        let socket: SocketAddrV6 = addr.parse().expect("socket addr");
+        let mut endpoint = DnsEndpointAddr::direct_v6(socket);
+        endpoint.set_main(main);
+        endpoint.set_sequence(CertificateSequence::try_from(sequence).unwrap());
+        endpoint
+    }
+
+    #[test]
+    fn family_filter_removes_mismatched_endpoints_and_empty_groups() {
+        let groups = grouped_endpoint_candidates([
+            TaggedEndpointCandidate {
+                tag: "v4",
+                record: direct("192.0.2.10:4433", true, 1),
+                fallback_chain_key: None,
+            },
+            TaggedEndpointCandidate {
+                tag: "v6",
+                record: direct_v6("[2001:db8::10]:4433", true, 1),
+                fallback_chain_key: None,
+            },
+            TaggedEndpointCandidate {
+                tag: "v6-only-group",
+                record: direct_v6("[2001:db8::20]:4433", true, 2),
+                fallback_chain_key: None,
+            },
+        ]);
+
+        let groups = filter_endpoint_candidate_groups(groups, Some(Family::V4));
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0.sequence().get(), 1);
+        assert_eq!(groups[0].1.len(), 1);
+        assert_eq!(groups[0].1[0].0, "v4");
     }
 
     #[test]

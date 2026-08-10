@@ -1,6 +1,8 @@
 use std::{fmt, io};
 
-use dquic::qresolve::{EndpointAddr, Publish, PublishFuture, RecordStream, Resolve, ResolveFuture};
+use dquic::qresolve::{
+    EndpointAddr, Family, Publish, PublishFuture, RecordStream, Resolve, ResolveFuture,
+};
 use futures::{FutureExt, future::BoxFuture};
 use snafu::{ResultExt, Snafu};
 use tokio::sync::{Notify, OnceCell};
@@ -102,12 +104,17 @@ impl<R> DeferredResolver<R>
 where
     R: Resolve + 'static,
 {
-    pub async fn lookup_typed(&self, name: &str) -> Result<RecordStream, DeferredLookupError> {
+    pub async fn lookup_typed(
+        &self,
+        hostname: &str,
+        servname: &str,
+        family: Option<Family>,
+    ) -> Result<RecordStream, DeferredLookupError> {
         let Some(resolver) = self.get() else {
             return deferred_lookup_error::UninitializedSnafu.fail();
         };
         resolver
-            .lookup(name)
+            .lookup(hostname, servname, family)
             .await
             .context(deferred_lookup_error::LookupSnafu)
     }
@@ -117,8 +124,13 @@ impl<R> Resolve for DeferredResolver<R>
 where
     R: Resolve + 'static,
 {
-    fn lookup<'a>(&'a self, name: &'a str) -> ResolveFuture<'a> {
-        async move { self.wait().await.lookup(name).await }.boxed()
+    fn lookup<'a>(
+        &'a self,
+        hostname: &'a str,
+        servname: &'a str,
+        family: Option<Family>,
+    ) -> ResolveFuture<'a> {
+        async move { self.wait().await.lookup(hostname, servname, family).await }.boxed()
     }
 }
 
@@ -206,7 +218,12 @@ mod tests {
     }
 
     impl Resolve for TestResolver {
-        fn lookup<'a>(&'a self, _name: &'a str) -> dquic::qresolve::ResolveFuture<'a> {
+        fn lookup<'a>(
+            &'a self,
+            _hostname: &'a str,
+            _servname: &'a str,
+            _family: Option<Family>,
+        ) -> dquic::qresolve::ResolveFuture<'a> {
             async move {
                 let endpoint = EndpointAddr::direct("127.0.0.1:4433".parse().unwrap());
                 Ok(futures::stream::iter([(Source::System, endpoint)]).boxed())
@@ -230,7 +247,7 @@ mod tests {
     async fn lookup_before_set_returns_typed_uninitialized_error() {
         let resolver: DeferredResolver<TestResolver> = DeferredResolver::new();
 
-        let error = match resolver.lookup_typed("example.test").await {
+        let error = match resolver.lookup_typed("example.test", "", None).await {
             Ok(_) => panic!("uninitialized resolver must not resolve"),
             Err(error) => error,
         };
@@ -241,7 +258,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_trait_lookup_waits_until_set() {
         let resolver = DeferredResolver::new();
-        let mut lookup = resolver.lookup("example.test");
+        let mut lookup = resolver.lookup("example.test", "", None);
 
         assert!(
             tokio::time::timeout(Duration::from_millis(10), &mut lookup)
@@ -265,7 +282,10 @@ mod tests {
         let resolver = DeferredResolver::new();
         resolver.set(TestResolver).expect("first set succeeds");
 
-        let mut stream = resolver.lookup_typed("example.test").await.unwrap();
+        let mut stream = resolver
+            .lookup_typed("example.test", "", None)
+            .await
+            .unwrap();
         let (_source, endpoint) = stream.next().await.expect("forwarded endpoint");
 
         assert_eq!(

@@ -744,11 +744,11 @@ impl TryFrom<DquicEndpointAddr> for EndpointAddr {
             DquicEndpointAddr::Direct {
                 addr: SocketAddr::V6(addr),
             } => Ok(Self::direct_v6(addr)),
-            DquicEndpointAddr::Agent {
+            DquicEndpointAddr::Mediate {
                 agent: SocketAddr::V4(agent),
                 outer: SocketAddr::V4(outer),
             } => Ok(Self::nat_v4(outer, agent)),
-            DquicEndpointAddr::Agent {
+            DquicEndpointAddr::Mediate {
                 agent: SocketAddr::V6(agent),
                 outer: SocketAddr::V6(outer),
             } => Ok(Self::nat_v6(outer, agent)),
@@ -763,11 +763,11 @@ impl TryFrom<EndpointAddr> for DquicEndpointAddr {
     fn try_from(value: EndpointAddr) -> Result<Self, Self::Error> {
         if let Some(agent_addr) = value.agent {
             match (value.primary, agent_addr) {
-                (SocketAddr::V4(outer), SocketAddr::V4(agent)) => Ok(DquicEndpointAddr::Agent {
+                (SocketAddr::V4(outer), SocketAddr::V4(agent)) => Ok(DquicEndpointAddr::Mediate {
                     outer: SocketAddr::V4(outer),
                     agent: SocketAddr::V4(agent),
                 }),
-                (SocketAddr::V6(outer), SocketAddr::V6(agent)) => Ok(DquicEndpointAddr::Agent {
+                (SocketAddr::V6(outer), SocketAddr::V6(agent)) => Ok(DquicEndpointAddr::Mediate {
                     outer: SocketAddr::V6(outer),
                     agent: SocketAddr::V6(agent),
                 }),

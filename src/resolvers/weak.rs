@@ -3,7 +3,9 @@ use std::{
     sync::{Arc, Weak},
 };
 
-use dquic::qresolve::{EndpointAddr, Publish, PublishFuture, RecordStream, Resolve, ResolveFuture};
+use dquic::qresolve::{
+    EndpointAddr, Family, Publish, PublishFuture, RecordStream, Resolve, ResolveFuture,
+};
 use futures::{FutureExt, future::BoxFuture};
 use snafu::{ResultExt, Snafu};
 
@@ -72,10 +74,15 @@ impl<R: ?Sized> WeakResolver<R>
 where
     R: Resolve + 'static,
 {
-    pub async fn lookup_typed(&self, name: &str) -> Result<RecordStream, WeakLookupError> {
+    pub async fn lookup_typed(
+        &self,
+        hostname: &str,
+        servname: &str,
+        family: Option<Family>,
+    ) -> Result<RecordStream, WeakLookupError> {
         let resolver = self.upgrade()?;
         resolver
-            .lookup(name)
+            .lookup(hostname, servname, family)
             .await
             .context(weak_lookup_error::LookupSnafu)
     }
@@ -85,8 +92,18 @@ impl<R: ?Sized> Resolve for WeakResolver<R>
 where
     R: Resolve + 'static,
 {
-    fn lookup<'a>(&'a self, name: &'a str) -> ResolveFuture<'a> {
-        async move { self.lookup_typed(name).await.map_err(io::Error::other) }.boxed()
+    fn lookup<'a>(
+        &'a self,
+        hostname: &'a str,
+        servname: &'a str,
+        family: Option<Family>,
+    ) -> ResolveFuture<'a> {
+        async move {
+            self.lookup_typed(hostname, servname, family)
+                .await
+                .map_err(io::Error::other)
+        }
+        .boxed()
     }
 }
 
@@ -156,7 +173,12 @@ mod tests {
     }
 
     impl Resolve for TestResolver {
-        fn lookup<'a>(&'a self, _name: &'a str) -> dquic::qresolve::ResolveFuture<'a> {
+        fn lookup<'a>(
+            &'a self,
+            _hostname: &'a str,
+            _servname: &'a str,
+            _family: Option<Family>,
+        ) -> dquic::qresolve::ResolveFuture<'a> {
             async move {
                 let endpoint = EndpointAddr::direct("127.0.0.1:4433".parse().unwrap());
                 Ok(futures::stream::iter([(Source::System, endpoint)]).boxed())
@@ -182,7 +204,7 @@ mod tests {
         let resolver = WeakResolver::new(Arc::downgrade(&strong));
         drop(strong);
 
-        let error = match resolver.lookup_typed("example.test").await {
+        let error = match resolver.lookup_typed("example.test", "", None).await {
             Ok(_) => panic!("dropped weak resolver must not resolve"),
             Err(error) => error,
         };
@@ -195,7 +217,10 @@ mod tests {
         let strong = Arc::new(TestResolver);
         let resolver = WeakResolver::new(Arc::downgrade(&strong));
 
-        let mut stream = resolver.lookup_typed("example.test").await.unwrap();
+        let mut stream = resolver
+            .lookup_typed("example.test", "", None)
+            .await
+            .unwrap();
         let (_source, endpoint) = stream.next().await.expect("forwarded endpoint");
 
         assert_eq!(

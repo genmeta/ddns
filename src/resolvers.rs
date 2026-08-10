@@ -8,7 +8,7 @@ use std::{
 #[cfg(feature = "resolvers")]
 use dquic::{
     qbase::net::addr::EndpointAddr,
-    qresolve::{Resolve, ResolveFuture, Source},
+    qresolve::{Family, Resolve, ResolveFuture, Source},
 };
 #[cfg(feature = "resolvers")]
 use futures::{FutureExt, Stream, StreamExt, TryFutureExt, stream};
@@ -409,15 +409,23 @@ impl Resolvers {
 
     pub async fn lookup(
         &self,
-        name: &str,
+        hostname: &str,
+        servname: &str,
+        family: Option<Family>,
     ) -> Result<impl Stream<Item = (Source, EndpointAddr)> + use<>, ResolversError> {
         let mut errors = vec![];
 
         let mut lookups = stream::FuturesUnordered::from_iter(
             (self.resolvers.clone().into_iter()).map(|entry| {
                 let resolver = entry.resolver.clone();
-                let name = name.to_string();
-                async move { (resolver.lookup(&name).await, resolver.clone()) }
+                let hostname = hostname.to_owned();
+                let servname = servname.to_owned();
+                async move {
+                    (
+                        resolver.lookup(&hostname, &servname, family).await,
+                        resolver.clone(),
+                    )
+                }
             }),
         );
 
@@ -451,8 +459,13 @@ impl crate::resolvers::endpoint_candidates::ResolveEndpointCandidates for Resolv
 
 #[cfg(feature = "resolvers")]
 impl Resolve for Resolvers {
-    fn lookup<'l>(&'l self, name: &'l str) -> ResolveFuture<'l> {
-        self.lookup(name)
+    fn lookup<'l>(
+        &'l self,
+        hostname: &'l str,
+        servname: &'l str,
+        family: Option<Family>,
+    ) -> ResolveFuture<'l> {
+        Resolvers::lookup(self, hostname, servname, family)
             .map_ok(StreamExt::boxed)
             .map_err(io::Error::other)
             .boxed()
@@ -604,7 +617,12 @@ mod tests {
 
     #[cfg(feature = "resolvers")]
     impl dquic::qresolve::Resolve for CandidateResolver {
-        fn lookup<'l>(&'l self, _name: &'l str) -> dquic::qresolve::ResolveFuture<'l> {
+        fn lookup<'l>(
+            &'l self,
+            _hostname: &'l str,
+            _servname: &'l str,
+            _family: Option<dquic::qresolve::Family>,
+        ) -> dquic::qresolve::ResolveFuture<'l> {
             use futures::{FutureExt, StreamExt, stream};
             async { Ok(stream::empty().boxed()) }.boxed()
         }
@@ -683,7 +701,12 @@ mod tests {
 
     #[cfg(feature = "resolvers")]
     impl dquic::qresolve::Resolve for CandidateSetResolver {
-        fn lookup<'l>(&'l self, _name: &'l str) -> dquic::qresolve::ResolveFuture<'l> {
+        fn lookup<'l>(
+            &'l self,
+            _hostname: &'l str,
+            _servname: &'l str,
+            _family: Option<dquic::qresolve::Family>,
+        ) -> dquic::qresolve::ResolveFuture<'l> {
             use futures::{FutureExt, StreamExt, stream};
             async { Ok(stream::empty().boxed()) }.boxed()
         }
