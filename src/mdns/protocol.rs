@@ -30,6 +30,8 @@ const MULTICAST_PORT: u16 = 5353;
 const MULTICAST_ADDR_V4: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
 const MULTICAST_ADDR_V6: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0xfb);
 const MAX_DEQUE_SIZE: usize = 64;
+/// Maximum mDNS DNS payload admitted to the parser.
+const MAX_MDNS_DNS_MESSAGE_LEN: usize = 9000;
 
 impl MdnsSocket {
     pub fn new(device: &str, ip: IpAddr) -> io::Result<Self> {
@@ -119,11 +121,16 @@ impl MdnsSocket {
         })
     }
 
+    /// Receive the next size-bounded packet that the DNS parser accepts.
     pub async fn receive(&self) -> io::Result<(SocketAddr, Packet)> {
         loop {
-            let mut recv_buffer = [0u8; 2048];
+            let mut recv_buffer = [0u8; MAX_MDNS_DNS_MESSAGE_LEN + 1];
 
             let (size, source) = self.udp.recv_from(&mut recv_buffer).await?;
+
+            if size > MAX_MDNS_DNS_MESSAGE_LEN {
+                continue;
+            }
 
             let Ok((_remain, packet)) = be_packet(&recv_buffer[..size]) else {
                 continue;

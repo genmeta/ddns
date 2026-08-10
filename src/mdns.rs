@@ -17,12 +17,57 @@ use futures::{FutureExt, StreamExt, TryFutureExt, future, stream};
 use futures::{Stream, stream::FuturesUnordered};
 
 #[cfg(feature = "dquic-network")]
-use self::protocol::MdnsProtocol;
-#[cfg(feature = "dquic-network")]
 use crate::core::parser::packet::Packet;
 
 pub type MdnsResolver = service::Mdns;
 pub type MdnsPublisher = service::Mdns;
+
+const DHTTP_DNS_SUFFIX: &str = "dhttp.net";
+const LOCAL_MDNS_SUFFIX: &str = "local";
+
+/// Return the host portion while treating only a numeric suffix as a port.
+fn authority_host(name: &str) -> &str {
+    match name.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => host,
+        _ => name,
+    }
+}
+
+/// Validate and normalize the host used for mDNS scope checks.
+fn normalized_authority_host(name: &str) -> Option<&str> {
+    let authority_host = authority_host(name);
+    let host = authority_host.strip_suffix('.').unwrap_or(authority_host);
+    crate::resolvers::resolvable_name(host)
+}
+
+/// Return whether a validated host is within the DHTTP DNS suffix.
+fn is_dhttp_authority_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case(DHTTP_DNS_SUFFIX)
+        || host.len() > DHTTP_DNS_SUFFIX.len()
+            && host.as_bytes()[host.len() - DHTTP_DNS_SUFFIX.len() - 1] == b'.'
+            && host[host.len() - DHTTP_DNS_SUFFIX.len()..].eq_ignore_ascii_case(DHTTP_DNS_SUFFIX)
+}
+
+/// Return whether a validated host ends in the standard local mDNS label.
+fn is_local_mdns_host(host: &str) -> bool {
+    host.len() > LOCAL_MDNS_SUFFIX.len()
+        && host.as_bytes()[host.len() - LOCAL_MDNS_SUFFIX.len() - 1] == b'.'
+        && host[host.len() - LOCAL_MDNS_SUFFIX.len()..].eq_ignore_ascii_case(LOCAL_MDNS_SUFFIX)
+}
+
+/// Parse DHTTP sequence semantics or a plain local mDNS authority.
+fn mdns_lookup_parts(
+    name: &str,
+) -> Option<(
+    &str,
+    Option<dhttp_identity::certificate::CertificateSequence>,
+)> {
+    let host = normalized_authority_host(name)?;
+    if is_dhttp_authority_host(host) {
+        return crate::resolvers::endpoint_lookup_name_and_sequence(name);
+    }
+    is_local_mdns_host(host).then_some((host, None))
+}
 
 impl MdnsResolver {
     pub fn source(&self) -> Source {
@@ -60,8 +105,7 @@ impl Publish for MdnsPublisher {
 impl Resolve for MdnsResolver {
     fn lookup<'l>(&'l self, name: &'l str) -> ResolveFuture<'l> {
         let source = self.source();
-        let Some((domain, sequence)) = crate::resolvers::endpoint_lookup_name_and_sequence(name)
-        else {
+        let Some((domain, sequence)) = mdns_lookup_parts(name) else {
             return future::ready(Err(io::Error::other("no DNS record found"))).boxed();
         };
         self.query(domain.to_owned())
@@ -94,9 +138,15 @@ fn mdns_endpoints_from_dquic(
 }
 
 #[cfg(feature = "dquic-network")]
+/// Installs mDNS resources on concrete h3x interface bindings.
 pub struct MdnsBindDriver {
+    /// Creates and manages each concrete binding interface.
     iface_manager: Arc<h3x::dquic::net::InterfaceManager>,
+
+    /// Reuses h3x binding lifecycle without using its packet I/O.
     null_io_factory: Arc<h3x::dquic::NullIoFactory>,
+
+    /// Service name published and queried by bindings from this driver.
     service_name: Arc<str>,
 }
 
@@ -168,10 +218,18 @@ impl h3x::dquic::BindDriver for MdnsBindDriver {
 }
 
 #[cfg(feature = "dquic-network")]
+/// Aggregates concrete mDNS resolvers for a set of bind patterns.
 pub struct MdnsResolvers {
+    /// Owns the bind registry and current interface snapshot.
     network: Arc<h3x::dquic::Network>,
+
+    /// Provides the identity used to share and locate bindings.
     driver: Arc<MdnsBindDriver>,
+
+    /// Enumerates the concrete bindings exposed by this resolver set.
     patterns: Arc<Vec<h3x::dquic::binds::BindPattern>>,
+
+    /// Keeps each `(driver, pattern, LanMulticast)` registration alive.
     _handles: Vec<h3x::dquic::BindHandle>,
 }
 
@@ -207,9 +265,26 @@ impl MdnsResolvers {
         service_name: impl Into<Arc<str>>,
     ) -> Self {
         let driver = Arc::new(MdnsBindDriver::new(service_name));
+        Self::bind_with_driver(network, patterns, driver).await
+    }
+
+    /// Register mDNS patterns through a caller-owned driver so equal bindings can be shared.
+    pub async fn bind_with_driver(
+        network: Arc<h3x::dquic::Network>,
+        patterns: Arc<Vec<h3x::dquic::binds::BindPattern>>,
+        driver: Arc<MdnsBindDriver>,
+    ) -> Self {
         let mut handles = Vec::with_capacity(patterns.len());
         for pattern in patterns.iter() {
-            handles.push(network.bind_with(driver.clone(), pattern.clone()).await);
+            handles.push(
+                network
+                    .bind_with_policy(
+                        driver.clone(),
+                        pattern.clone(),
+                        h3x::dquic::WildcardInterfacePolicy::LanMulticast,
+                    )
+                    .await,
+            );
         }
 
         Self {
@@ -224,7 +299,11 @@ impl MdnsResolvers {
         &self,
         pattern: &h3x::dquic::binds::BindPattern,
     ) -> Option<Vec<h3x::dquic::net::BindInterface>> {
-        self.network.get_interfaces_with(&self.driver, pattern)
+        self.network.get_interfaces_with_policy(
+            &self.driver,
+            pattern,
+            h3x::dquic::WildcardInterfacePolicy::LanMulticast,
+        )
     }
 
     fn for_each_resolver(&self, mut f: impl FnMut(&MdnsResolver)) {
@@ -322,37 +401,12 @@ impl MdnsResolvers {
     }
 
     pub fn discover(&self) -> impl Stream<Item = (SocketAddr, Packet)> + use<> {
-        let mut protos = Vec::new();
-        self.for_each_resolver(|resolver| {
-            protos.push(resolver.protocol());
-        });
-
-        async fn receive_one(
-            proto: Arc<MdnsProtocol>,
-        ) -> Option<((SocketAddr, Packet), Arc<MdnsProtocol>)> {
-            let result = proto.receive_boardcast().await.ok()?;
-            Some((result, proto))
-        }
-
-        let mut pending = protos
+        let streams = self
+            .bound_resolvers()
             .into_iter()
-            .map(receive_one)
-            .collect::<FuturesUnordered<_>>();
-
-        Box::pin(stream::poll_fn(move |cx| {
-            use std::task::Poll;
-            loop {
-                match pending.poll_next_unpin(cx) {
-                    Poll::Ready(Some(Some((item, proto)))) => {
-                        pending.push(receive_one(proto));
-                        return Poll::Ready(Some(item));
-                    }
-                    Poll::Ready(Some(None)) => continue,
-                    Poll::Ready(None) => return Poll::Ready(None),
-                    Poll::Pending => return Poll::Pending,
-                }
-            }
-        }))
+            .map(|bound| Box::pin(bound.resolver.discover()))
+            .collect::<Vec<_>>();
+        stream::select_all(streams)
     }
 }
 
@@ -382,9 +436,7 @@ impl crate::resolvers::endpoint_candidates::ResolveEndpointCandidates for MdnsRe
         lookup: crate::resolvers::endpoint_candidates::EndpointLookup,
     ) -> crate::resolvers::endpoint_candidates::EndpointCandidateFuture<'a> {
         Box::pin(async move {
-            let Some((domain, sequence)) =
-                crate::resolvers::endpoint_lookup_name_and_sequence(name)
-            else {
+            let Some((domain, sequence)) = mdns_lookup_parts(name) else {
                 return Err(io::Error::other("no DNS record found"));
             };
             let lookup = sequence
@@ -476,8 +528,7 @@ impl Publish for MdnsResolvers {
 #[cfg(feature = "dquic-network")]
 impl Resolve for MdnsResolvers {
     fn lookup<'l>(&'l self, name: &'l str) -> ResolveFuture<'l> {
-        let Some((domain, sequence)) = crate::resolvers::endpoint_lookup_name_and_sequence(name)
-        else {
+        let Some((domain, sequence)) = mdns_lookup_parts(name) else {
             return future::ready(Err(io::Error::other("no DNS record found"))).boxed();
         };
         self.query_with_sequence(domain, sequence).boxed()
@@ -541,5 +592,37 @@ mod tests {
             sequences(select_candidate_groups(groups(), lookup.sequences)),
             vec![2, 1, 3, 4]
         );
+    }
+
+    #[test]
+    fn mdns_lookup_scope_accepts_only_dhttp_and_local_names() {
+        assert_eq!(
+            mdns_lookup_parts("printer.local"),
+            Some(("printer.local", None))
+        );
+        assert_eq!(
+            mdns_lookup_parts("Printer.LOCAL.:8080"),
+            Some(("Printer.LOCAL", None))
+        );
+
+        let (name, sequence) =
+            mdns_lookup_parts("node.dhttp.net:2").expect("DHTTP endpoint is in scope");
+        assert_eq!(name, "node.dhttp.net");
+        assert_eq!(sequence, Some(CertificateSequence::from(2u8)));
+
+        for name in [
+            "nat.genmeta.net",
+            "notlocal",
+            "printer.notlocal",
+            "local.example",
+            "127.0.0.1",
+            "[::1]:443",
+        ] {
+            assert_eq!(
+                mdns_lookup_parts(name),
+                None,
+                "unexpected mDNS scope: {name}"
+            );
+        }
     }
 }
