@@ -1,14 +1,15 @@
 <p align="center">
   <a href="https://github.com/genmeta/ddns" title="DDns">
-    <img src="assets/ddns-logo.svg" width="154" height="48" alt="DDns">
+    <img src="assets/ddns-logo-lockup.svg" width="600" alt="DDns">
   </a>
 </p>
-<h3 align="center">Map stable names to dynamic network addresses.</h3>
 
-[![Crates.io](https://img.shields.io/crates/v/dyns?label=crates.io)](https://crates.io/crates/dyns)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-[![Documentation](https://img.shields.io/badge/docs-dhttp.net-ff9900.svg)](https://docs.dhttp.net/en/docs/protocol/ddns)
-[![Rust](https://img.shields.io/badge/rust-1.85%2B-dea584.svg)](https://www.rust-lang.org/)
+<p align="center">
+  <a href="https://crates.io/crates/dyns"><img src="https://img.shields.io/crates/v/dyns?label=crates.io" alt="Crates.io"></a>
+  <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License"></a>
+  <a href="https://docs.dhttp.net/en/docs/protocol/ddns"><img src="https://img.shields.io/badge/docs-dhttp.net-ff9900.svg" alt="Documentation"></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.85%2B-dea584.svg" alt="Rust"></a>
+</p>
 
 **English** | [简体中文](README_CN.md)
 
