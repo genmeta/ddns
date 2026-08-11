@@ -78,6 +78,10 @@ impl EndpointLookup {
     }
 }
 
+#[cfg_attr(
+    not(any(feature = "h3", feature = "http", feature = "mdns", test)),
+    allow(dead_code)
+)]
 pub(crate) fn endpoint_matches_family(
     endpoint: &DquicEndpointAddr,
     family: Option<Family>,
@@ -85,6 +89,10 @@ pub(crate) fn endpoint_matches_family(
     family.is_none_or(|family| endpoint.addr().family() == family)
 }
 
+#[cfg_attr(
+    not(any(feature = "h3", feature = "http", feature = "mdns", test)),
+    allow(dead_code)
+)]
 pub(crate) fn filter_endpoint_candidate_groups<T>(
     mut groups: EndpointCandidateGroups<T>,
     family: Option<Family>,
