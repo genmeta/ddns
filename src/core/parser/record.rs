@@ -127,7 +127,7 @@ impl From<Class> for u16 {
 /// The TYPE value according to RFC 1035
 ///
 /// All "EXPERIMENTAL" markers here are from the RFC
-/// See https://www.iana.org/assignments/dns-parameters/dns-parameters.xhtml
+/// See <https://www.iana.org/assignments/dns-parameters/dns-parameters.xhtml>
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum Type {
     /// 1 a host addresss

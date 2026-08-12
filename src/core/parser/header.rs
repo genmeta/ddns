@@ -3,9 +3,9 @@ use bitfield_struct::bitfield;
 use bytes::BufMut;
 use nom::number::streaming::be_u16;
 
-/// See https://datatracker.ietf.org/doc/html/rfc1035#autoid-40
+/// See <https://datatracker.ietf.org/doc/html/rfc1035#autoid-40>
 /// 与标准 DNS 不同，flags 字段的 zero 3bits 后两 bits 用于 AD、CD
-/// /// See https://datatracker.ietf.org/doc/html/rfc6762#autoid-48
+/// See <https://datatracker.ietf.org/doc/html/rfc6762#autoid-48>
 /// ```text
 /// 0  1  2  3  4  5  6  7  8  9  0  1  2  3  4  5
 /// +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
@@ -47,7 +47,7 @@ impl Default for Header {
     }
 }
 
-/// See https://datatracker.ietf.org/doc/html/rfc6762#autoid-48
+/// See <https://datatracker.ietf.org/doc/html/rfc6762#autoid-48>
 #[bitfield(u16, order = Msb)]
 #[derive(PartialEq, Eq)]
 pub struct Flags {
