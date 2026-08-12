@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://github.com/genmeta/ddns" title="DDns">
-    <img src="assets/ddns-logo-lockup.svg" width="600" alt="DDns">
+    <img src="https://media.dhttp.net/img/ddns/ddns-logo-lockup.svg" width="600" alt="DDns">
   </a>
 </p>
 <p align="center">
@@ -98,7 +98,7 @@ DHttp domain names can be queried through mDNS and DoH, while conventional domai
 > When the target is on the local network, mDNS is preferred to obtain its private address, and transport also gives priority to the local network for greater privacy and efficiency.
 
 <p align="center">
-  <img src="assets/ddns-e-record-en.png" width="720" alt="DDns resolves one name to E records and Endpoint Addresses for multiple endpoints">
+  <img src="https://media.dhttp.net/img/ddns/ddns-e-record-en.jpg" width="720" alt="DDns resolves one name to E records and Endpoint Addresses for multiple endpoints">
 </p>
 
 `alice.smith~` can correspond to multiple endpoints, such as a phone and a computer, and each endpoint can have a different number of E records.

@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://github.com/genmeta/ddns" title="DDns">
-    <img src="assets/ddns-logo-lockup.svg" width="600" alt="DDns">
+    <img src="https://media.dhttp.net/img/ddns/ddns-logo-lockup.svg" width="600" alt="DDns">
   </a>
 </p>
 <p align="center">
@@ -108,7 +108,7 @@ DHttp 域名可以通过 mDNS 和 DoH 查询；传统域名仍由 System DNS 解
 > 目标位于局域网时，优先使用 mDNS 获得私网地址，传输时也将局域网优先，更加隐私、高效。
 
 <p align="center">
-  <img src="assets/ddns-e-record.png" width="720" alt="DDns 将一个名字解析为多个端点各自的 E 记录与 Endpoint Address">
+  <img src="https://media.dhttp.net/img/ddns/ddns-e-record.jpg" width="720" alt="DDns 将一个名字解析为多个端点各自的 E 记录与 Endpoint Address">
 </p>
 
 `alice.smith~` 可对应手机、电脑等多个端点，每个端点也可拥有数量不同的 E 记录。
