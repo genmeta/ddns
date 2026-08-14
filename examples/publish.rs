@@ -6,7 +6,7 @@ use std::{
 };
 
 use clap::Parser;
-use ddns::{publishers::H3Publisher, resolvers::DHTTP_H3_DNS_SERVER};
+use ddns::{publishers::H3Publisher, resolvers::DHTTP_NAME_SERVICE};
 use dquic::qbase::net::addr::EndpointAddr;
 use h3x::dquic::{
     Identity, Network, QuicEndpoint,
@@ -50,7 +50,7 @@ struct Options {
 }
 
 fn default_h3_base_url() -> String {
-    format!("{}/", DHTTP_H3_DNS_SERVER.trim_end_matches('/'))
+    format!("{}/", DHTTP_NAME_SERVICE.trim_end_matches('/'))
 }
 
 fn load_root_store_from_pem(path: &Path) -> io::Result<RootCertStore> {

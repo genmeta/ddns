@@ -7,7 +7,7 @@ use std::{
 use clap::Parser;
 use ddns::{
     core::{MdnsPacket, parser::record::RData, wire::be_multi_response},
-    resolvers::DHTTP_H3_DNS_SERVER,
+    resolvers::DHTTP_NAME_SERVICE,
 };
 use h3x::{
     dquic::{
@@ -38,7 +38,7 @@ struct Options {
 }
 
 fn default_h3_base_url() -> String {
-    format!("{}/", DHTTP_H3_DNS_SERVER.trim_end_matches('/'))
+    format!("{}/", DHTTP_NAME_SERVICE.trim_end_matches('/'))
 }
 
 fn load_root_store_from_pem(path: &Path) -> io::Result<RootCertStore> {

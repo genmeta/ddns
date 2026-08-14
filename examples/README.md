@@ -31,7 +31,7 @@ cargo run --example mdns_query --features mdns -- \
 ```
 
 Replace `--ip` and `--device` with an address and interface that exist on the local machine.
-The mDNS service name defaults to the build-time `DHTTP_MDNS_SERVICE` constant.
+The mDNS service name defaults to the build-time `DHTTP_MDNS_SERVICE_DOMAIN` constant.
 
 ## DNS-over-H3 query
 
@@ -45,7 +45,7 @@ Options:
 
 | Option | Meaning |
 | --- | --- |
-| `--base-url <URL>` | DNS-over-H3 server base URL. Defaults to build-time `DHTTP_H3_DNS_SERVER` with a trailing slash. |
+| `--base-url <URL>` | DNS-over-H3 server base URL. Defaults to build-time `DHTTP_NAME_SERVICE` with a trailing slash. |
 | `--server-ca <PATH>` | PEM root CA used to verify the DNS server certificate. |
 | `--host <NAME>` | DNS host to query. Defaults to `nat.genmeta.net`. |
 
@@ -77,7 +77,7 @@ Options:
 
 | Option | Meaning |
 | --- | --- |
-| `--base-url <URL>` | DNS-over-H3 server base URL. Defaults to build-time `DHTTP_H3_DNS_SERVER` with a trailing slash. |
+| `--base-url <URL>` | DNS-over-H3 server base URL. Defaults to build-time `DHTTP_NAME_SERVICE` with a trailing slash. |
 | `--server-ca <PATH>` | PEM root CA used to verify the DNS server certificate. |
 | `--client-name <NAME>` | DHTTP identity name presented by the client endpoint. |
 | `--client-cert <PATH>` | Client certificate chain PEM for mTLS and endpoint signature verification. |

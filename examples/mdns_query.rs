@@ -1,7 +1,7 @@
 use std::{io::Error, net::IpAddr};
 
 use clap::Parser;
-use ddns::{mdns::service::Mdns, resolvers::DHTTP_MDNS_SERVICE};
+use ddns::{mdns::service::Mdns, resolvers::DHTTP_MDNS_SERVICE_DOMAIN};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -16,7 +16,7 @@ struct Args {
 async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
-    let mdns = Mdns::new(DHTTP_MDNS_SERVICE, args.ip, &args.device)?;
+    let mdns = Mdns::new(DHTTP_MDNS_SERVICE_DOMAIN, args.ip, &args.device)?;
 
     let ret = mdns.query("publish.test.dhttp.net".to_string()).await?;
     println!("{ret:?}\n");

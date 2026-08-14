@@ -4,7 +4,7 @@ use std::{
 };
 
 use clap::Parser;
-use ddns::{core::MdnsEndpoint, mdns::service::Mdns, resolvers::DHTTP_MDNS_SERVICE};
+use ddns::{core::MdnsEndpoint, mdns::service::Mdns, resolvers::DHTTP_MDNS_SERVICE_DOMAIN};
 use futures::StreamExt;
 
 #[derive(Parser, Debug)]
@@ -20,7 +20,7 @@ struct Args {
 async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
-    let mdns = Mdns::new(DHTTP_MDNS_SERVICE, args.ip, &args.device)?;
+    let mdns = Mdns::new(DHTTP_MDNS_SERVICE_DOMAIN, args.ip, &args.device)?;
     mdns.insert_host(
         "test.dhttp.net".to_string(),
         vec![

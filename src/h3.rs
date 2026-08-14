@@ -221,7 +221,7 @@ mod tests {
 
     use super::*;
     #[cfg(feature = "dquic-network")]
-    use crate::resolvers::DHTTP_H3_DNS_SERVER;
+    use crate::resolvers::DHTTP_NAME_SERVICE;
 
     #[test]
     fn lookup_retry_budget_leaves_external_timeout_margin() {
@@ -239,7 +239,7 @@ mod tests {
         let endpoint = Arc::new(h3x::endpoint::H3Endpoint::new(
             h3x::dquic::QuicEndpoint::builder().build().await,
         ));
-        let resolver = H3Resolver::from_endpoint(DHTTP_H3_DNS_SERVER, endpoint).unwrap();
+        let resolver = H3Resolver::from_endpoint(DHTTP_NAME_SERVICE, endpoint).unwrap();
         resolver.cache.insert_positive(
             "car.lab.dhttp.net",
             None,
@@ -267,7 +267,7 @@ mod tests {
         let endpoint = Arc::new(h3x::endpoint::H3Endpoint::new(
             h3x::dquic::QuicEndpoint::builder().build().await,
         ));
-        let resolver = H3Resolver::from_endpoint(DHTTP_H3_DNS_SERVER, endpoint).unwrap();
+        let resolver = H3Resolver::from_endpoint(DHTTP_NAME_SERVICE, endpoint).unwrap();
         resolver.cache.insert_positive(
             "dns.genmeta.net",
             None,
@@ -289,7 +289,7 @@ mod tests {
         let endpoint = Arc::new(h3x::endpoint::H3Endpoint::new(
             h3x::dquic::QuicEndpoint::builder().build().await,
         ));
-        let resolver = H3Resolver::from_endpoint(DHTTP_H3_DNS_SERVER, endpoint).unwrap();
+        let resolver = H3Resolver::from_endpoint(DHTTP_NAME_SERVICE, endpoint).unwrap();
         resolver.cache.insert_positive(
             "nat.genmeta.net:20004",
             None,

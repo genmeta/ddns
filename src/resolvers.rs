@@ -63,13 +63,13 @@ pub(crate) fn endpoint_lookup_name_and_sequence(
 }
 
 /// Default DNS-over-H3 server for DHTTP endpoints.
-pub const DHTTP_H3_DNS_SERVER: &str = crate::bootstrap::DHTTP_H3_DNS_SERVER;
+pub const DHTTP_NAME_SERVICE: &str = crate::bootstrap::DHTTP_NAME_SERVICE;
 
 /// Default bootstrap service URL for DHTTP endpoints.
 pub const DHTTP_BOOTSTRAP_URL: &str = crate::bootstrap::DHTTP_BOOTSTRAP_URL;
 
 /// mDNS service type used by DHTTP endpoints.
-pub const DHTTP_MDNS_SERVICE: &str = crate::bootstrap::DHTTP_MDNS_SERVICE;
+pub const DHTTP_MDNS_SERVICE_DOMAIN: &str = crate::bootstrap::DHTTP_MDNS_SERVICE_DOMAIN;
 
 #[cfg(feature = "resolvers")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -248,7 +248,8 @@ impl ResolversBuilder {
         network: Arc<h3x::dquic::Network>,
         patterns: Arc<Vec<h3x::dquic::binds::BindPattern>>,
     ) -> Self {
-        let mdns = Arc::new(MdnsResolvers::bind(network, patterns, DHTTP_MDNS_SERVICE).await);
+        let mdns =
+            Arc::new(MdnsResolvers::bind(network, patterns, DHTTP_MDNS_SERVICE_DOMAIN).await);
         self.resolvers.push_candidate_resolver(mdns);
         self
     }
@@ -263,7 +264,7 @@ impl ResolversBuilder {
         C::Error: Send + Sync + 'static,
         C::Connection: Send + 'static,
     {
-        self.h3_with_base_url(DHTTP_H3_DNS_SERVER, endpoint)
+        self.h3_with_base_url(DHTTP_NAME_SERVICE, endpoint)
     }
 
     #[cfg(feature = "h3")]
@@ -483,7 +484,9 @@ mod tests {
     use super::MdnsResolvers;
     #[cfg(feature = "resolvers")]
     use super::Resolvers;
-    use super::{DHTTP_BOOTSTRAP_URL, DHTTP_H3_DNS_SERVER, DHTTP_MDNS_SERVICE, resolvable_name};
+    use super::{
+        DHTTP_BOOTSTRAP_URL, DHTTP_MDNS_SERVICE_DOMAIN, DHTTP_NAME_SERVICE, resolvable_name,
+    };
     #[cfg(feature = "resolvers")]
     use super::{DnsScheme, ResolversError};
 
@@ -539,14 +542,14 @@ mod tests {
 
     #[test]
     fn resolver_defaults_come_from_compile_time_environment() {
-        if let Some(expected) = option_env!("DHTTP_H3_DNS_SERVER") {
-            assert_eq!(DHTTP_H3_DNS_SERVER, expected);
+        if let Some(expected) = option_env!("DHTTP_NAME_SERVICE") {
+            assert_eq!(DHTTP_NAME_SERVICE, expected);
         }
         if let Some(expected) = option_env!("DHTTP_BOOTSTRAP_URL") {
             assert_eq!(DHTTP_BOOTSTRAP_URL, expected);
         }
-        if let Some(expected) = option_env!("DHTTP_MDNS_SERVICE") {
-            assert_eq!(DHTTP_MDNS_SERVICE, expected);
+        if let Some(expected) = option_env!("DHTTP_MDNS_SERVICE_DOMAIN") {
+            assert_eq!(DHTTP_MDNS_SERVICE_DOMAIN, expected);
         }
     }
 
@@ -942,7 +945,7 @@ mod tests {
         let resolvers = MdnsResolvers::bind(
             network.clone(),
             Arc::new(vec![pattern.clone()]),
-            DHTTP_MDNS_SERVICE,
+            DHTTP_MDNS_SERVICE_DOMAIN,
         )
         .await;
 
