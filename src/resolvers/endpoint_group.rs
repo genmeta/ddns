@@ -1,5 +1,5 @@
-use dhttp_identity::certificate::{CertificateChainKey, CertificateSequence};
-use dquic::qbase::net::addr::EndpointAddr as DquicEndpointAddr;
+use dhttp_home::certificate::{CertificateChainKey, CertificateSequence};
+use qresolve::EndpointAddr as DquicEndpointAddr;
 
 use crate::core::parser::record::endpoint::EndpointAddr as DnsEndpointAddr;
 
@@ -83,7 +83,7 @@ pub(crate) fn selected_endpoint_records_with_fallback_chain_keys<T>(
 
 #[cfg(test)]
 mod tests {
-    use dhttp_identity::certificate::CertificateSequence;
+    use dhttp_home::certificate::CertificateSequence;
 
     use crate::core::parser::record::endpoint::EndpointAddr;
 
@@ -108,11 +108,11 @@ mod tests {
         assert_eq!(selected.len(), 2);
         assert_eq!(
             selected[0],
-            dquic::qbase::net::addr::EndpointAddr::direct("192.0.2.10:4433".parse().unwrap())
+            qresolve::EndpointAddr::direct("192.0.2.10:4433".parse().unwrap())
         );
         assert_eq!(
             selected[1],
-            dquic::qbase::net::addr::EndpointAddr::direct("192.0.2.11:4433".parse().unwrap())
+            qresolve::EndpointAddr::direct("192.0.2.11:4433".parse().unwrap())
         );
     }
 
@@ -150,12 +150,12 @@ mod tests {
         assert_eq!(selected[0].0, "wifi");
         assert_eq!(
             selected[0].1,
-            dquic::qbase::net::addr::EndpointAddr::direct("192.0.2.50:4433".parse().unwrap())
+            qresolve::EndpointAddr::direct("192.0.2.50:4433".parse().unwrap())
         );
         assert_eq!(selected[1].0, "wifi");
         assert_eq!(
             selected[1].1,
-            dquic::qbase::net::addr::EndpointAddr::direct("192.0.2.52:4433".parse().unwrap())
+            qresolve::EndpointAddr::direct("192.0.2.52:4433".parse().unwrap())
         );
     }
 
@@ -173,7 +173,7 @@ mod tests {
 
         assert_eq!(
             selected,
-            vec![dquic::qbase::net::addr::EndpointAddr::direct(
+            vec![qresolve::EndpointAddr::direct(
                 "192.0.2.20:4433".parse().unwrap()
             )]
         );
@@ -210,7 +210,7 @@ mod tests {
         assert_eq!(selected[0].0, "wifi");
         assert_eq!(
             selected[0].1,
-            dquic::qbase::net::addr::EndpointAddr::direct("192.0.2.60:4433".parse().unwrap())
+            qresolve::EndpointAddr::direct("192.0.2.60:4433".parse().unwrap())
         );
     }
 }

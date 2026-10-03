@@ -1,4 +1,4 @@
-use dhttp_identity::certificate::{CertificateChainKey, CertificateSequence, CertificateUsage};
+use dhttp_home::certificate::{CertificateChainKey, CertificateSequence, CertificateUsage};
 
 const PRIMARY_KIND_FLAG: &str = "0";
 const SECONDARY_KIND_FLAG: &str = "1";

@@ -1,10 +1,13 @@
+#[cfg(any(feature = "h3", test))]
 use std::collections::HashMap;
 
-use dhttp_identity::identity::{LocalAuthority, LocalAuthorityCertificateExt};
-use dquic::qbase::net::addr::EndpointAddr;
+use qresolve::EndpointAddr;
+use qtls::LocalAuthority;
 use snafu::{ResultExt, Snafu, ensure};
 
-use crate::core::{MdnsPacket, parser::record::endpoint::EndpointAddr as DnsEndpointAddr};
+#[cfg(any(feature = "h3", test))]
+use crate::core::MdnsPacket;
+use crate::core::parser::record::endpoint::EndpointAddr as DnsEndpointAddr;
 
 #[derive(Debug, Snafu)]
 #[snafu(module)]
@@ -13,7 +16,7 @@ pub enum EncodeAuthorityDnsPacketError {
     AuthorityNameMismatch,
     #[snafu(display("publisher authority has no valid dhttp subject key identifier"))]
     DhttpSubjectKeyIdentifier {
-        source: dhttp_identity::identity::ExtractDhttpSubjectKeyIdentifierError,
+        source: dhttp_home::certificate::ExtractDhttpSubjectKeyIdentifierError,
     },
     #[snafu(display("failed to encode endpoint address"))]
     EncodeEndpoint,
@@ -22,7 +25,7 @@ pub enum EncodeAuthorityDnsPacketError {
 }
 
 pub(crate) fn dns_endpoints_for_authority(
-    authority: &dyn LocalAuthority,
+    authority: &LocalAuthority,
     name: &str,
     endpoints: &mut dyn Iterator<Item = EndpointAddr>,
 ) -> Result<Vec<DnsEndpointAddr>, EncodeAuthorityDnsPacketError> {
@@ -31,9 +34,9 @@ pub(crate) fn dns_endpoints_for_authority(
         encode_authority_dns_packet_error::AuthorityNameMismatchSnafu
     );
 
-    let ski = authority
-        .dhttp_subject_key_identifier()
-        .context(encode_authority_dns_packet_error::DhttpSubjectKeyIdentifierSnafu)?;
+    let ski =
+        dhttp_home::certificate::extract_dhttp_subject_key_identifier(authority.certificates())
+            .context(encode_authority_dns_packet_error::DhttpSubjectKeyIdentifierSnafu)?;
     let chain = ski.chain();
 
     let mut encoded = Vec::new();
@@ -54,8 +57,9 @@ pub(crate) fn dns_endpoints_for_authority(
     Ok(encoded)
 }
 
+#[cfg(any(feature = "h3", test))]
 pub(crate) fn dns_packet_for_authority(
-    authority: &dyn LocalAuthority,
+    authority: &LocalAuthority,
     name: &str,
     endpoints: &mut dyn Iterator<Item = EndpointAddr>,
 ) -> Result<Vec<u8>, EncodeAuthorityDnsPacketError> {
@@ -70,10 +74,8 @@ pub(crate) fn dns_packet_for_authority(
 mod tests {
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
-    use dhttp_identity::identity::LocalAuthority;
-    use dquic::qbase::net::addr::EndpointAddr as DquicEndpointAddr;
-    use futures::future::BoxFuture;
-    use rustls::pki_types::CertificateDer;
+    use qresolve::EndpointAddr as DquicEndpointAddr;
+    use qtls::LocalAuthority;
 
     use super::{dns_endpoints_for_authority, dns_packet_for_authority};
     use crate::core::parser::{
@@ -81,52 +83,12 @@ mod tests {
         record::{RData, Type},
     };
 
-    #[derive(Debug)]
-    struct TestAuthority {
-        name: &'static str,
-        cert_chain: Vec<CertificateDer<'static>>,
+    fn authority(name: &str) -> LocalAuthority {
+        authority_with_chain(name, 0, 0)
     }
 
-    impl LocalAuthority for TestAuthority {
-        fn name(&self) -> &str {
-            self.name
-        }
-
-        fn cert_chain(&self) -> &[CertificateDer<'static>] {
-            &self.cert_chain
-        }
-
-        fn sign(
-            &self,
-            _data: &[u8],
-        ) -> BoxFuture<'_, Result<Vec<u8>, dhttp_identity::identity::SignError>> {
-            Box::pin(std::future::ready(Ok(Vec::new())))
-        }
-    }
-
-    fn authority(name: &'static str) -> TestAuthority {
-        TestAuthority {
-            name,
-            cert_chain: vec![CertificateDer::from(
-                include_bytes!("../../tests/fixtures/valid.der").to_vec(),
-            )],
-        }
-    }
-
-    fn authority_with_chain(name: &'static str, sequence: u8, kind_flag: u8) -> TestAuthority {
-        assert!(kind_flag <= 1, "certificate kind flag must be 0 or 1");
-        let mut certificate = include_bytes!("../../tests/fixtures/valid.der").to_vec();
-        let marker = b"0:0:0123456789abcdef";
-        let offset = certificate
-            .windows(marker.len())
-            .position(|window| window == marker)
-            .expect("fixture contains dhttp subject key identifier");
-        certificate[offset] = b'0' + sequence;
-        certificate[offset + 2] = b'0' + kind_flag;
-        TestAuthority {
-            name,
-            cert_chain: vec![CertificateDer::from(certificate)],
-        }
+    fn authority_with_chain(name: &str, sequence: u8, kind_flag: u8) -> LocalAuthority {
+        crate::test_support::authority(name, sequence, kind_flag)
     }
 
     fn endpoint() -> DquicEndpointAddr {

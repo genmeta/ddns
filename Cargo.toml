@@ -3,7 +3,7 @@ name = "dyns"
 description = "DNS discovery and resolver support for DHTTP applications"
 version = "0.7.2"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/genmeta/ddns"
 readme = "README.md"
@@ -20,8 +20,9 @@ base64 = "0.22"
 bitfield-struct = "0.13"
 bytes = "1"
 dashmap = { version = "6", optional = true }
-dhttp-identity = "0.3.0"
-dquic = "0.7.1"
+dhttp-home = { version = "0.5.0", features = ["ssl"] }
+qtls = "0.6.1"
+qresolve = "0.8.1"
 flume = { version = "0.12", optional = true }
 futures = "0.3"
 libc = { version = "0.2", optional = true }
@@ -48,7 +49,7 @@ tokio = { version = "1", features = [
 tracing = "0.1"
 x509-parser = { version = "0.18", features = ["verify"] }
 
-h3x = { version = "0.6.1", default-features = false, optional = true }
+dhttp = { version = "0.6.2", optional = true }
 http = { version = "1", optional = true }
 http-body = { version = "1", optional = true }
 http-body-util = { version = "0.1", optional = true }
@@ -66,29 +67,34 @@ url = { version = "2", optional = true }
 default = []
 resolvers = []
 publishers = []
-dquic-network = ["dep:h3x", "h3x/dquic"]
 h3 = [
     "dep:dashmap",
-    "dep:h3x",
-    "h3x/hyper",
+    "dep:dhttp",
     "dep:http",
     "dep:http-body",
     "dep:http-body-util",
     "dep:url",
 ]
-http = ["dep:dashmap", "dep:reqwest", "dep:rustls-native-certs", "dep:url"]
+http = ["dep:dashmap", "dep:http", "dep:reqwest", "dep:rustls-native-certs", "dep:url"]
 mdns = ["dep:dashmap", "dep:flume", "dep:libc", "dep:socket2"]
 
 [dev-dependencies]
+qbase = "0.6.4"
+qprotocol = "0.6.1"
+scopeguard = "1"
+tower = { version = "0.5", features = ["util"] }
+rcgen = "0.14"
 clap = { version = "4", features = ["derive"] }
-h3x = { version = "0.6.1", default-features = false, features = ["dquic"] }
 shellexpand = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-[[example]]
-name = "mdns_discover"
-path = "examples/mdns_discover.rs"
-required-features = ["mdns"]
+[patch.crates-io]
+dhttp-home = { path = "../dhttp/home" }
+qtls = { path = "../dquic/qtls" }
+dhttp = { path = "../dhttp/dhttp" }
+qresolve = { path = "../dquic/qresolve" }
+qbase = { path = "../dquic/qbase" }
+qprotocol = { path = "../dquic/qprotocol" }
 
 [[example]]
 name = "mdns_query"

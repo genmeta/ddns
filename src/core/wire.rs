@@ -11,7 +11,7 @@
 use std::borrow::Borrow;
 
 use bytes::BufMut;
-use dhttp_identity::certificate::CertificateChainKey;
+use dhttp_home::certificate::CertificateChainKey;
 use nom::{IResult, bytes::streaming::take, number::streaming::be_u32};
 use rustls::pki_types::CertificateDer;
 
@@ -59,7 +59,7 @@ impl ResponseRecord {
         }
 
         let cert = CertificateDer::from(self.cert.clone());
-        dhttp_identity::identity::extract_dhttp_subject_key_identifier(std::slice::from_ref(&cert))
+        dhttp_home::certificate::extract_dhttp_subject_key_identifier(std::slice::from_ref(&cert))
             .ok()
             .map(|ski| ski.chain().clone())
     }
@@ -180,6 +180,16 @@ fn be_field(input: &[u8]) -> IResult<&[u8], Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn publisher_chain_key_uses_current_dhttp_certificate_format() {
+        let authority = crate::test_support::authority("demo.dhttp.net", 7, 0);
+        let record =
+            super::ResponseRecord::unsigned(Vec::new(), authority.certificates()[0].to_vec());
+        let chain = record.publisher_certificate_chain_key().unwrap();
+        assert_eq!(chain.sequence().get(), 7);
+        assert_eq!(chain.usage().kind_flag(), "0");
+    }
+
     use super::*;
 
     #[test]

@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use dhttp_identity::identity::{LocalAuthority, SignError as AuthoritySignError};
+use qtls::{LocalAuthority, SignError as AuthoritySignError};
 use ring::digest::{SHA256, digest};
 use rustls::{SignatureScheme, pki_types::SubjectPublicKeyInfoDer};
 use snafu::Snafu;
@@ -71,17 +71,17 @@ impl SignatureFields {
 
     pub async fn sign(
         dns_bytes: &[u8],
-        authority: &(impl LocalAuthority + ?Sized),
+        authority: &LocalAuthority,
     ) -> Result<Self, SignatureFieldsError> {
         let cert = authority
-            .cert_chain()
+            .certificates()
             .first()
             .ok_or(SignatureFieldsError::MissingCertificate)?;
         let keyid = keyid_for_cert(cert.as_ref());
         let content_digest = content_digest_value(dns_bytes);
         let created = unix_now_secs();
 
-        let scheme = sigin::canonical_scheme_for_spki(authority.public_key()).ok_or(
+        let scheme = sigin::canonical_scheme_for_spki(authority.public_key().clone()).ok_or(
             SignatureFieldsError::UnsupportedScheme {
                 scheme: SignatureScheme::Unknown(0),
             },
@@ -91,8 +91,10 @@ impl SignatureFields {
         let signature_input = signature_input_value(created, &keyid, alg);
         let signature_base = signature_base(&content_digest, &signature_input)?;
         let signature = authority
-            .sign(signature_base.as_bytes())
-            .await
+            .sign(
+                qtls::SignatureScheme::from(u16::from(scheme)),
+                signature_base.as_bytes(),
+            )
             .map_err(|source| SignatureFieldsError::Sign { source })?;
         let signature = signature_value(&signature);
 
@@ -283,6 +285,26 @@ fn unquote(value: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn qtls_authority_signatures_verify_and_reject_tampering() {
+        let authority = crate::test_support::authority("demo.dhttp.net", 0, 0);
+        let fields = SignatureFields::sign(b"dns packet", &authority)
+            .await
+            .unwrap();
+        let certificate = authority.certificates()[0].as_ref();
+        assert!(fields.verify(b"dns packet", certificate).unwrap());
+        assert!(matches!(
+            fields.verify(b"changed", certificate),
+            Err(SignatureFieldsError::DigestMismatch)
+        ));
+        let other = crate::test_support::authority("other.dhttp.net", 0, 0);
+        assert!(
+            !fields
+                .verify(b"dns packet", other.certificates()[0].as_ref())
+                .unwrap()
+        );
+    }
 
     #[test]
     fn content_digest_uses_sha256_dictionary_value() {

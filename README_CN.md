@@ -7,7 +7,7 @@
   <a href="https://crates.io/crates/dyns"><img src="https://img.shields.io/crates/v/dyns?label=crates.io" alt="Crates.io"></a>
   <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License"></a>
   <a href="https://docs.dhttp.net/zh/docs/protocol/ddns"><img src="https://img.shields.io/badge/docs-dhttp.net-ff9900.svg" alt="Documentation"></a>
-  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.85%2B-dea584.svg" alt="Rust"></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.88%2B-dea584.svg" alt="Rust"></a>
 </p>
 
 [English](README.md) | **简体中文**
@@ -122,12 +122,13 @@ DHttp 域名可以通过 mDNS 和 DoH 查询；传统域名仍由 System DNS 解
 ```bash
 git clone https://github.com/genmeta/ddns.git
 cd ddns
-cargo run --example mdns_discover --features mdns -- \
+cargo run --example mdns_query --features mdns -- \
   --ip YOUR_LOCAL_IP \
-  --device YOUR_NETWORK_INTERFACE
+  --device YOUR_NETWORK_INTERFACE \
+  --host alice.smith.dhttp.net
 ```
 
-将 `YOUR_LOCAL_IP` 和 `YOUR_NETWORK_INTERFACE` 替换为本机地址及其网络接口。该示例会绑定该接口，发布内置的 E 记录，并打印收到的 mDNS 数据包。
+将 `YOUR_LOCAL_IP` 和 `YOUR_NETWORK_INTERFACE` 替换为本机地址及其网络接口。该示例会绑定该接口，查询指定主机，并打印发现的端点地址。
 
 其他查询、发布和 Rust API 示例参阅 [示例与命令说明](examples/README.md)。
 

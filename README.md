@@ -9,7 +9,7 @@
   <a href="https://github.com/genmeta/ddns/actions/workflows/publish-crates.yml"><img src="https://img.shields.io/github/actions/workflow/status/genmeta/ddns/publish-crates.yml?label=CI" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License"></a>
   <a href="https://docs.dhttp.net/en/docs/protocol/ddns"><img src="https://img.shields.io/badge/docs-dhttp.net-ff9900.svg" alt="Documentation"></a>
-  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.85%2B-dea584.svg" alt="Rust"></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.88%2B-dea584.svg" alt="Rust"></a>
 </p>
 
 **English** | [简体中文](README_CN.md)
@@ -112,12 +112,13 @@ After installing Rust and Git, clone the repository and run the mDNS example:
 ```bash
 git clone https://github.com/genmeta/ddns.git
 cd ddns
-cargo run --example mdns_discover --features mdns -- \
+cargo run --example mdns_query --features mdns -- \
   --ip YOUR_LOCAL_IP \
-  --device YOUR_NETWORK_INTERFACE
+  --device YOUR_NETWORK_INTERFACE \
+  --host alice.smith.dhttp.net
 ```
 
-Replace `YOUR_LOCAL_IP` and `YOUR_NETWORK_INTERFACE` with a local address and its network interface. The example binds to that interface, publishes built-in E records, and prints received mDNS packets.
+Replace `YOUR_LOCAL_IP` and `YOUR_NETWORK_INTERFACE` with a local address and its network interface. The example binds to that interface, queries the specified host, and prints the discovered endpoints.
 
 For other query, publication, and Rust API examples, see [Examples and command reference](examples/README.md).
 

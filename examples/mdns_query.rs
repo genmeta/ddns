@@ -1,24 +1,28 @@
-use std::{io::Error, net::IpAddr};
+use std::net::IpAddr;
 
 use clap::Parser;
-use ddns::{mdns::service::Mdns, resolvers::DHTTP_MDNS_SERVICE_DOMAIN};
+use ddns::{mdns::MdnsResolver, resolvers::DHTTP_MDNS_SERVICE_DOMAIN};
+use futures::StreamExt;
+use qresolve::Resolve;
 
-#[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
+#[derive(Debug, Parser)]
 struct Args {
-    #[arg(long, default_value = "192.168.5.156")]
+    #[arg(long)]
     ip: IpAddr,
-    #[arg(long, default_value = "en0")]
+    #[arg(long)]
     device: String,
+    #[arg(long)]
+    host: String,
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Error> {
-    tracing_subscriber::fmt::init();
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let mdns = Mdns::new(DHTTP_MDNS_SERVICE_DOMAIN, args.ip, &args.device)?;
-
-    let ret = mdns.query("publish.test.dhttp.net".to_string()).await?;
-    println!("{ret:?}\n");
+    let mdns = MdnsResolver::bind(DHTTP_MDNS_SERVICE_DOMAIN, args.device, args.ip).await?;
+    let records = mdns.lookup(&args.host, "443", None).await?;
+    for record in records.collect::<Vec<_>>().await {
+        println!("{record:?}");
+    }
+    mdns.shutdown().await?;
     Ok(())
 }

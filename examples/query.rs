@@ -1,205 +1,40 @@
-use std::{
-    io,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use clap::Parser;
-use ddns::{
-    core::{MdnsPacket, parser::record::RData, wire::be_multi_response},
-    resolvers::DHTTP_NAME_SERVICE,
-};
-use h3x::{
-    dquic::{
-        Network, QuicEndpoint,
-        client::{ClientQuicConfig, ServerCertVerifierChoice},
-        resolver::handy::SystemResolver,
-    },
-    endpoint::H3Endpoint,
-};
-use http_body_util::{BodyExt, Empty};
-use rustls::{RootCertStore, client::WebPkiServerVerifier};
-use tracing::{Level, info};
+use ddns::{H3Resolver, resolvers::DHTTP_NAME_SERVICE};
+use futures::StreamExt;
 
-#[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
+#[derive(Debug, Parser)]
 struct Options {
-    /// Base URL of the线上 HTTP/3 DNS server.
-    #[arg(long, default_value_t = default_h3_base_url())]
-    base_url: String,
-
-    /// 用于校验线上服务端证书的 CA PEM 文件。
     #[arg(long)]
-    server_ca: PathBuf,
-
-    /// 要查询的线上域名。
-    #[arg(long, default_value = "nat.genmeta.net")]
+    identity: Option<String>,
+    #[arg(long, default_value_t = DHTTP_NAME_SERVICE.to_owned())]
+    server_origin: String,
+    #[arg(long)]
     host: String,
-}
-
-fn default_h3_base_url() -> String {
-    format!("{}/", DHTTP_NAME_SERVICE.trim_end_matches('/'))
-}
-
-fn load_root_store_from_pem(path: &Path) -> io::Result<RootCertStore> {
-    let pem = std::fs::read(path)?;
-    let mut store = RootCertStore::empty();
-    let mut reader: &[u8] = pem.as_slice();
-
-    for cert in rustls_pemfile::certs(&mut reader) {
-        let cert = cert.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        store
-            .add(cert)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    }
-    Ok(store)
-}
-
-fn format_packet(packet: &MdnsPacket) -> String {
-    let mut output = String::new();
-
-    if !packet.answers.is_empty() {
-        output.push_str("Answer:\n");
-        for rr in &packet.answers {
-            match rr.data() {
-                RData::A(ip) => {
-                    output.push_str(&format!("Name:   {}\nAddress: {}\n", rr.name(), ip));
-                }
-                RData::AAAA(ip) => {
-                    output.push_str(&format!("Name:   {}\nAddress: {}\n", rr.name(), ip));
-                }
-                RData::CName(cname) => {
-                    output.push_str(&format!("Name:   {}\nCNAME:  {}\n", rr.name(), cname));
-                }
-                RData::E(ep) => {
-                    output.push_str(&format!("Name:   {}\nAddress: {}\n", rr.name(), ep));
-                    if ep.is_signed() {
-                        output.push_str("Legacy E signature: present\n");
-                    }
-                }
-                _ => {
-                    output.push_str(&format!("Name:   {}\nData:   {:?}\n", rr.name(), rr.data()));
-                }
-            }
-        }
-    }
-
-    output
-}
-
-fn expand_tilde(path: &Path) -> io::Result<PathBuf> {
-    let path = path.to_str().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("Path is not valid UTF-8: {}", path.display()),
-        )
-    })?;
-
-    Ok(PathBuf::from(shellexpand::tilde(path).into_owned()))
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_max_level(Level::DEBUG)
+        .with_ansi(false)
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
-
-    let opt = Options::parse();
-    let server_ca = expand_tilde(&opt.server_ca)?;
-    let root_store = load_root_store_from_pem(&server_ca)?;
-    let verifier = WebPkiServerVerifier::builder(Arc::new(root_store))
-        .build()
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let client_config = ClientQuicConfig {
-        verifier: ServerCertVerifierChoice::WebPki(verifier),
-        ..Default::default()
+    let options = Options::parse();
+    qresolve::Resolver::add(Arc::new(qresolve::SystemResolver));
+    dhttp::DhttpNetwork::init().await?;
+    let endpoint = match options.identity {
+        Some(identity) => Some(Arc::new(dhttp::Endpoint::load(identity).await?)),
+        None => None,
     };
-    let network = Network::builder().build();
-    let quic = QuicEndpoint::builder()
-        .network(network)
-        .resolver(Arc::new(SystemResolver))
-        .client(client_config)
-        .build()
-        .await;
-    let client = H3Endpoint::new(quic);
-
-    let mut url = url::Url::parse(&opt.base_url)?.join("/api/v2/lookup")?;
-    url.query_pairs_mut().append_pair("host", &opt.host);
-    info!(url = %url, "lookup.start");
-
-    let uri: http::Uri = url.as_str().parse()?;
-    let authority = uri
-        .authority()
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "query URL must include authority",
-            )
-        })?
-        .clone();
-    let connection = Arc::new(client).connect(authority).await?;
-    let request = http::Request::get(uri)
-        .body(Empty::<bytes::Bytes>::new())
-        .expect("query request must be valid");
-    let resp = connection.execute_hyper_request(request).await?;
-
-    if resp.status().is_success() {
-        let bytes = resp.into_body().collect().await?.to_bytes();
-
-        let (remain, multi) = be_multi_response(bytes.as_ref()).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Invalid multi-record payload: {e}"),
-            )
-        })?;
-        if !remain.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "Invalid multi-record payload: {} trailing bytes",
-                    remain.len()
-                ),
-            )
-            .into());
-        }
-
-        info!(count = multi.records.len(), "lookup.ok");
-        println!("Lookup Result: {} record(s)", multi.records.len());
-
-        for (index, record) in multi.records.iter().enumerate() {
-            println!("\n-- Record #{} --", index + 1);
-
-            match record.cert_fingerprint_hex() {
-                Some(fp) => println!("Source fingerprint: {}…{}", &fp[..16], &fp[fp.len() - 8..]),
-                None => println!("Source fingerprint: (no certificate)"),
-            }
-
-            if record.signature_fields.is_empty() {
-                println!("Packet signature: none");
-            } else if record.cert.is_empty() {
-                println!("Packet signature: present but no certificate to verify against");
-            } else {
-                match record.signature_fields.verify(&record.dns, &record.cert) {
-                    Ok(true) => println!("Packet signature: ✓ verified"),
-                    Ok(false) => println!("Packet signature: ✗ invalid"),
-                    Err(e) => println!("Packet signature: ✗ error ({e:?})"),
-                }
-            }
-
-            match ddns::core::parser::packet::be_packet(&record.dns) {
-                Ok((_, packet)) => {
-                    print!("{}", format_packet(&packet));
-                }
-                Err(_) => {
-                    println!("DNS payload: invalid ({} bytes)", record.dns.len());
-                }
-            }
-        }
-    } else {
-        let status = resp.status();
-        info!(%status, "lookup.failed");
-        eprintln!("Lookup failed: {}", status);
+    let origin = options.server_origin.parse()?;
+    let resolver = match endpoint.as_ref() {
+        Some(endpoint) => H3Resolver::new(origin, endpoint)?,
+        None => H3Resolver::anonymous(origin)?,
+    };
+    let records = resolver.lookup(&options.host, "443", None).await?;
+    for (source, endpoint) in records.collect::<Vec<_>>().await {
+        println!("{source}: {endpoint}");
     }
-
     Ok(())
 }

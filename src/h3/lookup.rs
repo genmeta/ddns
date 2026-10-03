@@ -1,534 +1,188 @@
 use std::{io, sync::Arc};
 
-use dhttp_identity::certificate::CertificateSequence;
-use dquic::qresolve::{Family, RecordStream, Source};
-use futures::{StreamExt, stream};
-use h3x::quic;
-use http_body_util::BodyExt;
-use snafu::{IntoError, ResultExt};
-use tokio::time::Instant;
+use futures::StreamExt;
+use qresolve::{Family, RecordStream, Source};
 
 use super::{
-    H3LookupError, H3Resolver, LOOKUP_REQUEST_ATTEMPTS, LOOKUP_REQUEST_TIMEOUT, LookupDecodeError,
-    h3_lookup_error, lookup_decode_error,
+    H3LookupError, H3Resolver, LOOKUP_REQUEST_ATTEMPTS, LOOKUP_REQUEST_TIMEOUT, ReadBodyError,
+    cache::LookupKey, read_body_limited,
 };
 use crate::{
-    core::{parser::packet::be_packet, wire::be_multi_response},
+    api::{LookupSemanticError, MAX_LOOKUP_RESPONSE_BYTES},
     resolvers::endpoint_candidates::{
-        EndpointCandidateGroup, EndpointCandidates, ResolveEndpointCandidates,
+        EndpointCandidates, EndpointLookup, ResolveEndpointCandidates,
     },
 };
 
-const LOOKUP_API_PATH: &str = "/api/v2/lookup";
-
-fn lookup_url(
-    base_url: &url::Url,
-    name: &str,
-    lookup: crate::resolvers::endpoint_candidates::EndpointLookup,
-) -> url::Url {
-    let mut url = base_url
-        .join(LOOKUP_API_PATH)
-        .expect("h3 dns lookup api path must be valid");
-    url.query_pairs_mut().append_pair("host", name);
-    crate::resolvers::endpoint_candidates::append_endpoint_lookup_query(&mut url, lookup);
-    url
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct LookupRecords {
-    pub(super) endpoints: Vec<dquic::qbase::net::addr::EndpointAddr>,
-}
-
-impl LookupRecords {
-    pub(super) fn decode_candidate_groups(
-        domain: &str,
-        response: &[u8],
-    ) -> Result<crate::resolvers::endpoint_candidates::EndpointCandidateGroups<()>, LookupDecodeError>
-    {
-        use crate::core::parser::record;
-
-        let (remain, multi) = match be_multi_response(response) {
-            Ok(response) => response,
-            Err(_error) => return Err(LookupDecodeError::MultiResponse),
-        };
-        if !remain.is_empty() {
-            return Err(LookupDecodeError::MultiResponse);
+impl H3Resolver {
+    pub async fn lookup(
+        &self,
+        hostname: &str,
+        _servname: &str,
+        family: Option<Family>,
+    ) -> Result<RecordStream, H3LookupError> {
+        let host = hostname
+            .rsplit_once(':')
+            .filter(|(host, suffix)| {
+                !host.contains(':')
+                    && !suffix.is_empty()
+                    && suffix.bytes().all(|b| b.is_ascii_digit())
+            })
+            .map_or(hostname, |(host, _)| host)
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        if host != "dhttp.net" && !host.ends_with(".dhttp.net") {
+            return Err(H3LookupError::NoRecordFound);
         }
-
-        let mut endpoint_records = Vec::new();
-        for r in multi.records {
-            let publisher_chain_key = r.publisher_certificate_chain_key();
-            if !r.signature_fields.is_empty() {
-                match r.signature_fields.verify(&r.dns, &r.cert) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        tracing::debug!("ignored record with invalid DNS packet signature");
-                        continue;
-                    }
-                    Err(error) => {
-                        tracing::debug!(
-                            error = %snafu::Report::from_error(&error),
-                            "ignored record with malformed DNS packet signature"
-                        );
-                        continue;
-                    }
-                }
-            }
-
-            let (_remain, packet) = match be_packet(&r.dns) {
-                Ok(packet) => packet,
-                Err(source) => {
-                    return Err(
-                        lookup_decode_error::ParseRecordsSnafu.into_error(source.to_owned())
-                    );
-                }
-            };
-
-            endpoint_records.extend(packet.answers.iter().filter_map(
-                |answer| match answer.data() {
-                    record::RData::E(ep) => {
-                        if answer.name() != domain {
-                            tracing::debug!(
-                                answer_name = %answer.name(),
-                                query = domain,
-                                "ignored endpoint answer for different name"
-                            );
-                            return None;
-                        }
-                        Some(
-                            crate::resolvers::endpoint_candidates::TaggedEndpointCandidate {
-                                tag: (),
-                                record: ep.clone(),
-                                fallback_chain_key: publisher_chain_key.clone(),
-                            },
-                        )
-                    }
-                    _ => {
-                        tracing::debug!(?answer, "ignored record");
-                        None
-                    }
-                },
-            ));
-        }
-
-        Ok(crate::resolvers::endpoint_candidates::grouped_endpoint_candidates(endpoint_records))
-    }
-
-    pub(super) fn decode(
-        domain: &str,
-        sequence: Option<CertificateSequence>,
-        response: &[u8],
-    ) -> Result<Self, LookupDecodeError> {
-        let groups = Self::decode_candidate_groups(domain, response)?;
-        let endpoints = match sequence {
-            Some(sequence) => groups
-                .into_iter()
-                .find(|(chain_key, _)| {
-                    crate::core::certificate::is_primary_chain_key(chain_key)
-                        && chain_key.sequence() == sequence
-                })
-                .map(|(_, endpoints)| endpoints)
-                .unwrap_or_default(),
-            None => groups
-                .into_iter()
-                .next()
-                .map(|(_, endpoints)| endpoints)
-                .unwrap_or_default(),
+        let candidates = self
+            .lookup_candidates(hostname, EndpointLookup::default().with_family(family))
+            .await?;
+        let source = Source::H3 {
+            server: Arc::from(self.server_origin.origin().ascii_serialization()),
         };
-
-        Ok(Self {
-            endpoints: endpoints
-                .into_iter()
-                .map(|((), endpoint)| endpoint)
-                .collect(),
-        })
-    }
-}
-
-impl<C> H3Resolver<C>
-where
-    C: quic::Connect + quic::WithLocalAuthority + Send + Sync + 'static,
-    C::Error: Send + Sync + 'static,
-    C::Connection: Send + 'static,
-{
-    pub(super) fn retryable_lookup_error(error: &H3LookupError<C::Error>) -> bool {
-        matches!(
-            error,
-            H3LookupError::Request { .. } | H3LookupError::H3Stream { .. }
+        Ok(
+            futures::stream::iter(candidates.groups.into_iter().flat_map(move |group| {
+                let source = source.clone();
+                group
+                    .endpoints
+                    .into_iter()
+                    .map(move |endpoint| (source.clone(), endpoint))
+            }))
+            .boxed(),
         )
     }
 
-    pub(super) async fn lookup_response(
-        &self,
-        uri: http::Uri,
-    ) -> Result<bytes::Bytes, H3LookupError<C::Error>> {
-        let request = http::Request::get(uri)
-            .body(http_body_util::Empty::<bytes::Bytes>::new())
-            .expect("h3 dns lookup request must be valid");
-        let resp = self.execute_request(request).await?;
-
-        tracing::trace!("received response with status {}", resp.status());
-        match resp.status() {
-            http::StatusCode::OK => {}
-            http::StatusCode::NOT_FOUND => return Err(H3LookupError::NoRecordFound),
-            status => return Err(H3LookupError::Status { status }),
-        }
-
-        match resp.into_body().collect().await {
-            Ok(response) => Ok(response.to_bytes()),
-            Err(source) => Err(H3LookupError::H3Stream { source }),
-        }
-    }
-
-    pub(super) async fn lookup_response_with_retry(
-        &self,
-        uri: http::Uri,
-    ) -> Result<bytes::Bytes, H3LookupError<C::Error>> {
-        for attempt in 1..=LOOKUP_REQUEST_ATTEMPTS {
-            match tokio::time::timeout(LOOKUP_REQUEST_TIMEOUT, self.lookup_response(uri.clone()))
-                .await
-            {
-                Ok(Ok(response)) => return Ok(response),
-                Ok(Err(error))
-                    if Self::retryable_lookup_error(&error)
-                        && attempt < LOOKUP_REQUEST_ATTEMPTS =>
-                {
-                    self.endpoint.clear_pool();
-                    tracing::debug!(
-                        attempt,
-                        timeout_ms = LOOKUP_REQUEST_TIMEOUT.as_millis(),
-                        "h3 dns lookup failed, retrying"
-                    );
-                }
-                Ok(Err(error)) => return Err(error),
-                Err(_elapsed) if attempt < LOOKUP_REQUEST_ATTEMPTS => {
-                    // A lookup timeout cancels only this request future. It is
-                    // not proof that the shared endpoint pool is stale, and
-                    // clearing the pool here can drop an in-flight connection
-                    // attempt that concurrent lookups are waiting on.
-                    tracing::debug!(
-                        attempt,
-                        timeout_ms = LOOKUP_REQUEST_TIMEOUT.as_millis(),
-                        "h3 dns lookup timed out, retrying"
-                    );
-                }
-                Err(_elapsed) => {
-                    return Err(H3LookupError::RequestTimeout {
-                        timeout: LOOKUP_REQUEST_TIMEOUT,
-                    });
-                }
-            }
-        }
-
-        unreachable!("lookup retry loop returns on the final attempt")
-    }
-
-    pub async fn lookup(&self, name: &str) -> Result<RecordStream, H3LookupError<C::Error>> {
-        self.lookup_with_family(name, None).await
-    }
-
-    pub async fn lookup_with_family(
+    async fn lookup_candidates(
         &self,
         name: &str,
-        family: Option<Family>,
-    ) -> Result<RecordStream, H3LookupError<C::Error>> {
-        let server = Arc::from(self.base_url.origin().ascii_serialization());
-        let source = Source::H3 { server };
-
-        let Some((domain, sequence)) = crate::resolvers::endpoint_lookup_name_and_sequence(name)
-        else {
+        requested: EndpointLookup,
+    ) -> Result<EndpointCandidates, H3LookupError> {
+        let (name, legacy_sequence) = crate::resolvers::endpoint_lookup_name_and_sequence(name)
+            .ok_or(H3LookupError::InvalidName)?;
+        // The global dhttp resolver can call us while bootstrapping our own origin.
+        // Let the other registered sources resolve it instead of recursively sending H3.
+        if self.server_origin.host_str().is_some_and(|host| {
+            host.trim_end_matches('.')
+                .eq_ignore_ascii_case(name.trim_end_matches('.'))
+        }) {
             return Err(H3LookupError::NoRecordFound);
+        }
+        let endpoint = self.endpoint.as_ref();
+        let lookup = crate::api::exact_override(requested, legacy_sequence);
+        let key = LookupKey::new(name, lookup);
+        if let Some(cached) = self.cache.get(&key) {
+            return Ok((*cached).clone());
+        }
+
+        let url = crate::api::lookup_url(&self.server_origin, name, lookup);
+        let (headers, body) = lookup_response_with_retry(endpoint, &url).await?;
+        let source = Source::H3 {
+            server: Arc::from(self.server_origin.origin().ascii_serialization()),
         };
-
-        let now = Instant::now();
-        self.cache.prune_expired(now);
-
-        if self.cache.negative_hit(name, family) {
-            return Err(H3LookupError::NoRecordFound);
-        }
-
-        if let Some(addrs) = self.cache.positive_hit(name, family) {
-            let stream = stream::iter(addrs.into_iter().map(move |ep| (source.clone(), ep)));
-            return Ok(stream.boxed());
-        }
-
-        let endpoint_lookup = sequence
-            .map(crate::resolvers::endpoint_candidates::EndpointLookup::exact)
-            .unwrap_or_default()
-            .with_family(family);
-        let url = lookup_url(&self.base_url, domain, endpoint_lookup);
-        let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
-
-        tracing::trace!("sending lookup request to {}", self.base_url);
-        let response = match self.lookup_response_with_retry(uri).await {
-            Ok(response) => response,
-            Err(H3LookupError::NoRecordFound) => {
-                self.cache.insert_negative(name, family);
-                return Err(H3LookupError::NoRecordFound);
-            }
-            Err(error) => return Err(error),
-        };
-
-        let records = LookupRecords::decode(domain, sequence, response.as_ref())
-            .context(h3_lookup_error::DecodeSnafu)?;
-        let addrs = records
-            .endpoints
-            .into_iter()
-            .filter(|endpoint| {
-                crate::resolvers::endpoint_candidates::endpoint_matches_family(endpoint, family)
-            })
-            .collect::<Vec<_>>();
-
-        if addrs.is_empty() {
-            self.cache.insert_negative(name, family);
-            return Err(H3LookupError::NoRecordFound);
-        }
-
-        self.cache.insert_positive(name, family, addrs.clone());
-
-        Ok(stream::iter(addrs.into_iter().map(move |ep| (source.clone(), ep))).boxed())
+        let answer = crate::api::decode_lookup_response(name, lookup, source, &headers, &body)
+            .map_err(map_semantic_error)?;
+        let candidates = Arc::new(answer.candidates);
+        self.cache.insert(key, candidates.clone(), answer.ttl);
+        Ok((*candidates).clone())
     }
 }
 
-impl<C> ResolveEndpointCandidates for H3Resolver<C>
-where
-    C: quic::Connect + quic::WithLocalAuthority + Send + Sync + 'static,
-    C::Error: Send + Sync + 'static,
-    C::Connection: Send + 'static,
-{
+fn map_semantic_error(error: LookupSemanticError) -> H3LookupError {
+    match error {
+        LookupSemanticError::Decode(source) => H3LookupError::Decode { source },
+        LookupSemanticError::NoRecordFound => H3LookupError::NoRecordFound,
+        LookupSemanticError::NoUsableRecord => H3LookupError::NoUsableRecord,
+    }
+}
+
+async fn lookup_response_with_retry(
+    endpoint: Option<&dhttp::Endpoint>,
+    url: &url::Url,
+) -> Result<(http::HeaderMap, bytes::Bytes), H3LookupError> {
+    for attempt in 1..=LOOKUP_REQUEST_ATTEMPTS {
+        match tokio::time::timeout(LOOKUP_REQUEST_TIMEOUT, lookup_response(endpoint, url)).await {
+            Ok(Ok(response)) => return Ok(response),
+            Ok(Err(error))
+                if matches!(
+                    error,
+                    H3LookupError::Request { .. } | H3LookupError::Body { .. }
+                ) && attempt < LOOKUP_REQUEST_ATTEMPTS =>
+            {
+                tracing::debug!(attempt, %error, "H3 DNS lookup failed; retrying");
+            }
+            Ok(Err(error)) => return Err(error),
+            Err(_) if attempt < LOOKUP_REQUEST_ATTEMPTS => {
+                tracing::debug!(attempt, "H3 DNS lookup timed out; retrying");
+            }
+            Err(_) => {
+                return Err(H3LookupError::Timeout {
+                    timeout: LOOKUP_REQUEST_TIMEOUT,
+                    attempts: LOOKUP_REQUEST_ATTEMPTS,
+                });
+            }
+        }
+    }
+    unreachable!("the final lookup attempt returns")
+}
+
+async fn lookup_response(
+    endpoint: Option<&dhttp::Endpoint>,
+    url: &url::Url,
+) -> Result<(http::HeaderMap, bytes::Bytes), H3LookupError> {
+    let uri = url.as_str().parse().expect("validated HTTPS URL is a URI");
+    let request = match endpoint {
+        Some(endpoint) => endpoint.get(uri),
+        None => dhttp::Anonymous.get(uri),
+    };
+    let response = request
+        .await
+        .map_err(|source| H3LookupError::Request { source })?;
+    match response.status() {
+        http::StatusCode::OK => {}
+        http::StatusCode::NOT_FOUND => return Err(H3LookupError::NoRecordFound),
+        status => return Err(H3LookupError::Status { status }),
+    }
+    let (parts, body) = response.into_parts();
+    let body = read_body_limited(body, MAX_LOOKUP_RESPONSE_BYTES)
+        .await
+        .map_err(|error| match error {
+            ReadBodyError::Body(source) => H3LookupError::Body { source },
+            ReadBodyError::TooLarge => H3LookupError::ResponseTooLarge {
+                limit: MAX_LOOKUP_RESPONSE_BYTES,
+            },
+        })?;
+    Ok((parts.headers, body))
+}
+
+impl ResolveEndpointCandidates for H3Resolver {
     fn lookup_endpoint_candidates<'a>(
         &'a self,
         name: &'a str,
-        lookup: crate::resolvers::endpoint_candidates::EndpointLookup,
+        lookup: EndpointLookup,
     ) -> crate::resolvers::endpoint_candidates::EndpointCandidateFuture<'a> {
         Box::pin(async move {
-            let Some((domain, sequence)) =
-                crate::resolvers::endpoint_lookup_name_and_sequence(name)
-            else {
-                return Err(io::Error::other("no DNS record found"));
-            };
-
-            let lookup = match sequence {
-                Some(sequence) => crate::resolvers::endpoint_candidates::EndpointLookup {
-                    sequences: crate::resolvers::endpoint_candidates::SequenceQuery::Exact(
-                        sequence,
-                    ),
-                    ..lookup
-                },
-                None => lookup,
-            };
-            let url = lookup_url(&self.base_url, domain, lookup);
-            let uri: http::Uri = url.as_str().parse().expect("URL should be valid URI");
-            let response = self
-                .lookup_response_with_retry(uri)
+            self.lookup_candidates(name, lookup)
                 .await
-                .map_err(io::Error::other)?;
-            let source = Source::H3 {
-                server: Arc::from(self.base_url.origin().ascii_serialization()),
-            };
-            let groups = crate::resolvers::endpoint_candidates::select_group_pairs(
-                crate::resolvers::endpoint_candidates::filter_endpoint_candidate_groups(
-                    LookupRecords::decode_candidate_groups(domain, response.as_ref())
-                        .map_err(io::Error::other)?,
-                    lookup.family,
-                ),
-                lookup.sequences,
-            )
-            .into_iter()
-            .map(|(chain, endpoints)| EndpointCandidateGroup {
-                chain,
-                endpoints: endpoints
-                    .into_iter()
-                    .map(|((), endpoint)| endpoint)
-                    .collect(),
-                sources: vec![source.clone()],
-            })
-            .collect();
-
-            Ok(EndpointCandidates { groups })
+                .map_err(io::Error::other)
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, net::SocketAddrV4, num::NonZeroUsize};
-
     use super::*;
-    use crate::{
-        core::{
-            MdnsPacket,
-            parser::record::endpoint::EndpointAddr as DnsEndpointAddr,
-            wire::{MultiResponse, ResponseRecord},
-        },
-        resolvers::endpoint_candidates::EndpointLookup,
-    };
-
-    fn direct(addr: &str, main: bool, sequence: u32) -> DnsEndpointAddr {
-        let socket: SocketAddrV4 = addr.parse().expect("socket addr");
-        let mut endpoint = DnsEndpointAddr::direct_v4(socket);
-        endpoint.set_main(main);
-        endpoint.set_sequence(
-            dhttp_identity::certificate::CertificateSequence::try_from(sequence).unwrap(),
-        );
-        endpoint
-    }
-
-    fn response_for(name: &str, endpoints: Vec<DnsEndpointAddr>) -> Vec<u8> {
-        let mut hosts = HashMap::new();
-        hosts.insert(name.to_owned(), endpoints);
-        let packet = MdnsPacket::answer(0, &hosts).to_bytes();
-        MultiResponse::new([ResponseRecord::unsigned(packet, Vec::new())]).encode()
-    }
 
     #[test]
-    fn lookup_records_decode_candidate_groups_returns_all_primary_sequences() {
-        let response = response_for(
-            "demo.dhttp.net",
-            vec![
-                direct("192.0.2.10:4433", true, 0),
-                direct("192.0.2.20:4433", true, 1),
-                direct("192.0.2.21:4433", true, 1),
-            ],
-        );
-
-        let groups = LookupRecords::decode_candidate_groups("demo.dhttp.net", response.as_ref())
-            .expect("candidate groups decode");
-
-        assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].0.usage().kind_flag(), "0");
-        assert_eq!(groups[0].0.sequence().get(), 0);
-        assert_eq!(groups[0].1.len(), 1);
-        assert_eq!(groups[1].0.usage().kind_flag(), "0");
-        assert_eq!(groups[1].0.sequence().get(), 1);
-        assert_eq!(groups[1].1.len(), 2);
-    }
-
-    #[test]
-    fn h3_lookup_url_targets_v2_api_from_origin_base() {
-        let base_url = url::Url::parse("https://dns.example.test:4433").expect("url");
-        let url = lookup_url(&base_url, "demo.dhttp.net", EndpointLookup::default());
-
+    fn lookup_url_encodes_exact_sequence() {
+        let lookup = EndpointLookup::exact(dhttp_home::certificate::CertificateSequence::from(1u8));
         assert_eq!(
-            url.as_str(),
-            "https://dns.example.test:4433/api/v2/lookup?host=demo.dhttp.net"
-        );
-    }
-
-    #[test]
-    fn h3_lookup_url_does_not_duplicate_v2_base_path() {
-        let base_url = url::Url::parse("https://dns.example.test:4433/api/v2/").expect("url");
-        let url = lookup_url(&base_url, "demo.dhttp.net", EndpointLookup::default());
-
-        assert_eq!(
-            url.as_str(),
-            "https://dns.example.test:4433/api/v2/lookup?host=demo.dhttp.net"
-        );
-    }
-
-    #[test]
-    fn h3_lookup_url_appends_sequence_query() {
-        let base_url = url::Url::parse("https://dns.example.test:4433").expect("url");
-        let url = lookup_url(
-            &base_url,
-            "demo.dhttp.net",
-            EndpointLookup::exact(CertificateSequence::from(3u8)),
-        );
-
-        assert_eq!(
-            url.as_str(),
-            "https://dns.example.test:4433/api/v2/lookup?host=demo.dhttp.net&sequence=3"
-        );
-    }
-
-    #[test]
-    fn h3_lookup_url_encodes_endpoint_lookup_matrix() {
-        let base_url = url::Url::parse("https://dns.example.test:4433").expect("url");
-        let one = NonZeroUsize::new(1).unwrap();
-        let cases = [
-            (
-                EndpointLookup::default(),
-                "https://dns.example.test:4433/api/v2/lookup?host=demo.dhttp.net",
-            ),
-            (
-                EndpointLookup::exact(CertificateSequence::from(2u8)),
-                "https://dns.example.test:4433/api/v2/lookup?host=demo.dhttp.net&sequence=2",
-            ),
-            (
-                EndpointLookup::limit(one),
-                "https://dns.example.test:4433/api/v2/lookup?host=demo.dhttp.net&sequence_limit=1",
-            ),
-            (
-                EndpointLookup::all().with_record_limit(one),
-                "https://dns.example.test:4433/api/v2/lookup?host=demo.dhttp.net&sequence_limit=all&record_limit=1",
-            ),
-        ];
-
-        for (lookup, expected) in cases {
-            assert_eq!(
-                lookup_url(&base_url, "demo.dhttp.net", lookup).as_str(),
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn lookup_records_selects_first_server_ordered_group() {
-        let response = response_for(
-            "demo.dhttp.net",
-            vec![
-                direct("192.0.2.10:4433", true, 2),
-                direct("192.0.2.11:4433", true, 2),
-                direct("192.0.2.30:4433", true, 3),
-                direct("192.0.2.20:4433", false, 1),
-            ],
-        );
-
-        let records = LookupRecords::decode("demo.dhttp.net", None, &response).expect("records");
-
-        assert_eq!(records.endpoints.len(), 2);
-        assert_eq!(
-            records.endpoints[0],
-            dquic::qbase::net::addr::EndpointAddr::direct("192.0.2.10:4433".parse().unwrap())
-        );
-        assert_eq!(
-            records.endpoints[1],
-            dquic::qbase::net::addr::EndpointAddr::direct("192.0.2.11:4433".parse().unwrap())
-        );
-    }
-
-    #[test]
-    fn lookup_records_ignore_answer_name_mismatch() {
-        let response = response_for("other.dhttp.net", vec![direct("192.0.2.50:4433", true, 1)]);
-
-        let records = LookupRecords::decode("demo.dhttp.net", None, &response).expect("records");
-
-        assert!(records.endpoints.is_empty());
-    }
-
-    #[test]
-    fn lookup_records_filter_requested_primary_sequence() {
-        let response = response_for(
-            "demo.dhttp.net",
-            vec![
-                direct("192.0.2.10:4433", true, 0),
-                direct("192.0.2.11:4433", true, 0),
-                direct("192.0.2.20:4433", true, 1),
-            ],
-        );
-
-        let records = LookupRecords::decode(
-            "demo.dhttp.net",
-            Some(CertificateSequence::from(1u8)),
-            &response,
-        )
-        .expect("records");
-
-        assert_eq!(
-            records.endpoints,
-            vec![dquic::qbase::net::addr::EndpointAddr::direct(
-                "192.0.2.20:4433".parse().unwrap()
-            )]
+            crate::api::lookup_url(
+                &url::Url::parse("https://dns.example/").unwrap(),
+                "demo.dhttp.net",
+                lookup,
+            )
+            .as_str(),
+            "https://dns.example/api/v2/lookup?host=demo.dhttp.net&sequence=1"
         );
     }
 }
