@@ -122,6 +122,36 @@ mod tests {
     }
 
     #[test]
+    fn dns_packet_preserves_relay_outer_agent_and_nat_flag() {
+        let name = "client.example.com.dhttp.net";
+        let authority = authority(name);
+        for (agent, outer) in [
+            ("8.8.8.8:20002", "1.1.1.1:51000"),
+            (
+                "[2001:4860:4860::8888]:20002",
+                "[2606:4700:4700::1111]:51000",
+            ),
+        ] {
+            let agent: SocketAddr = agent.parse().unwrap();
+            let outer: SocketAddr = outer.parse().unwrap();
+            let relay = DquicEndpointAddr::mediate(agent, outer);
+            let packet =
+                dns_packet_for_authority(&authority, name, &mut std::iter::once(relay)).unwrap();
+            let (remain, parsed) = be_packet(&packet).unwrap();
+            assert!(remain.is_empty());
+            assert_eq!(parsed.answers.len(), 1);
+            let RData::E(encoded) = parsed.answers[0].data() else {
+                panic!("expected E record")
+            };
+            assert!(encoded.is_nat());
+            assert_eq!(encoded.addr(), outer);
+            assert_eq!(encoded.agent_addr(), Some(agent));
+            assert_eq!(encoded.to_string(), format!("{outer}-{agent}"));
+            assert_eq!(DquicEndpointAddr::try_from(encoded.clone()).unwrap(), relay);
+        }
+    }
+
+    #[test]
     fn dns_packet_for_authority_rejects_name_mismatch() {
         let authority = authority("client.example.com.dhttp.net");
         let mut endpoints = std::iter::once(endpoint());
