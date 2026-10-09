@@ -21,8 +21,8 @@ bitfield-struct = "0.13"
 bytes = "1"
 dashmap = { version = "6", optional = true }
 dhttp-home = { version = "0.5.0", features = ["ssl"] }
-qtls = "0.6.1"
-qresolve = "0.8.1"
+qtls = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
+qresolve = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
 flume = { version = "0.12", optional = true }
 futures = "0.3"
 libc = { version = "0.2", optional = true }
@@ -79,8 +79,8 @@ http = ["dep:dashmap", "dep:http", "dep:reqwest", "dep:rustls-native-certs", "de
 mdns = ["dep:dashmap", "dep:flume", "dep:libc", "dep:socket2"]
 
 [dev-dependencies]
-qbase = "0.6.4"
-qprotocol = "0.6.1"
+qbase = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
+qprotocol = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
 scopeguard = "1"
 tower = { version = "0.5", features = ["util"] }
 rcgen = "0.14"
@@ -88,13 +88,6 @@ clap = { version = "4", features = ["derive"] }
 shellexpand = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-[patch.crates-io]
-dhttp-home = { path = "../dhttp/home" }
-qtls = { path = "../dquic/qtls" }
-dhttp = { path = "../dhttp/dhttp" }
-qresolve = { path = "../dquic/qresolve" }
-qbase = { path = "../dquic/qbase" }
-qprotocol = { path = "../dquic/qprotocol" }
 
 [[example]]
 name = "mdns_query"
