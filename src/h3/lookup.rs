@@ -75,12 +75,23 @@ impl H3Resolver {
         }
 
         let url = crate::api::lookup_url(&self.server_origin, name, lookup);
-        let (headers, body) = lookup_response_with_retry(endpoint, &url).await?;
+        tracing::debug!(host = name, %url, named = endpoint.is_some(), "H3 DNS lookup started");
+        let (headers, body) =
+            lookup_response_with_retry(endpoint, &url)
+                .await
+                .map_err(|error| {
+                    tracing::debug!(host = name, %url, %error, "H3 DNS lookup failed");
+                    error
+                })?;
         let source = Source::H3 {
             server: Arc::from(self.server_origin.origin().ascii_serialization()),
         };
         let answer = crate::api::decode_lookup_response(name, lookup, source, &headers, &body)
-            .map_err(map_semantic_error)?;
+            .map_err(map_semantic_error)
+            .map_err(|error| {
+                tracing::debug!(host = name, %url, %error, bytes = body.len(), "H3 DNS lookup response rejected");
+                error
+            })?;
         let candidates = Arc::new(answer.candidates);
         self.cache.insert(key, candidates.clone(), answer.ttl);
         Ok((*candidates).clone())
@@ -137,6 +148,7 @@ async fn lookup_response(
     let response = request
         .await
         .map_err(|source| H3LookupError::Request { source })?;
+    tracing::debug!(%url, status = %response.status(), headers = ?response.headers(), "H3 DNS lookup response");
     match response.status() {
         http::StatusCode::OK => {}
         http::StatusCode::NOT_FOUND => return Err(H3LookupError::NoRecordFound),
