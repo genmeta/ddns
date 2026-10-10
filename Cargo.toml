@@ -21,8 +21,8 @@ bitfield-struct = "0.13"
 bytes = "1"
 dashmap = { version = "6", optional = true }
 dhttp-home = { version = "0.5.0", features = ["ssl"] }
-qtls = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
-qresolve = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
+qtls = { git = "https://github.com/genmeta/dquic.git", rev = "1cab7042ddbb4ae65b424cae81a91f88d4eaaaeb" }
+qresolve = { git = "https://github.com/genmeta/dquic.git", rev = "1cab7042ddbb4ae65b424cae81a91f88d4eaaaeb" }
 flume = { version = "0.12", optional = true }
 futures = "0.3"
 libc = { version = "0.2", optional = true }
@@ -79,8 +79,8 @@ http = ["dep:dashmap", "dep:http", "dep:reqwest", "dep:rustls-native-certs", "de
 mdns = ["dep:dashmap", "dep:flume", "dep:libc", "dep:socket2"]
 
 [dev-dependencies]
-qbase = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
-qprotocol = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
+qbase = { git = "https://github.com/genmeta/dquic.git", rev = "1cab7042ddbb4ae65b424cae81a91f88d4eaaaeb" }
+qprotocol = { git = "https://github.com/genmeta/dquic.git", rev = "1cab7042ddbb4ae65b424cae81a91f88d4eaaaeb" }
 scopeguard = "1"
 tower = { version = "0.5", features = ["util"] }
 rcgen = "0.14"
