@@ -16,7 +16,7 @@ autobins = false
 name = "ddns"
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
 bitfield-struct = "0.13"
 bytes = "1"
 dashmap = { version = "6", optional = true }
