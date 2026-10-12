@@ -8,8 +8,7 @@ use std::{
 
 use base64::Engine;
 use bytes::BufMut;
-use dhttp_identity::certificate::{CertificateChainKey, CertificateSequence};
-use dquic::qbase::net::addr::EndpointAddr as DquicEndpointAddr;
+use dhttp_home::certificate::{CertificateChainKey, CertificateSequence};
 use nom::{
     IResult, Parser,
     bytes::streaming::take,
@@ -17,6 +16,7 @@ use nom::{
     error::{ErrorKind, make_error},
     number::streaming::{be_u8, be_u16, be_u32, be_u128},
 };
+use qresolve::EndpointAddr as DquicEndpointAddr;
 use rustls::{SignatureScheme, pki_types::SubjectPublicKeyInfoDer};
 use snafu::{ResultExt, Snafu};
 
@@ -29,9 +29,7 @@ use crate::core::parser::{
 #[snafu(module)]
 pub enum SignEndpointError {
     #[snafu(display("failed to sign endpoint address"))]
-    Sign {
-        source: dhttp_identity::identity::SignError,
-    },
+    Sign { source: qtls::SignError },
     #[snafu(display("no supported signature scheme for endpoint address"))]
     NoSupportedScheme,
 }
@@ -219,19 +217,18 @@ impl EndpointAddr {
 
     pub async fn sign_with_authority(
         &mut self,
-        authority: &(impl dhttp_identity::identity::LocalAuthority + ?Sized),
+        authority: &qtls::LocalAuthority,
     ) -> Result<(), SignEndpointError> {
         self.set_signed(true);
         let data = self.signed_data();
 
         let scheme = authority
-            .cert_chain()
+            .certificates()
             .first()
-            .and_then(|_| sigin::canonical_scheme_for_spki(authority.public_key()))
+            .and_then(|_| sigin::canonical_scheme_for_spki(authority.public_key().clone()))
             .ok_or(SignEndpointError::NoSupportedScheme)?;
         let signature = authority
-            .sign(&data)
-            .await
+            .sign(qtls::SignatureScheme::from(u16::from(scheme)), &data)
             .context(sign_endpoint_error::SignSnafu)?;
 
         self.signature = Some(EndpointSignature {
@@ -788,7 +785,7 @@ impl TryFrom<EndpointAddr> for DquicEndpointAddr {
 
 pub async fn sign_endponit_address(
     server_id: u8,
-    authority: Option<&(impl dhttp_identity::identity::LocalAuthority + ?Sized)>,
+    authority: Option<&qtls::LocalAuthority>,
     endpoint: DquicEndpointAddr,
 ) -> Option<EndpointAddr> {
     let mut ep: EndpointAddr = endpoint.try_into().ok()?;
@@ -802,15 +799,9 @@ pub async fn sign_endponit_address(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        net::{Ipv4Addr, Ipv6Addr},
-        sync::Arc,
-    };
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     use bytes::BytesMut;
-    use futures::future::BoxFuture;
-    use ring::signature::KeyPair;
-    use rustls::sign::{Signer, SigningKey};
 
     use super::*;
 
@@ -833,9 +824,8 @@ mod tests {
     fn endpoint_certificate_chain_key_uses_present_sequence() {
         let mut endpoint = EndpointAddr::direct_v4(v4_outer());
         endpoint.set_main(false);
-        endpoint.set_sequence(
-            dhttp_identity::certificate::CertificateSequence::try_from(7u32).unwrap(),
-        );
+        endpoint
+            .set_sequence(dhttp_home::certificate::CertificateSequence::try_from(7u32).unwrap());
 
         let key = endpoint.certificate_chain_key();
 
@@ -846,7 +836,7 @@ mod tests {
     #[test]
     fn endpoint_parser_rejects_over_range_certificate_sequence() {
         let sequence = crate::core::parser::varint::VarInt::from_u64(
-            dhttp_identity::certificate::CertificateSequence::MAX as u64 + 1,
+            dhttp_home::certificate::CertificateSequence::MAX as u64 + 1,
         )
         .unwrap();
         let mut packet = BytesMut::new();
@@ -1053,68 +1043,8 @@ mod tests {
 
     #[test]
     fn endpoint_signature_roundtrip_and_verify() {
-        #[derive(Debug)]
-        struct Ed25519Key {
-            keypair: Arc<ring::signature::Ed25519KeyPair>,
-            cert_chain: Vec<rustls::pki_types::CertificateDer<'static>>,
-        }
-
-        #[derive(Debug)]
-        struct Ed25519Signer(Arc<ring::signature::Ed25519KeyPair>);
-
-        impl Signer for Ed25519Signer {
-            fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rustls::Error> {
-                Ok(self.0.sign(message).as_ref().to_vec())
-            }
-
-            fn scheme(&self) -> SignatureScheme {
-                SignatureScheme::ED25519
-            }
-        }
-
-        impl SigningKey for Ed25519Key {
-            fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
-                offered
-                    .contains(&SignatureScheme::ED25519)
-                    .then(|| Box::new(Ed25519Signer(self.keypair.clone())) as Box<dyn Signer>)
-            }
-
-            fn algorithm(&self) -> rustls::SignatureAlgorithm {
-                rustls::SignatureAlgorithm::ED25519
-            }
-        }
-
-        impl dhttp_identity::identity::LocalAuthority for Ed25519Key {
-            fn name(&self) -> &str {
-                "authority.example"
-            }
-
-            fn cert_chain(&self) -> &[rustls::pki_types::CertificateDer<'static>] {
-                &self.cert_chain
-            }
-
-            fn sign(
-                &self,
-                data: &[u8],
-            ) -> BoxFuture<'_, Result<Vec<u8>, dhttp_identity::identity::SignError>> {
-                let result = dhttp_identity::identity::sign_with_key(self, data);
-                Box::pin(std::future::ready(result))
-            }
-        }
-
-        let rng = ring::rand::SystemRandom::new();
-        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
-        let keypair =
-            Arc::new(ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap());
-        let mut spki = Vec::with_capacity(44);
-        spki.extend_from_slice(&[
-            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
-        ]);
-        spki.extend_from_slice(keypair.public_key().as_ref());
-        let key = Ed25519Key {
-            keypair: keypair.clone(),
-            cert_chain: vec![rustls::pki_types::CertificateDer::from(spki.clone())],
-        };
+        let key = crate::test_support::authority("authority.example", 0, 0);
+        let spki = key.public_key().as_ref().to_vec();
 
         let addr = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 5353);
         let mut ep = EndpointAddr::direct_v4(addr);
@@ -1146,42 +1076,16 @@ mod tests {
 
     #[test]
     fn sign_with_authority_uses_canonical_scheme_from_public_key() {
-        #[derive(Debug)]
-        struct Ed25519Authority {
-            cert_chain: Vec<rustls::pki_types::CertificateDer<'static>>,
-        }
-
-        impl dhttp_identity::identity::LocalAuthority for Ed25519Authority {
-            fn name(&self) -> &str {
-                "authority.example"
-            }
-
-            fn cert_chain(&self) -> &[rustls::pki_types::CertificateDer<'static>] {
-                &self.cert_chain
-            }
-
-            fn sign(
-                &self,
-                _data: &[u8],
-            ) -> BoxFuture<'_, Result<Vec<u8>, dhttp_identity::identity::SignError>> {
-                Box::pin(async move { Ok(vec![1, 2, 3]) })
-            }
-        }
-
-        let cert_chain = vec![rustls::pki_types::CertificateDer::from(vec![
-            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ])];
+        let authority = crate::test_support::authority("authority.example", 0, 0);
         let mut ep = EndpointAddr::direct_v4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 5353));
-        futures::executor::block_on(ep.sign_with_authority(&Ed25519Authority { cert_chain }))
-            .unwrap();
+        futures::executor::block_on(ep.sign_with_authority(&authority)).unwrap();
 
         let signature = ep.signature().unwrap();
         assert_eq!(
             SignatureScheme::from(signature.scheme),
             SignatureScheme::ED25519
         );
-        assert_eq!(signature.signature, vec![1, 2, 3]);
+        assert!(ep.verify_signature(authority.public_key().clone()).unwrap());
     }
 
     #[test]

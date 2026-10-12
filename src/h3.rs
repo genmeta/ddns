@@ -1,100 +1,115 @@
-use std::{convert::Infallible, fmt, io, sync::Arc, time::Duration};
+use std::{fmt, io, time::Duration};
 
-use dquic::{
-    qbase::net::addr::EndpointAddr,
-    qresolve::{Publish, PublishFuture, Resolve, ResolveFuture},
-};
-use h3x::{
-    dhttp::message::{MessageStreamError, hyper::client::RequestError as HyperRequestError},
-    endpoint::H3Endpoint,
-    quic,
-};
+use bytes::{Bytes, BytesMut};
+use futures::FutureExt;
+use http_body_util::BodyExt;
+use qresolve::{EndpointAddr, Family, Publish, PublishFuture, Resolve, ResolveFuture};
 use url::Url;
+
+pub use crate::api::{InvalidServerOrigin, LookupDecodeError};
 
 mod cache;
 mod lookup;
 mod publish;
-mod request;
 
 const LOOKUP_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 const LOOKUP_REQUEST_ATTEMPTS: usize = 3;
+const STATUS_BODY_LIMIT: usize = 4096;
 
-pub struct H3Resolver<C>
-where
-    C: quic::Connect + quic::WithLocalAuthority,
-{
-    endpoint: Arc<H3Endpoint<C, C::Connection>>,
-    base_url: Url,
+pub struct H3Resolver {
+    server_origin: Url,
+    endpoint: Option<dhttp::Endpoint>,
+    // Each resolver has a fixed origin and identity, so its cache is already isolated.
     cache: cache::LookupCache,
 }
 
-impl<C> fmt::Debug for H3Resolver<C>
-where
-    C: quic::Connect + quic::WithLocalAuthority,
-{
+impl fmt::Debug for H3Resolver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("H3Resolver")
-            .field("base_url", &self.base_url)
+            .field("server_origin", &self.server_origin)
             .finish_non_exhaustive()
     }
 }
 
-impl<C> fmt::Display for H3Resolver<C>
-where
-    C: quic::Connect + quic::WithLocalAuthority,
-{
+impl fmt::Display for H3Resolver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "H3 DNS Resolver({})", self.base_url)
+        write!(f, "H3 DNS Resolver({})", self.server_origin)
     }
 }
 
 #[derive(Debug, snafu::Snafu)]
-#[snafu(module)]
-pub enum H3RequestError<E: std::error::Error + Send + Sync + 'static> {
-    #[snafu(display("failed to connect h3 endpoint"))]
-    Connect { source: h3x::pool::ConnectError<E> },
-    #[snafu(display("h3 request error"))]
-    Request {
-        source: HyperRequestError<Infallible>,
-    },
+#[snafu(module(h3_lookup_error))]
+#[non_exhaustive]
+pub enum H3LookupError {
+    #[snafu(display("invalid DNS name"))]
+    InvalidName,
+    #[snafu(display("DHTTP request failed"))]
+    Request { source: dhttp::Error },
+    #[snafu(display("DHTTP response body failed"))]
+    Body { source: dhttp::BoxError },
+    #[snafu(display("H3 DNS lookup timed out after {attempts} attempts of {timeout:?}"))]
+    Timeout { timeout: Duration, attempts: usize },
+    #[snafu(display("H3 DNS response exceeds {limit} bytes"))]
+    ResponseTooLarge { limit: usize },
+    #[snafu(display("H3 DNS server returned {status}"))]
+    Status { status: http::StatusCode },
+    #[snafu(display("failed to decode H3 DNS response"))]
+    Decode { source: LookupDecodeError },
+    #[snafu(display("no DNS record found"))]
+    NoRecordFound,
+    #[snafu(display("H3 DNS response contained no usable records"))]
+    NoUsableRecord,
 }
 
 #[derive(Debug, snafu::Snafu)]
-#[snafu(module)]
-pub enum H3PublishError<E: std::error::Error + Send + Sync + 'static> {
-    #[snafu(transparent)]
-    Request { source: H3RequestError<E> },
-    #[snafu(display("anonymous h3 endpoint cannot sign dns publish request"))]
-    AnonymousEndpoint,
-    #[snafu(display("failed to get h3 endpoint local authority"))]
-    LocalAuthority { source: h3x::quic::ConnectionError },
-    #[snafu(display("failed to sign h3 dns publish request"))]
-    SignRequest {
-        source: crate::core::signature::SignatureFieldsError,
-    },
-    #[snafu(display("failed to encode h3 dns publish packet"))]
+#[snafu(module(h3_publish_error))]
+#[non_exhaustive]
+pub enum H3PublishError {
+    #[snafu(display("publishing requires a named DHTTP endpoint"))]
+    IdentityRequired,
+    #[snafu(display("invalid or missing DHTTP DNS publish lease"))]
+    InvalidLease,
+    #[snafu(display("failed to build local DHTTP signing authority"))]
+    Credentials { source: io::Error },
+    #[snafu(display("invalid DNS name"))]
+    InvalidName,
+    #[snafu(display("publisher identity does not match DNS name"))]
+    IdentityNameMismatch,
+    #[snafu(display("failed to encode H3 DNS publish packet"))]
     EncodePacket {
         source: crate::publishers::packet::EncodeAuthorityDnsPacketError,
     },
-    #[snafu(display("h3 dns publish response body error"))]
-    ResponseBody { source: MessageStreamError },
-    #[snafu(display("{status}{message}"))]
+    #[snafu(display("H3 DNS publish packet exceeds {limit} bytes"))]
+    PacketTooLarge { limit: usize },
+    #[snafu(display("failed to sign H3 DNS publish request"))]
+    SignRequest {
+        source: crate::core::signature::SignatureFieldsError,
+    },
+    #[snafu(display("DHTTP request failed"))]
+    Request { source: dhttp::Error },
+    #[snafu(display("failed to upload H3 DNS publish packet"))]
+    Upload { source: io::Error },
+    #[snafu(display("DHTTP response body failed"))]
+    Body { source: dhttp::BoxError },
+    #[snafu(display("H3 DNS response exceeds {limit} bytes"))]
+    ResponseTooLarge { limit: usize },
+    #[snafu(display("H3 DNS server returned {status}{message}"))]
     Status {
         status: http::StatusCode,
-        message: StatusBody,
+        message: StatusMessage,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StatusBody(String);
+pub struct StatusMessage(String);
 
-impl StatusBody {
-    pub fn new(body: String) -> Self {
-        Self(body)
+impl StatusMessage {
+    fn new(message: String) -> Self {
+        Self(message)
     }
 }
 
-impl fmt::Display for StatusBody {
+impl fmt::Display for StatusMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.0.is_empty() {
             Ok(())
@@ -104,204 +119,129 @@ impl fmt::Display for StatusBody {
     }
 }
 
-#[derive(Debug, snafu::Snafu)]
-#[snafu(module)]
-pub enum H3LookupError<E: std::error::Error + Send + Sync + 'static> {
-    #[snafu(transparent)]
-    Request { source: H3RequestError<E> },
-    #[snafu(display("h3 stream error"))]
-    H3Stream { source: MessageStreamError },
-    #[snafu(display("h3 request timed out after {timeout:?}"))]
-    RequestTimeout { timeout: Duration },
-    #[snafu(display("{status}"))]
-    Status { status: http::StatusCode },
-    #[snafu(display("no DNS record found"))]
-    NoRecordFound,
-    #[snafu(display("failed to decode h3 dns lookup response"))]
-    Decode { source: LookupDecodeError },
-}
-
-#[derive(Debug, snafu::Snafu)]
-#[snafu(module)]
-pub enum LookupDecodeError {
-    #[snafu(display("failed to decode multi-record response"))]
-    MultiResponse,
-    #[snafu(display("failed to parse DNS records from response"))]
-    ParseRecords {
-        source: nom::Err<nom::error::Error<Vec<u8>>>,
-    },
-}
-
-impl<C> H3Resolver<C>
-where
-    C: quic::Connect + quic::WithLocalAuthority + Send + Sync + 'static,
-    C::Error: Send + Sync + 'static,
-    C::Connection: Send + 'static,
-{
+impl H3Resolver {
+    /// Bind DNS requests to a named DHTTP endpoint.
+    ///
+    /// Initialize `dhttp::DhttpNetwork` before making requests.
+    /// Queries and publishing share the endpoint's already loaded credentials.
+    /// Register a bootstrap resolver (for example `qresolve::SystemResolver`) to
+    /// resolve the DNS server's conventional hostname.
     pub fn new(
-        base_url: impl AsRef<str>,
-        client: H3Endpoint<C, C::Connection>,
-    ) -> io::Result<Self> {
-        Self::from_endpoint(base_url, Arc::new(client))
-    }
-
-    pub fn from_endpoint(
-        base_url: impl AsRef<str>,
-        endpoint: Arc<H3Endpoint<C, C::Connection>>,
-    ) -> io::Result<Self> {
-        let base_url = Url::parse(base_url.as_ref())
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        base_url.host_str().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "base URL must have a valid host",
-            )
-        })?;
-
+        server_origin: Url,
+        endpoint: &dhttp::Endpoint,
+    ) -> Result<Self, InvalidServerOrigin> {
+        validate_server_origin(&server_origin)?;
         Ok(Self {
-            endpoint,
-            base_url,
+            server_origin,
+            endpoint: Some(endpoint.clone()),
             cache: cache::LookupCache::default(),
         })
     }
 
-    pub fn clear_pool(&self) {
-        self.endpoint.clear_pool();
+    /// Query DNS over H3 through `dhttp::Anonymous`, without local credentials.
+    ///
+    /// Initialize `dhttp::DhttpNetwork` and register a bootstrap resolver before
+    /// making requests. Anonymous resolvers cannot publish endpoint records.
+    pub fn anonymous(server_origin: Url) -> Result<Self, InvalidServerOrigin> {
+        validate_server_origin(&server_origin)?;
+        Ok(Self {
+            server_origin,
+            endpoint: None,
+            cache: cache::LookupCache::default(),
+        })
+    }
+
+    pub fn clear_cache(&self) {
+        self.cache.clear();
     }
 }
 
-impl<C> Publish for H3Resolver<C>
+fn validate_server_origin(url: &Url) -> Result<(), InvalidServerOrigin> {
+    crate::api::validate_server_origin(url, true)
+}
+
+#[derive(Debug)]
+enum ReadBodyError<E> {
+    Body(E),
+    TooLarge,
+}
+
+async fn read_body_limited<B>(mut body: B, limit: usize) -> Result<Bytes, ReadBodyError<B::Error>>
 where
-    C: quic::Connect + quic::WithLocalAuthority + Send + Sync + 'static,
-    C::Error: Send + Sync + 'static,
-    C::Connection: Send + 'static,
+    B: http_body::Body<Data = Bytes> + Unpin,
 {
+    let mut bytes = BytesMut::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(ReadBodyError::Body)?;
+        let Ok(data) = frame.into_data() else {
+            continue;
+        };
+        if data.len() > limit.saturating_sub(bytes.len()) {
+            return Err(ReadBodyError::TooLarge);
+        }
+        bytes.extend_from_slice(&data);
+    }
+    Ok(bytes.freeze())
+}
+
+impl Publish for H3Resolver {
     fn publish<'a>(
         &'a self,
         name: &'a str,
         endpoints: &mut dyn Iterator<Item = EndpointAddr>,
     ) -> PublishFuture<'a> {
-        let endpoints: Vec<_> = endpoints.collect();
-        Box::pin(async move {
+        let endpoints = endpoints.collect::<Vec<_>>();
+        async move {
             self.publish_endpoints(name, endpoints)
                 .await
+                .map(|_| ())
                 .map_err(io::Error::other)
-        })
+        }
+        .boxed()
     }
 }
 
-impl<C> Resolve for H3Resolver<C>
-where
-    C: quic::Connect + quic::WithLocalAuthority + Send + Sync + 'static,
-    C::Error: Send + Sync + 'static,
-    C::Connection: Send + 'static,
-{
-    fn lookup<'l>(
-        &'l self,
-        hostname: &'l str,
-        _servname: &'l str,
-        family: Option<dquic::qresolve::Family>,
-    ) -> ResolveFuture<'l> {
-        Box::pin(async move {
-            H3Resolver::lookup_with_family(self, hostname, family)
+impl Resolve for H3Resolver {
+    fn lookup<'a>(
+        &'a self,
+        hostname: &'a str,
+        servname: &'a str,
+        family: Option<Family>,
+    ) -> ResolveFuture<'a> {
+        async move {
+            H3Resolver::lookup(self, hostname, servname, family)
                 .await
                 .map_err(io::Error::other)
-        })
+        }
+        .boxed()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    #[cfg(feature = "dquic-network")]
-    use dquic::{qbase::net::addr::EndpointAddr, qresolve::Source};
-    #[cfg(feature = "dquic-network")]
-    use futures::StreamExt;
-
     use super::*;
-    #[cfg(feature = "dquic-network")]
-    use crate::resolvers::DHTTP_NAME_SERVICE;
 
     #[test]
-    fn lookup_retry_budget_leaves_external_timeout_margin() {
-        let total_budget = LOOKUP_REQUEST_TIMEOUT * LOOKUP_REQUEST_ATTEMPTS as u32;
-
-        assert!(
-            total_budget <= Duration::from_secs(10),
-            "h3 lookup must return before common 15s command timeouts so callers can retry"
-        );
+    fn origin_validation_blocks_recursive_and_non_origin_urls() {
+        assert!(matches!(
+            validate_server_origin(&Url::parse("https://dns.dhttp.net/").unwrap()),
+            Err(InvalidServerOrigin::DhttpOrigin)
+        ));
+        assert!(matches!(
+            validate_server_origin(&Url::parse("https://dns.example/api").unwrap()),
+            Err(InvalidServerOrigin::HasPathQueryOrFragment)
+        ));
+        assert!(validate_server_origin(&Url::parse("https://dns.example:4433/").unwrap()).is_ok());
     }
 
-    #[cfg(feature = "dquic-network")]
     #[tokio::test]
-    async fn cached_lookup_reports_h3_dns_source() {
-        let endpoint = Arc::new(h3x::endpoint::H3Endpoint::new(
-            h3x::dquic::QuicEndpoint::builder().build().await,
+    async fn bounded_reader_accepts_limit_and_rejects_limit_plus_one() {
+        let exact = http_body_util::Full::new(Bytes::from_static(b"1234"));
+        assert_eq!(read_body_limited(exact, 4).await.unwrap(), "1234");
+        let over = http_body_util::Full::new(Bytes::from_static(b"12345"));
+        assert!(matches!(
+            read_body_limited(over, 4).await,
+            Err(ReadBodyError::TooLarge)
         ));
-        let resolver = H3Resolver::from_endpoint(DHTTP_NAME_SERVICE, endpoint).unwrap();
-        resolver.cache.insert_positive(
-            "car.lab.dhttp.net",
-            None,
-            vec![EndpointAddr::direct("192.168.5.78:41748".parse().unwrap())],
-        );
-
-        let mut records = resolver.lookup("car.lab.dhttp.net").await.unwrap();
-        let (source, endpoint) = records.next().await.unwrap();
-
-        assert_eq!(
-            source,
-            Source::H3 {
-                server: Arc::from(resolver.base_url.origin().ascii_serialization())
-            }
-        );
-        assert_eq!(
-            endpoint,
-            EndpointAddr::direct("192.168.5.78:41748".parse().unwrap())
-        );
-    }
-
-    #[cfg(feature = "dquic-network")]
-    #[tokio::test]
-    async fn cached_dns_genmeta_net_record_is_returned() {
-        let endpoint = Arc::new(h3x::endpoint::H3Endpoint::new(
-            h3x::dquic::QuicEndpoint::builder().build().await,
-        ));
-        let resolver = H3Resolver::from_endpoint(DHTTP_NAME_SERVICE, endpoint).unwrap();
-        resolver.cache.insert_positive(
-            "dns.genmeta.net",
-            None,
-            vec![EndpointAddr::direct("192.0.2.53:4433".parse().unwrap())],
-        );
-
-        let mut records = resolver.lookup("dns.genmeta.net").await.unwrap();
-        let (_source, endpoint) = records.next().await.unwrap();
-
-        assert_eq!(
-            endpoint,
-            EndpointAddr::direct("192.0.2.53:4433".parse().unwrap())
-        );
-    }
-
-    #[cfg(feature = "dquic-network")]
-    #[tokio::test]
-    async fn cached_lookup_uses_e_record_port_not_input_port() {
-        let endpoint = Arc::new(h3x::endpoint::H3Endpoint::new(
-            h3x::dquic::QuicEndpoint::builder().build().await,
-        ));
-        let resolver = H3Resolver::from_endpoint(DHTTP_NAME_SERVICE, endpoint).unwrap();
-        resolver.cache.insert_positive(
-            "nat.genmeta.net:20004",
-            None,
-            vec![EndpointAddr::direct("192.0.2.10:21000".parse().unwrap())],
-        );
-
-        let mut records = resolver.lookup("nat.genmeta.net:20004").await.unwrap();
-        let (_source, endpoint) = records.next().await.unwrap();
-
-        assert_eq!(
-            endpoint,
-            EndpointAddr::direct("192.0.2.10:21000".parse().unwrap())
-        );
     }
 }

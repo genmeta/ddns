@@ -158,10 +158,6 @@ pub struct PacketRouter {
         flume::Sender<(SocketAddr, Packet)>,
         flume::Receiver<(SocketAddr, Packet)>,
     ),
-    responses: (
-        flume::Sender<(SocketAddr, Packet)>,
-        flume::Receiver<(SocketAddr, Packet)>,
-    ),
     queries: DashMap<NonZero<u16>, flume::Sender<(SocketAddr, Packet)>>,
 }
 
@@ -169,7 +165,6 @@ impl PacketRouter {
     pub fn new() -> Self {
         Self {
             requests: flume::bounded(MAX_DEQUE_SIZE),
-            responses: flume::bounded(MAX_DEQUE_SIZE),
             queries: DashMap::new(),
         }
     }
@@ -178,12 +173,6 @@ impl PacketRouter {
         &self,
     ) -> impl Future<Output = Result<(SocketAddr, Packet), flume::RecvError>> + Send + use<> {
         self.requests.1.clone().into_recv_async()
-    }
-
-    pub fn receive_boardcast(
-        &self,
-    ) -> impl Future<Output = Result<(SocketAddr, Packet), flume::RecvError>> + Send + use<> {
-        self.responses.1.clone().into_recv_async()
     }
 
     pub async fn register_query(
@@ -227,14 +216,7 @@ impl PacketRouter {
 
     pub fn deliver(&self, source: SocketAddr, packet: Packet) {
         match (packet.is_query(), packet.id()) {
-            (true, 0) => {
-                if self.responses.0.try_send((source, packet.clone())).is_err() {
-                    // Queue is full, remove oldest message (FIFO)
-                    let _ = self.responses.1.try_recv();
-                    // Try to send again after removing oldest
-                    let _ = self.responses.0.try_send((source, packet));
-                }
-            }
+            (true, 0) => {}
             (true, query_id) => match self.queries.get(&NonZero::new(query_id).unwrap()) {
                 Some(tx) => {
                     if let Err(error) = tx.try_send((source, packet)) {
@@ -374,10 +356,5 @@ impl MdnsProtocol {
         let router = self.router.upgrade().ok_or(Disconnected)?;
 
         router.receive_query().await.map_err(|_| Disconnected)
-    }
-    pub async fn receive_boardcast(&self) -> Result<(SocketAddr, Packet), Disconnected> {
-        let router = self.router.upgrade().ok_or(Disconnected)?;
-
-        router.receive_boardcast().await.map_err(|_| Disconnected)
     }
 }

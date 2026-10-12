@@ -9,7 +9,7 @@
   <a href="https://github.com/genmeta/ddns/actions/workflows/publish-crates.yml"><img src="https://img.shields.io/github/actions/workflow/status/genmeta/ddns/publish-crates.yml?label=CI" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License"></a>
   <a href="https://docs.dhttp.net/en/docs/protocol/ddns"><img src="https://img.shields.io/badge/docs-dhttp.net-ff9900.svg" alt="Documentation"></a>
-  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.85%2B-dea584.svg" alt="Rust"></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.88%2B-dea584.svg" alt="Rust"></a>
 </p>
 
 **English** | [简体中文](README_CN.md)
@@ -87,6 +87,14 @@ For convenience, `.dhttp.net` can be replaced with `~`. For example:
 
 ## DNS Resolution
 
+Applications select their resolver sources and register them with `qresolve::Resolver`.
+DHTTP owns interface watching and exposes live bindings through
+`DhttpNetwork::active_bindings()`. Pass their device names and IP addresses to
+`MdnsResolverSet::reconcile()` to create missing mDNS instances and shut down
+obsolete ones. The application schedules reconciliation and handles its returned
+per-binding errors; dyns does not start another interface watcher or initialize
+the DHTTP network.
+
 DHttp domain names can be queried through mDNS and DoH, while conventional domain names continue to be resolved by System DNS. Applications can combine these methods based on the name and network environment:
 
 | Method | Purpose |
@@ -112,15 +120,29 @@ After installing Rust and Git, clone the repository and run the mDNS example:
 ```bash
 git clone https://github.com/genmeta/ddns.git
 cd ddns
-cargo run --example mdns_discover --features mdns -- \
+cargo run --example mdns_query --features mdns -- \
   --ip YOUR_LOCAL_IP \
-  --device YOUR_NETWORK_INTERFACE
+  --device YOUR_NETWORK_INTERFACE \
+  --host alice.smith.dhttp.net
 ```
 
-Replace `YOUR_LOCAL_IP` and `YOUR_NETWORK_INTERFACE` with a local address and its network interface. The example binds to that interface, publishes built-in E records, and prints received mDNS packets.
+Replace `YOUR_LOCAL_IP` and `YOUR_NETWORK_INTERFACE` with a local address and its network interface. The example binds to that interface, queries the specified host, and prints the discovered endpoints.
 
 For other query, publication, and Rust API examples, see [Examples and command reference](examples/README.md).
 
 ## Contributing
 
 Bug reports, protocol discussions, documentation improvements, and code contributions are welcome. Before changing the E record format or resolution protocol, please discuss its compatibility implications in [GitHub Issues](https://github.com/genmeta/ddns/issues) first.
+
+### Explicit resolver setup
+
+With the `h3`, `http` and `mdns` features enabled, call
+`install_resolvers(&[DnsScheme::Mdns, DnsScheme::H3])` with the application's
+selected sources. Repeated registration is idempotent, and H3/HTTP sources also
+install system DNS for their bootstrap origin. This never initializes DHTTP or
+starts an interface watcher.
+
+`MdnsResolverSet::maintain(period, snapshot)` reconciles once before returning,
+then polls the supplied snapshot callback. The caller provides its active
+bindings and scope policy. Abort the returned task or shut down the resolver set
+to stop maintenance. Snapshot failure preserves current instances for retry.

@@ -1,83 +1,158 @@
 mod if_nametoindex;
 mod protocol;
-pub mod service;
+mod service;
 
-use std::{fmt, io, net::IpAddr};
-#[cfg(feature = "dquic-network")]
-use std::{net::SocketAddr, sync::Arc};
-
-#[cfg(feature = "dquic-network")]
-use dquic::qresolve::RecordStream;
-use dquic::{
-    qbase::net::Family,
-    qresolve::{Publish, PublishFuture, Resolve, ResolveFuture, Source},
+use std::{
+    collections::{HashMap, HashSet},
+    fmt, io,
+    net::IpAddr,
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
-use futures::{FutureExt, StreamExt, TryFutureExt, future, stream};
-#[cfg(feature = "dquic-network")]
-use futures::{Stream, stream::FuturesUnordered};
 
-#[cfg(feature = "dquic-network")]
-use crate::core::parser::packet::Packet;
+use futures::{FutureExt, StreamExt, TryFutureExt, future, stream, stream::FuturesUnordered};
+use qresolve::{Family, Resolve, ResolveFuture, Source};
+use qtls::LocalAuthority;
+pub use service::MdnsResolver;
 
-pub type MdnsResolver = service::Mdns;
-pub type MdnsPublisher = service::Mdns;
+use crate::resolvers::endpoint_candidates::ResolveEndpointCandidates as _;
 
 const DHTTP_DNS_SUFFIX: &str = "dhttp.net";
 const LOCAL_MDNS_SUFFIX: &str = "local";
 
-/// Return the host portion while treating only a numeric suffix as a port.
-fn authority_host(name: &str) -> &str {
-    match name.rsplit_once(':') {
-        Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => host,
-        _ => name,
-    }
+#[derive(Debug, snafu::Snafu)]
+#[snafu(module(mdns_bind_error))]
+#[non_exhaustive]
+pub enum MdnsBindError {
+    #[snafu(display("invalid mDNS service name"))]
+    InvalidServiceName,
+    #[snafu(display("failed to bind mDNS on {device} at {ip}"))]
+    Bind {
+        device: String,
+        ip: IpAddr,
+        source: io::Error,
+    },
+    #[snafu(display("mDNS resolver set is shut down"))]
+    Closed,
 }
 
-/// Validate and normalize the host used for mDNS scope checks.
-fn normalized_authority_host(name: &str) -> Option<&str> {
-    let authority_host = authority_host(name);
-    let host = authority_host.strip_suffix('.').unwrap_or(authority_host);
-    crate::resolvers::resolvable_name(host)
+#[derive(Debug, snafu::Snafu)]
+#[snafu(module(mdns_publish_error))]
+#[non_exhaustive]
+pub enum MdnsPublishError {
+    #[snafu(display("invalid DNS name"))]
+    InvalidName,
+    #[snafu(display("publisher identity does not match DNS name"))]
+    IdentityNameMismatch,
+    #[snafu(display("failed to encode mDNS records"))]
+    Encode {
+        source: crate::publishers::packet::EncodeAuthorityDnsPacketError,
+    },
 }
 
-/// Return whether a validated host is within the DHTTP DNS suffix.
-fn is_dhttp_authority_host(host: &str) -> bool {
-    host.eq_ignore_ascii_case(DHTTP_DNS_SUFFIX)
-        || host.len() > DHTTP_DNS_SUFFIX.len()
-            && host.as_bytes()[host.len() - DHTTP_DNS_SUFFIX.len() - 1] == b'.'
-            && host[host.len() - DHTTP_DNS_SUFFIX.len()..].eq_ignore_ascii_case(DHTTP_DNS_SUFFIX)
+#[derive(Debug, snafu::Snafu)]
+#[snafu(module(mdns_shutdown_error))]
+#[non_exhaustive]
+pub enum MdnsShutdownError {
+    #[snafu(display("mDNS task failed"))]
+    TaskFailed { source: tokio::task::JoinError },
 }
 
-/// Return whether a validated host ends in the standard local mDNS label.
-fn is_local_mdns_host(host: &str) -> bool {
-    host.len() > LOCAL_MDNS_SUFFIX.len()
-        && host.as_bytes()[host.len() - LOCAL_MDNS_SUFFIX.len() - 1] == b'.'
-        && host[host.len() - LOCAL_MDNS_SUFFIX.len()..].eq_ignore_ascii_case(LOCAL_MDNS_SUFFIX)
+/// A failure synchronizing one mDNS binding. Other bindings are still attempted.
+#[derive(Debug, snafu::Snafu)]
+#[non_exhaustive]
+pub enum MdnsReconcileError {
+    #[snafu(display("failed to prepare mDNS binding {binding:?}"))]
+    Bind {
+        binding: MdnsBinding,
+        source: MdnsBindError,
+    },
+    #[snafu(display("failed to retire mDNS binding {binding:?}"))]
+    Remove {
+        binding: MdnsBinding,
+        source: MdnsShutdownError,
+    },
 }
 
-/// Parse DHTTP sequence semantics or a plain local mDNS authority.
-fn mdns_lookup_parts(
-    name: &str,
-) -> Option<(
-    &str,
-    Option<dhttp_identity::certificate::CertificateSequence>,
-)> {
-    let host = normalized_authority_host(name)?;
-    if is_dhttp_authority_host(host) {
-        return crate::resolvers::endpoint_lookup_name_and_sequence(name);
-    }
-    is_local_mdns_host(host).then_some((host, None))
+fn valid_service_name(name: &str) -> bool {
+    name.len() <= 253
+        && name.to_ascii_lowercase().ends_with(".local")
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        })
 }
 
 impl MdnsResolver {
+    pub async fn bind(
+        service_name: impl Into<Arc<str>>,
+        device: impl Into<Arc<str>>,
+        ip: IpAddr,
+    ) -> Result<Self, MdnsBindError> {
+        let service_name = service_name.into();
+        if !valid_service_name(&service_name) {
+            return Err(MdnsBindError::InvalidServiceName);
+        }
+        let device = device.into();
+        service::MdnsResolver::new(service_name, device.clone(), ip).map_err(|source| {
+            MdnsBindError::Bind {
+                device: device.to_string(),
+                ip,
+                source,
+            }
+        })
+    }
+
     pub fn source(&self) -> Source {
         Source::Mdns {
-            nic: self.bound_nic().into(),
-            family: match self.bound_ip() {
-                IpAddr::V4(..) => Family::V4,
-                IpAddr::V6(..) => Family::V6,
-            },
+            nic: self.bound_device().into(),
+            family: self.family(),
         }
+    }
+
+    pub fn family(&self) -> Family {
+        match self.bound_ip() {
+            IpAddr::V4(_) => Family::V4,
+            IpAddr::V6(_) => Family::V6,
+        }
+    }
+
+    /// Publish records using the primary certificate sequence of a local TLS authority.
+    pub fn publish_endpoints(
+        &self,
+        identity: &LocalAuthority,
+        name: &str,
+        endpoints: impl IntoIterator<Item = qresolve::EndpointAddr>,
+    ) -> Result<(), MdnsPublishError> {
+        dhttp_home::validate_name(name).map_err(|_| MdnsPublishError::InvalidName)?;
+        if identity.name() != name {
+            return Err(MdnsPublishError::IdentityNameMismatch);
+        }
+        let mut endpoints = endpoints.into_iter();
+        let records =
+            crate::publishers::packet::dns_endpoints_for_authority(identity, name, &mut endpoints)
+                .map_err(|source| MdnsPublishError::Encode { source })?;
+        if records.is_empty() {
+            self.remove_name(name);
+        } else {
+            self.insert_host(name, records);
+        }
+        Ok(())
+    }
+
+    pub fn remove_name(&self, name: &str) {
+        self.remove_host(name);
+    }
+
+    pub async fn shutdown(&self) -> Result<(), MdnsShutdownError> {
+        self.shutdown_tasks()
+            .await
+            .map_err(|source| MdnsShutdownError::TaskFailed { source })
     }
 }
 
@@ -87,42 +162,25 @@ impl fmt::Display for MdnsResolver {
     }
 }
 
-impl Publish for MdnsPublisher {
-    fn publish<'a>(
-        &'a self,
-        name: &'a str,
-        endpoints: &mut dyn Iterator<Item = dquic::qbase::net::addr::EndpointAddr>,
-    ) -> PublishFuture<'a> {
-        let endpoints = match mdns_endpoints_from_dquic(endpoints) {
-            Ok(endpoints) => endpoints,
-            Err(error) => return future::ready(Err(error)).boxed(),
-        };
-        self.insert_host(name.to_string(), endpoints);
-        future::ready(Ok(())).boxed()
-    }
-}
-
 impl Resolve for MdnsResolver {
-    fn lookup<'l>(
-        &'l self,
-        hostname: &'l str,
-        _servname: &'l str,
+    fn lookup<'a>(
+        &'a self,
+        hostname: &'a str,
+        _servname: &'a str,
         family: Option<Family>,
-    ) -> ResolveFuture<'l> {
-        let source = self.source();
-        if family.is_some_and(|family| {
-            !matches!(&source, Source::Mdns { family: source_family, .. } if *source_family == family)
-        }) {
+    ) -> ResolveFuture<'a> {
+        if family.is_some_and(|family| family != self.family()) {
             return future::ready(Ok(stream::empty().boxed())).boxed();
         }
         let Some((domain, sequence)) = mdns_lookup_parts(hostname) else {
             return future::ready(Err(io::Error::other("no DNS record found"))).boxed();
         };
-        self.query(domain.to_owned())
-            .map_ok(move |list| {
+        let source = self.source();
+        self.query(domain)
+            .map_ok(move |records| {
                 let endpoints =
                     crate::resolvers::endpoint_group::selected_endpoint_addrs_for_sequence(
-                        list, sequence,
+                        records, sequence,
                     );
                 stream::iter(
                     endpoints
@@ -132,7 +190,7 @@ impl Resolve for MdnsResolver {
                                 endpoint, family,
                             )
                         })
-                        .map(move |ep| (source.clone(), ep)),
+                        .map(move |endpoint| (source.clone(), endpoint)),
                 )
                 .boxed()
             })
@@ -140,331 +198,7 @@ impl Resolve for MdnsResolver {
     }
 }
 
-fn mdns_endpoints_from_dquic(
-    endpoints: &mut dyn Iterator<Item = dquic::qbase::net::addr::EndpointAddr>,
-) -> io::Result<Vec<crate::core::MdnsEndpoint>> {
-    let mut records = Vec::new();
-    for endpoint in endpoints {
-        let endpoint = crate::core::parser::record::endpoint::EndpointAddr::try_from(endpoint)
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "failed to encode endpoint address",
-                )
-            })?;
-        records.push(endpoint);
-    }
-    Ok(records)
-}
-
-#[cfg(feature = "dquic-network")]
-/// Installs mDNS resources on concrete h3x interface bindings.
-pub struct MdnsBindDriver {
-    /// Creates and manages each concrete binding interface.
-    iface_manager: Arc<h3x::dquic::net::InterfaceManager>,
-
-    /// Reuses h3x binding lifecycle without using its packet I/O.
-    null_io_factory: Arc<h3x::dquic::NullIoFactory>,
-
-    /// Service name published and queried by bindings from this driver.
-    service_name: Arc<str>,
-}
-
-#[cfg(feature = "dquic-network")]
-impl MdnsBindDriver {
-    pub fn new(service_name: impl Into<Arc<str>>) -> Self {
-        Self {
-            iface_manager: Arc::new(h3x::dquic::net::InterfaceManager::new()),
-            null_io_factory: Arc::new(h3x::dquic::NullIoFactory),
-            service_name: service_name.into(),
-        }
-    }
-
-    fn install_or_rebind_mdns(
-        &self,
-        network: &h3x::dquic::Network,
-        bind_iface: &h3x::dquic::net::BindInterface,
-    ) {
-        let bind_uri = bind_iface.bind_uri();
-        let Some((family, device, _port)) = bind_uri.as_iface_bind_uri() else {
-            tracing::debug!(%bind_uri, "skipping mdns binding for non-interface bind uri");
-            return;
-        };
-        let Some(ip) = network.resolve_device_addr(device, family) else {
-            tracing::debug!(%bind_uri, "skipping mdns binding without local interface address");
-            return;
-        };
-
-        bind_iface.with_components_mut(|components, _iface| {
-            match components.try_init_with(|| service::Mdns::new(&self.service_name, ip, device)) {
-                Ok(mdns) => mdns.reinit_on(device, ip),
-                Err(error) => {
-                    let report = snafu::Report::from_error(&error);
-                    tracing::debug!(error = %report, %bind_uri, "failed to initialize mdns binding");
-                }
-            }
-        });
-    }
-}
-
-#[cfg(feature = "dquic-network")]
-impl h3x::dquic::BindDriver for MdnsBindDriver {
-    fn bind<'a>(
-        &'a self,
-        network: &'a h3x::dquic::Network,
-        uri: h3x::dquic::net::BindUri,
-    ) -> futures::future::BoxFuture<'a, h3x::dquic::net::BindInterface> {
-        async move {
-            let iface = self
-                .iface_manager
-                .bind(uri, self.null_io_factory.clone())
-                .await;
-            self.install_or_rebind_mdns(network, &iface);
-            iface
-        }
-        .boxed()
-    }
-
-    fn rebind<'a>(
-        &'a self,
-        network: &'a h3x::dquic::Network,
-        iface: &'a h3x::dquic::net::BindInterface,
-    ) -> futures::future::BoxFuture<'a, ()> {
-        async move {
-            self.install_or_rebind_mdns(network, iface);
-        }
-        .boxed()
-    }
-}
-
-#[cfg(feature = "dquic-network")]
-/// Aggregates concrete mDNS resolvers for a set of bind patterns.
-pub struct MdnsResolvers {
-    /// Owns the bind registry and current interface snapshot.
-    network: Arc<h3x::dquic::Network>,
-
-    /// Provides the identity used to share and locate bindings.
-    driver: Arc<MdnsBindDriver>,
-
-    /// Enumerates the concrete bindings exposed by this resolver set.
-    patterns: Arc<Vec<h3x::dquic::binds::BindPattern>>,
-
-    /// Keeps each `(driver, pattern, LanMulticast)` registration alive.
-    _handles: Vec<h3x::dquic::BindHandle>,
-}
-
-#[cfg(feature = "dquic-network")]
-#[derive(Debug, Clone)]
-pub struct BoundMdnsResolver {
-    pub device: String,
-    pub family: Family,
-    pub resolver: MdnsResolver,
-}
-
-#[cfg(feature = "dquic-network")]
-impl fmt::Debug for MdnsResolvers {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("MdnsResolvers")
-            .field("patterns", &self.patterns)
-            .finish_non_exhaustive()
-    }
-}
-
-#[cfg(feature = "dquic-network")]
-impl fmt::Display for MdnsResolvers {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("mDNS resolvers")
-    }
-}
-
-#[cfg(feature = "dquic-network")]
-impl MdnsResolvers {
-    pub async fn bind(
-        network: Arc<h3x::dquic::Network>,
-        patterns: Arc<Vec<h3x::dquic::binds::BindPattern>>,
-        service_name: impl Into<Arc<str>>,
-    ) -> Self {
-        let driver = Arc::new(MdnsBindDriver::new(service_name));
-        Self::bind_with_driver(network, patterns, driver).await
-    }
-
-    /// Register mDNS patterns through a caller-owned driver so equal bindings can be shared.
-    pub async fn bind_with_driver(
-        network: Arc<h3x::dquic::Network>,
-        patterns: Arc<Vec<h3x::dquic::binds::BindPattern>>,
-        driver: Arc<MdnsBindDriver>,
-    ) -> Self {
-        let mut handles = Vec::with_capacity(patterns.len());
-        for pattern in patterns.iter() {
-            handles.push(
-                network
-                    .bind_with_policy(
-                        driver.clone(),
-                        pattern.clone(),
-                        h3x::dquic::WildcardInterfacePolicy::LanMulticast,
-                    )
-                    .await,
-            );
-        }
-
-        Self {
-            network,
-            driver,
-            patterns,
-            _handles: handles,
-        }
-    }
-
-    pub fn bound_interfaces(
-        &self,
-        pattern: &h3x::dquic::binds::BindPattern,
-    ) -> Option<Vec<h3x::dquic::net::BindInterface>> {
-        self.network.get_interfaces_with_policy(
-            &self.driver,
-            pattern,
-            h3x::dquic::WildcardInterfacePolicy::LanMulticast,
-        )
-    }
-
-    fn for_each_resolver(&self, mut f: impl FnMut(&MdnsResolver)) {
-        for pattern in self.patterns.iter() {
-            let Some(ifaces) = self.bound_interfaces(pattern) else {
-                continue;
-            };
-            for iface in ifaces {
-                iface.with_components(|components, _| {
-                    if let Some(mdns) = components.get::<MdnsResolver>() {
-                        f(mdns);
-                    }
-                });
-            }
-        }
-    }
-
-    pub fn bound_resolvers(&self) -> Vec<BoundMdnsResolver> {
-        let mut resolvers = Vec::new();
-        for pattern in self.patterns.iter() {
-            let Some(ifaces) = self.bound_interfaces(pattern) else {
-                continue;
-            };
-            for iface in ifaces {
-                let bind_uri = iface.bind_uri();
-                let Some((family, device, _port)) = bind_uri.as_iface_bind_uri() else {
-                    continue;
-                };
-                iface.with_components(|components, _| {
-                    if let Some(resolver) = components.get::<MdnsResolver>() {
-                        resolvers.push(BoundMdnsResolver {
-                            device: device.to_owned(),
-                            family,
-                            resolver: resolver.clone(),
-                        });
-                    }
-                });
-            }
-        }
-        resolvers
-    }
-
-    pub async fn query(&self, name: &str) -> io::Result<RecordStream> {
-        self.query_with_sequence(name, None).await
-    }
-
-    pub async fn query_with_sequence(
-        &self,
-        name: &str,
-        sequence: Option<dhttp_identity::certificate::CertificateSequence>,
-    ) -> io::Result<RecordStream> {
-        self.query_with_sequence_and_family(name, sequence, None)
-            .await
-    }
-
-    async fn query_with_sequence_and_family(
-        &self,
-        name: &str,
-        sequence: Option<dhttp_identity::certificate::CertificateSequence>,
-        family: Option<Family>,
-    ) -> io::Result<RecordStream> {
-        let mut lookup_futures = FuturesUnordered::new();
-        let mut has_resolver = false;
-        for bound in self
-            .bound_resolvers()
-            .into_iter()
-            .filter(|bound| family.is_none_or(|family| bound.family == family))
-        {
-            has_resolver = true;
-            let source = bound.resolver.source();
-            lookup_futures.push(
-                bound
-                    .resolver
-                    .query(name.to_owned())
-                    .map_ok(move |eps| (source, eps)),
-            );
-        }
-        if !has_resolver {
-            return Err(io::Error::other("no mdns resolvers available"));
-        }
-
-        let mut last_error = None;
-        let mut has_success = false;
-        let mut records = Vec::new();
-        while let Some(result) = lookup_futures.next().await {
-            match result {
-                Ok((source, endpoints)) => {
-                    has_success = true;
-                    records.extend(
-                        endpoints
-                            .into_iter()
-                            .map(|endpoint| (source.clone(), endpoint)),
-                    );
-                }
-                Err(error) => last_error = Some(error),
-            }
-        }
-
-        if !has_success {
-            return Err(
-                last_error.unwrap_or_else(|| io::Error::other("no mdns resolvers available"))
-            );
-        }
-
-        let records = crate::resolvers::endpoint_group::selected_endpoint_records_for_sequence(
-            records, sequence,
-        );
-
-        Ok(stream::iter(records).boxed())
-    }
-
-    pub fn discover(&self) -> impl Stream<Item = (SocketAddr, Packet)> + use<> {
-        let streams = self
-            .bound_resolvers()
-            .into_iter()
-            .map(|bound| Box::pin(bound.resolver.discover()))
-            .collect::<Vec<_>>();
-        stream::select_all(streams)
-    }
-}
-
-#[cfg(feature = "dquic-network")]
-fn select_candidate_groups(
-    groups: Vec<crate::resolvers::endpoint_candidates::EndpointCandidateGroup>,
-    query: crate::resolvers::endpoint_candidates::SequenceQuery,
-) -> Vec<crate::resolvers::endpoint_candidates::EndpointCandidateGroup> {
-    use crate::resolvers::endpoint_candidates::SequenceQuery;
-
-    match query {
-        SequenceQuery::Default => groups.into_iter().take(3).collect(),
-        SequenceQuery::Exact(sequence) => groups
-            .into_iter()
-            .filter(|group| group.chain.sequence() == sequence)
-            .collect(),
-        SequenceQuery::Limit(limit) => groups.into_iter().take(limit.get()).collect(),
-        SequenceQuery::All => groups,
-    }
-}
-
-#[cfg(feature = "dquic-network")]
-impl crate::resolvers::endpoint_candidates::ResolveEndpointCandidates for MdnsResolvers {
+impl crate::resolvers::endpoint_candidates::ResolveEndpointCandidates for MdnsResolver {
     fn lookup_endpoint_candidates<'a>(
         &'a self,
         name: &'a str,
@@ -474,209 +208,560 @@ impl crate::resolvers::endpoint_candidates::ResolveEndpointCandidates for MdnsRe
             let Some((domain, sequence)) = mdns_lookup_parts(name) else {
                 return Err(io::Error::other("no DNS record found"));
             };
-            let lookup = match sequence {
-                Some(sequence) => crate::resolvers::endpoint_candidates::EndpointLookup {
-                    sequences: crate::resolvers::endpoint_candidates::SequenceQuery::Exact(
-                        sequence,
-                    ),
-                    ..lookup
-                },
-                None => lookup,
-            };
-
-            let mut lookup_futures = FuturesUnordered::new();
-            let mut has_resolver = false;
-            for bound in self
-                .bound_resolvers()
-                .into_iter()
-                .filter(|bound| lookup.family.is_none_or(|family| bound.family == family))
-            {
-                has_resolver = true;
-                let source = bound.resolver.source();
-                lookup_futures.push(
-                    bound
-                        .resolver
-                        .query(domain.to_owned())
-                        .map_ok(move |eps| (source, eps)),
-                );
-            }
-            if !has_resolver {
-                return Err(io::Error::other("no mdns resolvers available"));
-            }
-
-            let mut last_error = None;
-            let mut records = Vec::new();
-            while let Some(result) = lookup_futures.next().await {
-                match result {
-                    Ok((source, endpoints)) => {
-                        records.extend(endpoints.into_iter().map(|record| {
-                            crate::resolvers::endpoint_candidates::TaggedEndpointCandidate {
-                                tag: source.clone(),
-                                record,
-                                fallback_chain_key: None,
-                            }
-                        }));
-                    }
-                    Err(error) => last_error = Some(error),
+            let lookup = exact_override(lookup, sequence);
+            let source = self.source();
+            let records = self.query(domain).await?;
+            let tagged = records.into_iter().map(|record| {
+                crate::resolvers::endpoint_candidates::TaggedEndpointCandidate {
+                    tag: source.clone(),
+                    record,
+                    fallback_chain_key: None,
                 }
-            }
-
-            if records.is_empty() {
-                return Err(last_error.unwrap_or_else(|| io::Error::other("no DNS record found")));
-            }
-
-            let groups = crate::resolvers::endpoint_candidates::filter_endpoint_candidate_groups(
-                crate::resolvers::endpoint_candidates::grouped_endpoint_candidates(records),
-                lookup.family,
-            )
-            .into_iter()
-            .map(|(chain, tagged)| {
-                let mut sources = Vec::new();
-                let mut endpoints = Vec::new();
-                for (source, endpoint) in tagged {
-                    if !sources.contains(&source) {
-                        sources.push(source);
-                    }
-                    endpoints.push(endpoint);
-                }
-                crate::resolvers::endpoint_candidates::EndpointCandidateGroup {
-                    chain,
-                    endpoints,
-                    sources,
-                }
-            })
-            .collect();
-            let groups = select_candidate_groups(groups, lookup.sequences);
-
-            Ok(crate::resolvers::endpoint_candidates::EndpointCandidates { groups })
+            });
+            Ok(candidate_groups(tagged, lookup))
         })
     }
 }
 
-#[cfg(feature = "dquic-network")]
-impl Publish for MdnsResolvers {
-    fn publish<'a>(
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct MdnsBinding {
+    device: Arc<str>,
+    ip: IpAddr,
+}
+
+impl MdnsBinding {
+    pub fn new(device: impl Into<Arc<str>>, ip: IpAddr) -> Self {
+        Self {
+            device: device.into(),
+            ip,
+        }
+    }
+
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+
+    pub fn ip(&self) -> IpAddr {
+        self.ip
+    }
+
+    pub fn family(&self) -> Family {
+        match self.ip {
+            IpAddr::V4(_) => Family::V4,
+            IpAddr::V6(_) => Family::V6,
+        }
+    }
+}
+
+struct MdnsResolverSetInner {
+    service_name: Arc<str>,
+    resolvers: RwLock<HashMap<MdnsBinding, Arc<MdnsResolver>>>,
+    closed: AtomicBool,
+}
+
+#[derive(Clone)]
+pub struct MdnsResolverSet(Arc<MdnsResolverSetInner>);
+
+impl MdnsResolverSet {
+    pub fn new(service_name: impl Into<Arc<str>>) -> Self {
+        Self(Arc::new(MdnsResolverSetInner {
+            service_name: service_name.into(),
+            resolvers: RwLock::new(HashMap::new()),
+            closed: AtomicBool::new(false),
+        }))
+    }
+
+    pub async fn upsert(&self, binding: MdnsBinding) -> Result<Arc<MdnsResolver>, MdnsBindError> {
+        if self.0.closed.load(Ordering::Acquire) {
+            return Err(MdnsBindError::Closed);
+        }
+        if let Some(resolver) = self
+            .0
+            .resolvers
+            .read()
+            .expect("mDNS resolver set lock poisoned")
+            .get(&binding)
+            .cloned()
+        {
+            return Ok(resolver);
+        }
+        let candidate = Arc::new(
+            MdnsResolver::bind(
+                self.0.service_name.clone(),
+                binding.device.clone(),
+                binding.ip,
+            )
+            .await?,
+        );
+        enum Race {
+            Closed,
+            Existing(Arc<MdnsResolver>),
+        }
+        let race = {
+            let mut resolvers = self
+                .0
+                .resolvers
+                .write()
+                .expect("mDNS resolver set lock poisoned");
+            if self.0.closed.load(Ordering::Acquire) {
+                Race::Closed
+            } else if let Some(existing) = resolvers.get(&binding) {
+                Race::Existing(existing.clone())
+            } else {
+                resolvers.insert(binding, candidate.clone());
+                return Ok(candidate);
+            }
+        };
+        candidate
+            .shutdown()
+            .await
+            .map_err(|error| MdnsBindError::Bind {
+                device: binding.device().to_owned(),
+                ip: binding.ip(),
+                source: io::Error::other(error),
+            })?;
+        match race {
+            Race::Closed => Err(MdnsBindError::Closed),
+            Race::Existing(existing) => Ok(existing),
+        }
+    }
+
+    pub async fn remove(&self, binding: &MdnsBinding) -> Result<bool, MdnsShutdownError> {
+        let resolver = self
+            .0
+            .resolvers
+            .write()
+            .expect("mDNS resolver set lock poisoned")
+            .remove(binding);
+        let Some(resolver) = resolver else {
+            return Ok(false);
+        };
+        resolver.shutdown().await?;
+        Ok(true)
+    }
+
+    /// Synchronize mDNS instances with the caller's complete active binding set.
+    /// Duplicate bindings are ignored. Obsolete instances are shut down before
+    /// missing instances are created. All operations are attempted; failures are
+    /// returned individually and missing bindings are retried on the next call.
+    /// This does not watch interfaces, register resolvers, or publish identities.
+    /// The caller must serialize updates to its desired binding set.
+    pub async fn reconcile(
+        &self,
+        bindings: impl IntoIterator<Item = MdnsBinding>,
+    ) -> Vec<MdnsReconcileError> {
+        let desired: HashSet<_> = bindings.into_iter().collect();
+        let mut errors = Vec::new();
+        for instance in self.snapshot() {
+            let binding = MdnsBinding::new(instance.bound_device(), instance.bound_ip());
+            if !desired.contains(&binding)
+                && let Err(source) = self.remove(&binding).await
+            {
+                errors.push(MdnsReconcileError::Remove { binding, source });
+            }
+        }
+        for binding in desired {
+            if let Err(source) = self.upsert(binding.clone()).await {
+                errors.push(MdnsReconcileError::Bind { binding, source });
+            }
+        }
+        errors
+    }
+
+    /// Reconcile immediately, then periodically against the caller's snapshots.
+    /// No interface watcher or DHTTP initialization is started. Abort the returned
+    /// task or shut down the resolver set to stop maintenance.
+    pub async fn maintain<F>(
+        &self,
+        period: std::time::Duration,
+        snapshot: F,
+    ) -> io::Result<tokio::task::JoinHandle<()>>
+    where
+        F: Fn() -> io::Result<Vec<MdnsBinding>> + Send + 'static,
+    {
+        if period.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "maintenance interval is zero",
+            ));
+        }
+        for error in self.reconcile(snapshot()?).await {
+            tracing::warn!(%error, "mDNS reconciliation failed");
+        }
+        let set = self.clone();
+        Ok(tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if set.0.closed.load(Ordering::Acquire) {
+                    break;
+                }
+                match snapshot() {
+                    Ok(bindings) => {
+                        for error in set.reconcile(bindings).await {
+                            tracing::warn!(%error, "mDNS reconciliation failed");
+                        }
+                    }
+                    Err(error) => tracing::warn!(%error, "binding snapshot failed"),
+                }
+            }
+        }))
+    }
+
+    pub fn snapshot(&self) -> Vec<Arc<MdnsResolver>> {
+        self.0
+            .resolvers
+            .read()
+            .expect("mDNS resolver set lock poisoned")
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub async fn shutdown(&self) -> Result<(), MdnsShutdownError> {
+        self.0.closed.store(true, Ordering::Release);
+        let resolvers = self
+            .0
+            .resolvers
+            .write()
+            .expect("mDNS resolver set lock poisoned")
+            .drain()
+            .map(|(_, resolver)| resolver)
+            .collect::<Vec<_>>();
+        let mut error = None;
+        for resolver in resolvers {
+            if let Err(failed) = resolver.shutdown().await {
+                error.get_or_insert(failed);
+            }
+        }
+        error.map_or(Ok(()), Err)
+    }
+
+    async fn candidates(
+        &self,
+        name: &str,
+        lookup: crate::resolvers::endpoint_candidates::EndpointLookup,
+    ) -> io::Result<crate::resolvers::endpoint_candidates::EndpointCandidates> {
+        let resolvers = self
+            .snapshot()
+            .into_iter()
+            .filter(|resolver| {
+                lookup
+                    .family()
+                    .is_none_or(|family| resolver.family() == family)
+            })
+            .collect::<Vec<_>>();
+        if resolvers.is_empty() {
+            return Err(io::Error::other("no mDNS resolvers available"));
+        }
+        let pending = resolvers
+            .into_iter()
+            .map(|resolver| {
+                let name = name.to_owned();
+                async move { resolver.lookup_endpoint_candidates(&name, lookup).await }
+            })
+            .collect::<FuturesUnordered<_>>();
+        let mut groups =
+            Vec::<crate::resolvers::endpoint_candidates::EndpointCandidateGroup>::new();
+        let mut last_error = None;
+        futures::pin_mut!(pending);
+        while let Some(result) = pending.next().await {
+            match result {
+                Ok(candidates) => merge_groups(&mut groups, candidates.groups),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        if groups.is_empty() {
+            Err(last_error.unwrap_or_else(|| io::Error::other("no DNS record found")))
+        } else {
+            Ok(crate::resolvers::endpoint_candidates::EndpointCandidates { groups })
+        }
+    }
+}
+
+impl fmt::Debug for MdnsResolverSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MdnsResolverSet")
+            .field("service_name", &self.0.service_name)
+            .field("bindings", &self.snapshot().len())
+            .finish()
+    }
+}
+
+impl fmt::Display for MdnsResolverSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "mDNS Resolver Set({})", self.0.service_name)
+    }
+}
+
+impl Resolve for MdnsResolverSet {
+    fn lookup<'a>(
+        &'a self,
+        hostname: &'a str,
+        _servname: &'a str,
+        family: Option<Family>,
+    ) -> ResolveFuture<'a> {
+        if mdns_lookup_parts(hostname).is_none() {
+            return future::ready(Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "unsupported mDNS name",
+            )))
+            .boxed();
+        }
+        let pending = self
+            .snapshot()
+            .into_iter()
+            .filter(|resolver| family.is_none_or(|family| resolver.family() == family))
+            .map(|resolver| {
+                let hostname = hostname.to_owned();
+                async move { resolver.lookup(&hostname, "", family).await }.boxed()
+            })
+            .collect::<FuturesUnordered<_>>();
+        async move {
+            let mut pending = pending;
+            let mut error = io::Error::new(io::ErrorKind::NotFound, "no mDNS resolvers available");
+            while let Some(result) = pending.next().await {
+                match result {
+                    Ok(first) => {
+                        let remaining = pending
+                            .filter_map(|result| future::ready(result.ok()))
+                            .flatten_unordered(None);
+                        return Ok(stream::select(first, remaining).boxed());
+                    }
+                    Err(failed) => error = failed,
+                }
+            }
+            Err(error)
+        }
+        .boxed()
+    }
+}
+
+impl crate::resolvers::endpoint_candidates::ResolveEndpointCandidates for MdnsResolverSet {
+    fn lookup_endpoint_candidates<'a>(
         &'a self,
         name: &'a str,
-        endpoints: &mut dyn Iterator<Item = dquic::qbase::net::addr::EndpointAddr>,
-    ) -> PublishFuture<'a> {
-        let endpoints = match mdns_endpoints_from_dquic(endpoints) {
-            Ok(endpoints) => endpoints,
-            Err(error) => return future::ready(Err(error)).boxed(),
-        };
-
-        self.for_each_resolver(|resolver| {
-            resolver.insert_host(name.to_string(), endpoints.clone());
-        });
-
-        future::ready(Ok(())).boxed()
+        lookup: crate::resolvers::endpoint_candidates::EndpointLookup,
+    ) -> crate::resolvers::endpoint_candidates::EndpointCandidateFuture<'a> {
+        Box::pin(async move { self.candidates(name, lookup).await })
     }
 }
 
-#[cfg(feature = "dquic-network")]
-impl Resolve for MdnsResolvers {
-    fn lookup<'l>(
-        &'l self,
-        hostname: &'l str,
-        _servname: &'l str,
-        family: Option<Family>,
-    ) -> ResolveFuture<'l> {
-        let Some((domain, sequence)) = mdns_lookup_parts(hostname) else {
-            return future::ready(Err(io::Error::other("no DNS record found"))).boxed();
-        };
-        self.query_with_sequence_and_family(domain, sequence, family)
-            .boxed()
+fn candidate_groups(
+    records: impl IntoIterator<
+        Item = crate::resolvers::endpoint_candidates::TaggedEndpointCandidate<Source>,
+    >,
+    lookup: crate::resolvers::endpoint_candidates::EndpointLookup,
+) -> crate::resolvers::endpoint_candidates::EndpointCandidates {
+    let groups = crate::resolvers::endpoint_candidates::select_group_pairs(
+        crate::resolvers::endpoint_candidates::filter_endpoint_candidate_groups(
+            crate::resolvers::endpoint_candidates::grouped_endpoint_candidates(records),
+            lookup.family(),
+        ),
+        lookup.sequences(),
+    )
+    .into_iter()
+    .map(|(chain, tagged)| {
+        let mut sources = Vec::new();
+        let mut endpoints = Vec::new();
+        for (source, endpoint) in tagged {
+            if !sources.contains(&source) {
+                sources.push(source);
+            }
+            if !endpoints.contains(&endpoint)
+                && endpoints.len()
+                    < lookup
+                        .record_limit()
+                        .map_or(usize::MAX, |limit| limit.get())
+            {
+                endpoints.push(endpoint);
+            }
+        }
+        crate::resolvers::endpoint_candidates::EndpointCandidateGroup {
+            chain,
+            endpoints,
+            sources,
+        }
+    })
+    .filter(|group| !group.endpoints.is_empty())
+    .collect();
+    crate::resolvers::endpoint_candidates::EndpointCandidates { groups }
+}
+
+fn merge_groups(
+    target: &mut Vec<crate::resolvers::endpoint_candidates::EndpointCandidateGroup>,
+    groups: Vec<crate::resolvers::endpoint_candidates::EndpointCandidateGroup>,
+) {
+    for mut group in groups {
+        if let Some(existing) = target.iter_mut().find(|item| item.chain == group.chain) {
+            group
+                .endpoints
+                .retain(|endpoint| !existing.endpoints.contains(endpoint));
+            group
+                .sources
+                .retain(|source| !existing.sources.contains(source));
+            existing.endpoints.extend(group.endpoints);
+            existing.sources.extend(group.sources);
+        } else {
+            target.push(group);
+        }
     }
 }
 
-#[cfg(all(test, feature = "dquic-network"))]
+fn exact_override(
+    lookup: crate::resolvers::endpoint_candidates::EndpointLookup,
+    sequence: Option<dhttp_home::certificate::CertificateSequence>,
+) -> crate::resolvers::endpoint_candidates::EndpointLookup {
+    sequence.map_or(lookup, |sequence| {
+        let mut exact = crate::resolvers::endpoint_candidates::EndpointLookup::exact(sequence)
+            .with_family(lookup.family());
+        if let Some(limit) = lookup.record_limit() {
+            exact = exact.with_record_limit(limit);
+        }
+        exact
+    })
+}
+
+fn authority_host(name: &str) -> &str {
+    match name.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => host,
+        _ => name,
+    }
+}
+
+fn mdns_lookup_parts(
+    name: &str,
+) -> Option<(&str, Option<dhttp_home::certificate::CertificateSequence>)> {
+    let authority = authority_host(name);
+    let host = authority.strip_suffix('.').unwrap_or(authority);
+    let host = crate::resolvers::resolvable_name(host)?;
+    let dhttp = host.eq_ignore_ascii_case(DHTTP_DNS_SUFFIX)
+        || host.to_ascii_lowercase().ends_with(".dhttp.net");
+    if dhttp {
+        crate::resolvers::endpoint_lookup_name_and_sequence(name)
+    } else if host.to_ascii_lowercase().ends_with(".local") && host.len() > LOCAL_MDNS_SUFFIX.len()
+    {
+        Some((host, None))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
 mod tests {
-    use std::num::NonZeroUsize;
-
-    use dhttp_identity::certificate::CertificateSequence;
-
     use super::*;
-    use crate::resolvers::endpoint_candidates::{
-        EndpointCandidateGroup, EndpointLookup, SequenceQuery,
-    };
 
-    fn group(sequence: u8) -> EndpointCandidateGroup {
-        EndpointCandidateGroup {
-            chain: crate::core::certificate::primary_chain_key(CertificateSequence::from(sequence)),
-            endpoints: Vec::new(),
-            sources: Vec::new(),
-        }
+    #[tokio::test]
+    async fn shutdown_stops_snapshot_maintenance() {
+        let set = MdnsResolverSet::new("_maintenance-test.local");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let task = set
+            .maintain(std::time::Duration::from_millis(1), move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Ok(Vec::new())
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "initial snapshot is synchronous"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while calls.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        set.shutdown().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
-    #[test]
-    fn mdns_candidate_selection_applies_sequence_query_locally() {
-        let groups = || vec![group(2), group(1), group(3), group(4)];
-        let sequences = |groups: Vec<EndpointCandidateGroup>| {
-            groups
-                .into_iter()
-                .map(|group| group.chain.sequence().get())
-                .collect::<Vec<_>>()
+    #[tokio::test]
+    async fn zero_maintenance_interval_is_rejected_before_snapshot() {
+        let set = MdnsResolverSet::new("_maintenance-test.local");
+        let result = set
+            .maintain(std::time::Duration::ZERO, || {
+                panic!("invalid interval must not obtain a snapshot")
+            })
+            .await;
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn reconciliation_preserves_live_instances_and_retires_obsolete_ones() {
+        let device = if cfg!(target_os = "macos") {
+            "lo0"
+        } else {
+            "lo"
         };
+        let binding = MdnsBinding::new(device, std::net::Ipv4Addr::LOCALHOST.into());
+        let set = MdnsResolverSet::new("_reconcile-test.local");
+        assert!(
+            set.reconcile([binding.clone(), binding.clone()])
+                .await
+                .is_empty()
+        );
+        let first = set.snapshot();
+        assert_eq!(first.len(), 1);
+        assert!(set.reconcile([binding.clone()]).await.is_empty());
+        assert!(Arc::ptr_eq(&first[0], &set.snapshot()[0]));
+        assert!(set.reconcile([]).await.is_empty());
+        assert!(set.snapshot().is_empty());
+        assert!(set.reconcile([binding.clone()]).await.is_empty());
+        assert!(!Arc::ptr_eq(&first[0], &set.snapshot()[0]));
+        set.shutdown().await.unwrap();
+        assert!(matches!(
+            set.reconcile([binding]).await.as_slice(),
+            [MdnsReconcileError::Bind {
+                source: MdnsBindError::Closed,
+                ..
+            }]
+        ));
+    }
 
-        assert_eq!(
-            sequences(select_candidate_groups(groups(), SequenceQuery::Default)),
-            vec![2, 1, 3]
-        );
-        assert_eq!(
-            sequences(select_candidate_groups(
-                groups(),
-                SequenceQuery::Limit(NonZeroUsize::new(2).unwrap()),
-            )),
-            vec![2, 1]
-        );
-        assert_eq!(
-            sequences(select_candidate_groups(
-                groups(),
-                SequenceQuery::Exact(CertificateSequence::from(3u8)),
-            )),
-            vec![3]
-        );
-        assert_eq!(
-            sequences(select_candidate_groups(groups(), SequenceQuery::All)),
-            vec![2, 1, 3, 4]
-        );
-
-        let lookup = EndpointLookup::all().with_record_limit(NonZeroUsize::new(1).unwrap());
-        assert_eq!(
-            sequences(select_candidate_groups(groups(), lookup.sequences)),
-            vec![2, 1, 3, 4]
-        );
+    #[tokio::test]
+    async fn reconciliation_attempts_every_unique_binding_and_retries_failures() {
+        // An invalid service name fails before opening sockets, on every platform.
+        let set = MdnsResolverSet::new("invalid");
+        let first = MdnsBinding::new("test0", "192.0.2.1".parse().unwrap());
+        let second = MdnsBinding::new("test1", "2001:db8::1".parse().unwrap());
+        for _ in 0..2 {
+            let errors = set
+                .reconcile([first.clone(), first.clone(), second.clone()])
+                .await;
+            assert_eq!(errors.len(), 2);
+            let failed: HashSet<_> = errors
+                .into_iter()
+                .map(|error| match error {
+                    MdnsReconcileError::Bind {
+                        binding,
+                        source: MdnsBindError::InvalidServiceName,
+                    } => binding,
+                    other => panic!("unexpected reconciliation error: {other}"),
+                })
+                .collect();
+            assert_eq!(failed, HashSet::from([first.clone(), second.clone()]));
+        }
+        assert!(set.snapshot().is_empty());
+        assert!(set.reconcile([]).await.is_empty());
     }
 
     #[test]
-    fn mdns_lookup_scope_accepts_only_dhttp_and_local_names() {
-        assert_eq!(
-            mdns_lookup_parts("printer.local"),
-            Some(("printer.local", None))
-        );
-        assert_eq!(
-            mdns_lookup_parts("Printer.LOCAL.:8080"),
-            Some(("Printer.LOCAL", None))
-        );
-
-        let (name, sequence) =
-            mdns_lookup_parts("node.dhttp.net:2").expect("DHTTP endpoint is in scope");
-        assert_eq!(name, "node.dhttp.net");
-        assert_eq!(sequence, Some(CertificateSequence::from(2u8)));
-
-        for name in [
-            "nat.genmeta.net",
-            "notlocal",
-            "printer.notlocal",
-            "local.example",
-            "127.0.0.1",
-            "[::1]:443",
-        ] {
-            assert_eq!(
-                mdns_lookup_parts(name),
-                None,
-                "unexpected mDNS scope: {name}"
-            );
-        }
+    fn binding_and_scope_are_platform_independent_values() {
+        let binding = MdnsBinding::new("en0", "192.0.2.1".parse().unwrap());
+        assert_eq!(binding.device(), "en0");
+        assert_eq!(binding.family(), Family::V4);
+        assert!(mdns_lookup_parts("node.dhttp.net:2").is_some());
+        assert!(mdns_lookup_parts("printer.local").is_some());
+        assert!(mdns_lookup_parts("example.com").is_none());
     }
 }

@@ -31,28 +31,30 @@ fn publishers_module_is_public() {
     use ddns::publishers;
 }
 
-#[cfg(all(feature = "http", feature = "resolvers", feature = "publishers"))]
+#[cfg(all(feature = "http", feature = "resolvers"))]
 #[test]
-fn http_backend_is_reexported_from_both_facades() {
-    use ddns::{
-        http::HttpResolver, publishers::HttpPublisher,
-        resolvers::HttpResolver as FacadeHttpResolver,
-    };
+fn http_backend_is_reexported_from_resolver_facade() {
+    use ddns::{http::HttpResolver, resolvers::HttpResolver as FacadeHttpResolver};
 
     let _ = core::any::type_name::<HttpResolver>();
-    let _ = core::any::type_name::<HttpPublisher>();
     let _ = core::any::type_name::<FacadeHttpResolver>();
 }
 
-#[cfg(all(feature = "mdns", feature = "resolvers", feature = "publishers"))]
+#[cfg(all(feature = "mdns", feature = "resolvers"))]
 #[test]
-fn mdns_backend_is_reexported_from_both_facades() {
+fn mdns_backends_are_reexported_from_resolver_facade() {
     use ddns::{
-        mdns::MdnsResolver, publishers::MdnsPublisher,
-        resolvers::MdnsResolver as FacadeMdnsResolver,
+        mdns::{MdnsBinding, MdnsResolver, MdnsResolverSet},
+        resolvers::{
+            MdnsBinding as FacadeMdnsBinding, MdnsResolver as FacadeMdnsResolver,
+            MdnsResolverSet as FacadeMdnsResolverSet,
+        },
     };
 
     let _ = core::any::type_name::<MdnsResolver>();
-    let _ = core::any::type_name::<MdnsPublisher>();
+    let _ = core::any::type_name::<MdnsBinding>();
+    let _ = core::any::type_name::<MdnsResolverSet>();
     let _ = core::any::type_name::<FacadeMdnsResolver>();
+    let _ = core::any::type_name::<FacadeMdnsBinding>();
+    let _ = core::any::type_name::<FacadeMdnsResolverSet>();
 }

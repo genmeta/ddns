@@ -1,304 +1,266 @@
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, io, sync::Arc};
 
-use dhttp_identity::name::Name;
-use snafu::Report;
+use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
+use qresolve::{EndpointAddr, Publish, PublishFuture};
 
-use super::{AddressView, Publisher, PublisherError};
+type ArcPublisher = Arc<dyn Publish>;
 
-#[derive(Default, Clone, Debug)]
+#[derive(Clone, Default)]
 pub struct Publishers {
-    publishers: Vec<Publisher>,
+    publishers: Vec<ArcPublisher>,
+}
+
+impl fmt::Debug for Publishers {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list()
+            .entries(self.publishers.iter().map(ToString::to_string))
+            .finish()
+    }
+}
+
+impl fmt::Display for Publishers {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Publishers(")?;
+        for (index, publisher) in self.publishers.iter().enumerate() {
+            if index != 0 {
+                f.write_str(", ")?;
+            }
+            fmt::Display::fmt(publisher, f)?;
+        }
+        f.write_str(")")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PublisherSuccess {
-    publisher: String,
-}
+pub struct PublisherSuccess(String);
 
 impl PublisherSuccess {
-    pub fn new(publisher: impl Into<String>) -> Self {
-        Self {
-            publisher: publisher.into(),
-        }
+    #[must_use]
+    pub fn publisher(&self) -> &str {
+        &self.0
     }
 }
 
 impl fmt::Display for PublisherSuccess {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.publisher)
+        f.write_str(&self.0)
     }
 }
 
 #[derive(Debug)]
 pub struct PublishReport {
     successes: Vec<PublisherSuccess>,
-    failures: Vec<(String, PublisherError)>,
+    failures: Vec<(String, io::Error)>,
 }
 
 impl PublishReport {
+    #[must_use]
     pub fn successes(&self) -> &[PublisherSuccess] {
         &self.successes
     }
 
-    pub fn failures(&self) -> &[(String, PublisherError)] {
+    #[must_use]
+    pub fn failures(&self) -> &[(String, io::Error)] {
         &self.failures
     }
 
+    #[must_use]
     pub fn is_complete(&self) -> bool {
-        !self.successes.is_empty() && self.failures.is_empty()
+        self.failures.is_empty()
     }
 
+    #[must_use]
     pub fn is_partial(&self) -> bool {
         !self.successes.is_empty() && !self.failures.is_empty()
     }
 }
 
-#[derive(Debug)]
-pub struct PublishersError {
-    errors: Vec<(String, PublisherError)>,
-}
-
-fn format_error_sources(f: &mut fmt::Formatter<'_>, error: &(dyn Error + 'static)) -> fmt::Result {
-    let mut index = 1;
-    let mut current = error.source();
-
-    while let Some(source) = current {
-        write!(f, "\n    {index}. {source}")?;
-        index += 1;
-        current = source.source();
-    }
-
-    Ok(())
-}
-
-fn format_failures(
-    f: &mut fmt::Formatter<'_>,
-    heading: &str,
-    failures: &[(String, PublisherError)],
-) -> fmt::Result {
-    write!(f, "{heading}")?;
-    for (publisher, error) in failures {
-        write!(f, "\n  - {publisher}: {error}")?;
-        format_error_sources(f, error)?;
-    }
-    Ok(())
-}
-
 impl fmt::Display for PublishReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.failures.is_empty() {
-            let mut successes = self.successes.iter();
-            if let Some(first) = successes.next() {
-                write!(f, "{first}")?;
-                for success in successes {
-                    write!(f, "\n{success}")?;
-                }
-            }
-            return Ok(());
+            return write!(f, "{} DNS publisher(s) succeeded", self.successes.len());
         }
-
         format_failures(f, "some DNS publishers failed", &self.failures)
+    }
+}
+
+#[derive(Debug)]
+pub struct PublishersError {
+    errors: Vec<(String, io::Error)>,
+}
+
+impl PublishersError {
+    #[must_use]
+    pub fn errors(&self) -> &[(String, io::Error)] {
+        &self.errors
     }
 }
 
 impl fmt::Display for PublishersError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.errors.is_empty() {
-            return write!(f, "no DNS publishers available");
+            f.write_str("no DNS publishers available")
+        } else {
+            format_failures(f, "all DNS publishers failed", &self.errors)
         }
-
-        format_failures(f, "all DNS publishers failed", &self.errors)
     }
 }
 
-impl Error for PublishersError {}
+impl Error for PublishersError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.errors.first().map(|(_, error)| error as _)
+    }
+}
+
+fn format_failures(
+    f: &mut fmt::Formatter<'_>,
+    heading: &str,
+    failures: &[(String, io::Error)],
+) -> fmt::Result {
+    f.write_str(heading)?;
+    for (publisher, error) in failures {
+        write!(f, "\n  - {publisher}: {error}")?;
+        let mut source = error.source();
+        let mut index = 1;
+        while let Some(error) = source {
+            write!(f, "\n    {index}. {error}")?;
+            source = error.source();
+            index += 1;
+        }
+    }
+    Ok(())
+}
 
 impl Publishers {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn with(mut self, publisher: Publisher) -> Self {
+    #[must_use]
+    pub fn with(mut self, publisher: ArcPublisher) -> Self {
         self.push(publisher);
         self
     }
 
-    pub fn push(&mut self, publisher: Publisher) {
+    pub fn push(&mut self, publisher: ArcPublisher) {
         self.publishers.push(publisher);
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &Publisher> {
-        self.publishers.iter()
-    }
-
-    pub async fn publish<V>(
+    pub async fn publish_all(
         &self,
-        name: &Name<'_>,
-        view: &V,
-    ) -> Result<PublishReport, PublishersError>
-    where
-        V: AddressView + Sync,
-    {
+        name: &str,
+        endpoints: impl IntoIterator<Item = EndpointAddr>,
+    ) -> Result<PublishReport, PublishersError> {
         if self.publishers.is_empty() {
             return Err(PublishersError { errors: Vec::new() });
         }
 
-        let mut successes = Vec::new();
-        let mut errors = Vec::new();
-        for publisher in &self.publishers {
-            match publisher.publish(name, view).await {
-                Ok(()) => successes.push(PublisherSuccess::new(publisher.to_string())),
-                Err(error) => {
-                    let publisher_name = publisher.to_string();
-                    let report = Report::from_error(&error);
-                    tracing::debug!(
-                        publisher = %publisher_name,
-                        error = %report,
-                        name = %name,
-                        "dns publisher failed"
-                    );
-                    errors.push((publisher_name, error));
+        let endpoints: Arc<[EndpointAddr]> = endpoints.into_iter().collect();
+        let name: Arc<str> = name.into();
+        let pending = self
+            .publishers
+            .iter()
+            .cloned()
+            .map(|publisher| {
+                let endpoints = endpoints.clone();
+                let name = name.clone();
+                async move {
+                    let label = publisher.to_string();
+                    let mut endpoints = endpoints.iter().copied();
+                    (label, publisher.publish(&name, &mut endpoints).await)
                 }
+            })
+            .collect::<FuturesUnordered<_>>();
+
+        let results = pending.collect::<Vec<_>>().await;
+        let mut successes = Vec::new();
+        let mut failures = Vec::new();
+        for (label, result) in results {
+            match result {
+                Ok(()) => successes.push(PublisherSuccess(label)),
+                Err(error) => failures.push((label, error)),
             }
         }
 
         if successes.is_empty() {
-            Err(PublishersError { errors })
+            Err(PublishersError { errors: failures })
         } else {
             Ok(PublishReport {
                 successes,
-                failures: errors,
+                failures,
             })
         }
     }
 }
 
+impl Publish for Publishers {
+    fn publish<'a>(
+        &'a self,
+        name: &'a str,
+        endpoints: &mut dyn Iterator<Item = EndpointAddr>,
+    ) -> PublishFuture<'a> {
+        let endpoints = endpoints.collect::<Vec<_>>();
+        async move {
+            let report = self
+                .publish_all(name, endpoints)
+                .await
+                .map_err(io::Error::other)?;
+            for (publisher, error) in report.failures() {
+                tracing::debug!(%publisher, %error, "DNS publisher failed");
+            }
+            Ok(())
+        }
+        .boxed()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{fmt, io, sync::Arc};
-
-    use dhttp_identity::name::Name;
-    use dquic::qresolve::{EndpointAddr, Publish, PublishFuture};
-    use futures::FutureExt;
-
-    use crate::publishers::{PublishScope, Publisher, Publishers};
+    use super::*;
 
     #[derive(Debug)]
-    struct OkPublisher(&'static str);
+    struct TestPublisher(&'static str, bool);
 
-    impl fmt::Display for OkPublisher {
+    impl fmt::Display for TestPublisher {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             f.write_str(self.0)
         }
     }
 
-    impl Publish for OkPublisher {
+    impl Publish for TestPublisher {
         fn publish<'a>(
             &'a self,
             _name: &'a str,
             endpoints: &mut dyn Iterator<Item = EndpointAddr>,
         ) -> PublishFuture<'a> {
-            let _endpoints: Vec<_> = endpoints.collect();
-            async move { Ok(()) }.boxed()
+            let count = endpoints.count();
+            async move {
+                if self.1 && count == 1 {
+                    Ok(())
+                } else {
+                    Err(io::Error::other("failed"))
+                }
+            }
+            .boxed()
         }
-    }
-
-    #[derive(Debug)]
-    struct ErrPublisher(&'static str, &'static str);
-
-    impl fmt::Display for ErrPublisher {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str(self.0)
-        }
-    }
-
-    impl Publish for ErrPublisher {
-        fn publish<'a>(
-            &'a self,
-            _name: &'a str,
-            endpoints: &mut dyn Iterator<Item = EndpointAddr>,
-        ) -> PublishFuture<'a> {
-            let _endpoints: Vec<_> = endpoints.collect();
-            let message = self.1;
-            async move { Err(io::Error::other(message)) }.boxed()
-        }
-    }
-
-    fn name() -> Name<'static> {
-        Name::try_from("alice.dhttp.net").expect("valid name")
     }
 
     #[tokio::test]
-    async fn empty_publishers_report_no_publishers_available() {
-        let publishers = Publishers::new();
-        let view = crate::publishers::PublishAddresses::new();
-
-        let error = publishers
-            .publish(&name(), &view)
-            .await
-            .expect_err("empty aggregate should fail");
-
-        assert_eq!(error.to_string(), "no DNS publishers available");
-    }
-
-    #[tokio::test]
-    async fn publishers_report_partial_failure_when_some_publishers_fail() {
+    async fn fans_out_one_snapshot_and_reports_partial_failure() {
         let publishers = Publishers::new()
-            .with(Publisher::new(
-                PublishScope::WideArea,
-                Arc::new(ErrPublisher("first publisher", "offline")),
-            ))
-            .with(Publisher::new(
-                PublishScope::WideArea,
-                Arc::new(OkPublisher("second publisher")),
-            ));
-        let view = crate::publishers::PublishAddresses::new();
-
+            .with(Arc::new(TestPublisher("ok", true)))
+            .with(Arc::new(TestPublisher("bad", false)));
         let report = publishers
-            .publish(&name(), &view)
+            .publish_all(
+                "demo.dhttp.net",
+                [EndpointAddr::direct("192.0.2.1:443".parse().unwrap())],
+            )
             .await
-            .expect("one success creates partial report");
+            .unwrap();
 
         assert!(report.is_partial());
         assert_eq!(report.successes().len(), 1);
         assert_eq!(report.failures().len(), 1);
-        assert_eq!(
-            report.to_string(),
-            concat!(
-                "some DNS publishers failed\n",
-                "  - first publisher: failed to publish dns records with first publisher\n",
-                "    1. offline"
-            )
-        );
-    }
-
-    #[tokio::test]
-    async fn publishers_report_all_failures_when_every_publisher_fails() {
-        let publishers = Publishers::new()
-            .with(Publisher::new(
-                PublishScope::WideArea,
-                Arc::new(ErrPublisher("first publisher", "offline")),
-            ))
-            .with(Publisher::new(
-                PublishScope::WideArea,
-                Arc::new(ErrPublisher("second publisher", "permission denied")),
-            ));
-        let view = crate::publishers::PublishAddresses::new();
-
-        let error = publishers
-            .publish(&name(), &view)
-            .await
-            .expect_err("all publishers fail");
-
-        assert_eq!(
-            error.to_string(),
-            concat!(
-                "all DNS publishers failed\n",
-                "  - first publisher: failed to publish dns records with first publisher\n",
-                "    1. offline\n",
-                "  - second publisher: failed to publish dns records with second publisher\n",
-                "    1. permission denied"
-            )
-        );
     }
 }

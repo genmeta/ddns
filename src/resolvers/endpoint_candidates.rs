@@ -1,11 +1,8 @@
 use std::{io, num::NonZeroUsize};
 
-use dhttp_identity::certificate::{CertificateChainKey, CertificateSequence};
-use dquic::{
-    qbase::net::{AddrFamily, Family, addr::EndpointAddr as DquicEndpointAddr},
-    qresolve::{Resolve, Source},
-};
+use dhttp_home::certificate::{CertificateChainKey, CertificateSequence};
 use futures::future::BoxFuture;
+use qresolve::{EndpointAddr as DquicEndpointAddr, Family, Resolve, Source};
 
 use crate::core::parser::record::endpoint::EndpointAddr as DnsEndpointAddr;
 
@@ -21,7 +18,7 @@ pub struct EndpointCandidates {
     pub groups: Vec<EndpointCandidateGroup>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum SequenceQuery {
     #[default]
     Default,
@@ -30,11 +27,11 @@ pub enum SequenceQuery {
     All,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct EndpointLookup {
-    pub sequences: SequenceQuery,
-    pub record_limit: Option<NonZeroUsize>,
-    pub family: Option<Family>,
+    sequences: SequenceQuery,
+    record_limit: Option<NonZeroUsize>,
+    family: Option<Family>,
 }
 
 impl EndpointLookup {
@@ -76,6 +73,21 @@ impl EndpointLookup {
         self.family = family;
         self
     }
+
+    #[must_use]
+    pub fn sequences(&self) -> SequenceQuery {
+        self.sequences
+    }
+
+    #[must_use]
+    pub fn record_limit(&self) -> Option<NonZeroUsize> {
+        self.record_limit
+    }
+
+    #[must_use]
+    pub fn family(&self) -> Option<Family> {
+        self.family
+    }
 }
 
 #[cfg_attr(
@@ -86,7 +98,10 @@ pub(crate) fn endpoint_matches_family(
     endpoint: &DquicEndpointAddr,
     family: Option<Family>,
 ) -> bool {
-    family.is_none_or(|family| endpoint.addr().family() == family)
+    family.is_none_or(|family| match family {
+        Family::V4 => endpoint.addr().is_ipv4(),
+        Family::V6 => endpoint.addr().is_ipv6(),
+    })
 }
 
 #[cfg_attr(
@@ -126,7 +141,7 @@ pub(crate) fn append_endpoint_lookup_query(url: &mut url::Url, lookup: EndpointL
     }
 }
 
-#[cfg(any(feature = "h3", feature = "http", test))]
+#[cfg(any(feature = "h3", feature = "http", feature = "mdns", test))]
 pub(crate) fn select_group_pairs<T>(
     groups: Vec<(CertificateChainKey, T)>,
     query: SequenceQuery,
@@ -228,7 +243,7 @@ mod tests {
         num::NonZeroUsize,
     };
 
-    use dhttp_identity::certificate::CertificateSequence;
+    use dhttp_home::certificate::CertificateSequence;
 
     use super::*;
 

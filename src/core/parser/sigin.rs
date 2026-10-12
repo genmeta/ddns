@@ -1,5 +1,5 @@
 use rustls::{SignatureScheme, pki_types::SubjectPublicKeyInfoDer, sign::SigningKey};
-use snafu::{ResultExt, Snafu};
+use snafu::Snafu;
 use x509_parser::{
     oid_registry::{
         OID_EC_P256, OID_KEY_TYPE_EC_PUBLIC_KEY, OID_NIST_EC_P384, OID_PKCS1_RSAENCRYPTION,
@@ -111,10 +111,10 @@ pub fn canonical_scheme_for_spki(spki: SubjectPublicKeyInfoDer<'_>) -> Option<Si
 #[derive(Debug, Snafu)]
 #[snafu(module)]
 pub enum SignError {
+    #[snafu(display("no supported signature scheme"))]
+    NoSupportedScheme,
     #[snafu(display("failed to sign DHTTP identity data"))]
-    Identity {
-        source: dhttp_identity::identity::SignError,
-    },
+    Identity { source: qtls::SignError },
 }
 
 #[derive(Debug, Snafu)]
@@ -122,7 +122,7 @@ pub enum SignError {
 pub enum VerifyError {
     #[snafu(display("failed to verify DHTTP identity signature"))]
     Identity {
-        source: dhttp_identity::identity::VerifyError,
+        source: dhttp_home::certificate::VerifyError,
     },
     #[snafu(display("unsupported signature scheme {scheme:?}"))]
     UnsupportedScheme { scheme: SignatureScheme },
@@ -144,7 +144,23 @@ pub enum SignatureSchemeError {
 }
 
 pub fn sign_with_key(key: &(impl SigningKey + ?Sized), data: &[u8]) -> Result<Vec<u8>, SignError> {
-    dhttp_identity::identity::sign_with_key(key, data).context(sign_error::IdentitySnafu)
+    let schemes: &[SignatureScheme] = match key.algorithm() {
+        rustls::SignatureAlgorithm::RSA => &[SignatureScheme::RSA_PSS_SHA512],
+        rustls::SignatureAlgorithm::ECDSA => &[
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+        ],
+        rustls::SignatureAlgorithm::ED25519 => &[SignatureScheme::ED25519],
+        _ => &[],
+    };
+    for scheme in schemes {
+        if let Some(signer) = key.choose_scheme(&[*scheme]) {
+            return signer.sign(data).map_err(|_| SignError::Identity {
+                source: qtls::SignError::SigningFailed,
+            });
+        }
+    }
+    Err(SignError::NoSupportedScheme)
 }
 
 #[allow(dead_code)]
@@ -214,4 +230,31 @@ pub(crate) fn verify(
             .verify(data, signature)
             .is_ok(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signing_keys_use_the_canonical_scheme_for_their_public_key() {
+        for algorithm in [
+            &rcgen::PKCS_ED25519,
+            &rcgen::PKCS_ECDSA_P256_SHA256,
+            &rcgen::PKCS_ECDSA_P384_SHA384,
+        ] {
+            let key = rcgen::KeyPair::generate_for(algorithm).unwrap();
+            let signing_key = rustls::crypto::ring::default_provider()
+                .key_provider
+                .load_private_key(
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(key.serialize_der()).into(),
+                )
+                .unwrap();
+            let spki = signing_key.public_key().unwrap();
+            let scheme = canonical_scheme_for_spki(spki.clone()).unwrap();
+            let signature = sign_with_key(signing_key.as_ref(), b"dns packet").unwrap();
+            assert!(verify(spki.clone(), scheme, b"dns packet", &signature).unwrap());
+            assert!(!verify(spki, scheme, b"changed", &signature).unwrap());
+        }
+    }
 }

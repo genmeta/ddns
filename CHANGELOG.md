@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.8.0] - 2026-10-12
+
+### Changed
+
+- Adapt resolvers and publishers to the current QUIC identity and discovery APIs.
+- Maintain mDNS interface resources and report H3 lookup responses and failures.
+- Use published dhttp 0.7.0, dhttp-home 0.6.0 and QUIC dependencies.
+
+- Keep the reqwest HTTP client on standard rustls while QUIC uses qrustls.
+
+### Release versions
+
+| Package | Previous published version | Prepared version |
+| --- | --- | --- |
+| `dyns` | 0.7.2 | 0.8.0 |
+
+
 ## [0.7.2] - 2026-08-19
 
 ### Changed

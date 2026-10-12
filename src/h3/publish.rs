@@ -1,284 +1,215 @@
-use dhttp_identity::identity::LocalAuthority;
-use dquic::qbase::net::addr::EndpointAddr;
-use h3x::quic;
-use http_body_util::{BodyExt, Full};
-use snafu::{OptionExt, ResultExt};
-use tracing::trace;
+use qresolve::EndpointAddr;
+use tokio::io::AsyncWriteExt;
 
-use super::{H3PublishError, H3Resolver, StatusBody, h3_publish_error};
+use super::{
+    H3PublishError, H3Resolver, ReadBodyError, STATUS_BODY_LIMIT, StatusMessage, read_body_limited,
+};
 use crate::core::signature::{
     CONTENT_DIGEST_HEADER, SIGNATURE_HEADER, SIGNATURE_INPUT_HEADER, SignatureFields,
 };
 
 const PUBLISH_API_PATH: &str = "/api/v2/publish";
+const DNS_PACKET_LIMIT: usize = u16::MAX as usize;
 
-fn publish_url(base_url: &url::Url, name: &str) -> url::Url {
-    let mut url = base_url
+fn publish_url(server_origin: &url::Url, name: &str) -> url::Url {
+    let mut url = server_origin
         .join(PUBLISH_API_PATH)
-        .expect("h3 dns publish api path must be valid");
+        .expect("fixed publish path is a valid URL");
     url.query_pairs_mut().append_pair("host", name);
     url
 }
 
-async fn signed_publish_request<A: LocalAuthority + ?Sized>(
-    base_url: &url::Url,
-    name: &str,
-    packet: &[u8],
-    authority: &A,
-) -> Result<http::Request<Full<bytes::Bytes>>, crate::core::signature::SignatureFieldsError> {
-    let url = publish_url(base_url, name);
-    let uri: http::Uri = url
-        .as_str()
-        .parse()
-        .expect("h3 dns publish URL is a valid URI");
-    let signature_fields = SignatureFields::sign(packet, authority).await?;
-
-    Ok(http::Request::post(uri)
-        .header(
-            CONTENT_DIGEST_HEADER,
-            signature_fields.content_digest.as_slice(),
-        )
-        .header(
-            SIGNATURE_INPUT_HEADER,
-            signature_fields.signature_input.as_slice(),
-        )
-        .header(SIGNATURE_HEADER, signature_fields.signature.as_slice())
-        .body(Full::new(bytes::Bytes::copy_from_slice(packet)))
-        .expect("h3 dns publish request must be valid"))
-}
-
-const STATUS_BODY_LIMIT: usize = 4096;
-
-fn bounded_status_body(body: &[u8]) -> String {
-    let body = if body.len() > STATUS_BODY_LIMIT {
-        &body[..STATUS_BODY_LIMIT]
-    } else {
-        body
-    };
-    String::from_utf8_lossy(body).trim().to_owned()
-}
-
-impl<C> H3Resolver<C>
-where
-    C: quic::Connect + quic::WithLocalAuthority + Send + Sync + 'static,
-    C::Error: Send + Sync + 'static,
-    C::Connection: Send + 'static,
-{
+impl H3Resolver {
     pub async fn publish_endpoints(
         &self,
         name: &str,
         endpoints: impl IntoIterator<Item = EndpointAddr>,
-    ) -> Result<(), H3PublishError<C::Error>> {
-        let endpoints: Vec<_> = endpoints.into_iter().collect();
-        trace!(
-            name,
-            endpoint_count = endpoints.len(),
-            "h3 dns publishing endpoints"
-        );
-
-        let authority = self
+    ) -> Result<std::time::Duration, H3PublishError> {
+        dhttp_home::validate_name(name).map_err(|_| H3PublishError::InvalidName)?;
+        let endpoint = self
             .endpoint
-            .quic()
-            .local_authority()
-            .await
-            .context(h3_publish_error::LocalAuthoritySnafu)?
-            .context(h3_publish_error::AnonymousEndpointSnafu)?;
-        let mut endpoints = endpoints.into_iter();
+            .as_ref()
+            .ok_or(H3PublishError::IdentityRequired)?;
+        if endpoint.name() != name {
+            return Err(H3PublishError::IdentityNameMismatch);
+        }
+
+        let identity =
+            endpoint
+                .local_authority()
+                .map_err(|source| H3PublishError::Credentials {
+                    source: std::io::Error::other(source),
+                })?;
+        let mut endpoints = endpoints.into_iter().peekable();
+        let empty = endpoints.peek().is_none();
         let packet =
-            crate::publishers::packet::dns_packet_for_authority(&authority, name, &mut endpoints)
-                .context(h3_publish_error::EncodePacketSnafu)?;
-
-        self.publish_packet_with_authority(name, &packet, &authority)
+            crate::publishers::packet::dns_packet_for_authority(&identity, name, &mut endpoints)
+                .map_err(|source| H3PublishError::EncodePacket { source })?;
+        if packet.len() > DNS_PACKET_LIMIT {
+            return Err(H3PublishError::PacketTooLarge {
+                limit: DNS_PACKET_LIMIT,
+            });
+        }
+        let fields = SignatureFields::sign(&packet, &identity)
             .await
-    }
-
-    async fn publish_packet_with_authority(
-        &self,
-        name: &str,
-        packet: &[u8],
-        authority: &dyn LocalAuthority,
-    ) -> Result<(), H3PublishError<C::Error>> {
-        tracing::trace!(
-            name,
-            packet_len = packet.len(),
-            url = %self.base_url,
-            "h3 dns publishing packet"
-        );
-        let request = signed_publish_request(&self.base_url, name, packet, authority)
+            .map_err(|source| H3PublishError::SignRequest { source })?;
+        let url = publish_url(&self.server_origin, name);
+        let (mut writer, response) = endpoint
+            .post(url.as_str().parse().expect("validated HTTPS URL is a URI"))
+            .header(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/octet-stream"),
+            )
+            .header(
+                http::HeaderName::from_static(CONTENT_DIGEST_HEADER),
+                http::HeaderValue::from_bytes(&fields.content_digest)
+                    .expect("encoded digest is a header value"),
+            )
+            .header(
+                http::HeaderName::from_static(SIGNATURE_INPUT_HEADER),
+                http::HeaderValue::from_bytes(&fields.signature_input)
+                    .expect("encoded signature input is a header value"),
+            )
+            .header(
+                http::HeaderName::from_static(SIGNATURE_HEADER),
+                http::HeaderValue::from_bytes(&fields.signature)
+                    .expect("encoded signature is a header value"),
+            )
+            .write(&packet)
             .await
-            .context(h3_publish_error::SignRequestSnafu)?;
-        let resp = self.execute_request(request).await?;
-        let status = resp.status();
-
+            .map_err(|source| H3PublishError::Request { source })?;
+        writer
+            .shutdown()
+            .await
+            .map_err(|source| H3PublishError::Upload { source })?;
+        let response = response
+            .await
+            .map_err(|source| H3PublishError::Request { source })?;
+        let status = response.status();
+        tracing::debug!(?status, headers = ?response.headers(), "H3 DNS publish response");
         if status != http::StatusCode::OK {
-            let body = resp
-                .into_body()
-                .collect()
+            let body = read_body_limited(response.into_body(), STATUS_BODY_LIMIT)
                 .await
-                .context(h3_publish_error::ResponseBodySnafu)?
-                .to_bytes();
-            let body = bounded_status_body(&body);
+                .map_err(|error| match error {
+                    ReadBodyError::Body(source) => H3PublishError::Body { source },
+                    ReadBodyError::TooLarge => H3PublishError::ResponseTooLarge {
+                        limit: STATUS_BODY_LIMIT,
+                    },
+                })?;
             return Err(H3PublishError::Status {
                 status,
-                message: StatusBody::new(body),
+                message: StatusMessage::new(String::from_utf8_lossy(&body).trim().to_owned()),
             });
         }
 
-        Ok(())
+        let lease = publish_lease(response.headers(), empty)?;
+        self.cache.invalidate_name(name);
+        Ok(lease)
     }
+}
+
+fn publish_lease(
+    headers: &http::HeaderMap,
+    empty: bool,
+) -> Result<std::time::Duration, H3PublishError> {
+    let mut values = headers.get_all("dhttp-dns-lease-millis").iter();
+    // Temporary compatibility with the deployed pre-lease server. The legacy
+    // record TTL is 300 seconds; this is a renewal window, not a server lease.
+    let Some(value) = values.next() else {
+        return Ok(if empty {
+            std::time::Duration::ZERO
+        } else {
+            std::time::Duration::from_secs(300)
+        });
+    };
+    if values.next().is_some() {
+        return Err(H3PublishError::InvalidLease);
+    }
+    let value = value.to_str().map_err(|_| H3PublishError::InvalidLease)?;
+    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(H3PublishError::InvalidLease);
+    }
+    let millis = value
+        .parse::<u64>()
+        .map_err(|_| H3PublishError::InvalidLease)?;
+    if empty != (millis == 0) {
+        return Err(H3PublishError::InvalidLease);
+    }
+    let lease = std::time::Duration::from_millis(millis);
+    if tokio::time::Instant::now().checked_add(lease).is_none() {
+        return Err(H3PublishError::InvalidLease);
+    }
+    Ok(lease)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    #[cfg(feature = "dquic-network")]
-    use dquic::qresolve::Publish as _;
-    use futures::future::BoxFuture;
-    #[cfg(feature = "dquic-network")]
-    use h3x::endpoint::H3Endpoint;
-    use ring::signature::KeyPair as _;
-    use rustls::{
-        SignatureAlgorithm, SignatureScheme,
-        pki_types::CertificateDer,
-        sign::{Signer, SigningKey},
-    };
-
     use super::*;
 
-    #[cfg(feature = "dquic-network")]
-    #[tokio::test]
-    async fn publish_rejects_anonymous_endpoint_before_request() {
-        let endpoint = Arc::new(H3Endpoint::new(
-            h3x::dquic::QuicEndpoint::builder().build().await,
-        ));
-        let resolver = H3Resolver::from_endpoint("https://dns.example.test:4433", endpoint)
-            .expect("valid h3 resolver");
-
-        let endpoint_addr =
-            dquic::qbase::net::addr::EndpointAddr::direct("203.0.113.10:4433".parse().unwrap());
-        let error = resolver
-            .publish_endpoints("demo.dhttp.net", [endpoint_addr])
-            .await
-            .expect_err("anonymous endpoint should not publish");
-
+    #[test]
+    fn publish_url_percent_encodes_name() {
+        let url = publish_url(
+            &url::Url::parse("https://dns.example:4433/").unwrap(),
+            "demo name.dhttp.net",
+        );
         assert_eq!(
-            error.to_string(),
-            "anonymous h3 endpoint cannot sign dns publish request"
-        );
-
-        let mut endpoints = std::iter::once(endpoint_addr);
-        let trait_error = resolver
-            .publish("demo.dhttp.net", &mut endpoints)
-            .await
-            .expect_err("trait publish should surface anonymous endpoint");
-        assert!(
-            trait_error
-                .to_string()
-                .contains("anonymous h3 endpoint cannot sign dns publish request")
+            url.as_str(),
+            "https://dns.example:4433/api/v2/publish?host=demo+name.dhttp.net"
         );
     }
+}
 
-    #[derive(Debug)]
-    struct TestAuthority {
-        keypair: Arc<ring::signature::Ed25519KeyPair>,
-        cert_chain: Vec<CertificateDer<'static>>,
-    }
-
-    impl dhttp_identity::identity::LocalAuthority for TestAuthority {
-        fn name(&self) -> &str {
-            "authority.example"
-        }
-
-        fn cert_chain(&self) -> &[CertificateDer<'static>] {
-            &self.cert_chain
-        }
-
-        fn sign(
-            &self,
-            data: &[u8],
-        ) -> BoxFuture<'_, Result<Vec<u8>, dhttp_identity::identity::SignError>> {
-            let result = dhttp_identity::identity::sign_with_key(
-                &TestSigningKey(self.keypair.clone()),
-                data,
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+    #[test]
+    fn requires_one_numeric_header_with_matching_clear_semantics() {
+        let mut headers = http::HeaderMap::new();
+        assert_eq!(
+            publish_lease(&headers, false).unwrap(),
+            std::time::Duration::from_secs(300)
+        );
+        assert_eq!(
+            publish_lease(&headers, true).unwrap(),
+            std::time::Duration::ZERO
+        );
+        for value in ["", "-1", "+1", "1.5", "18446744073709551616", "30000,30000"] {
+            headers.insert("dhttp-dns-lease-millis", value.parse().unwrap());
+            assert!(
+                matches!(
+                    publish_lease(&headers, false),
+                    Err(H3PublishError::InvalidLease)
+                ),
+                "{value}"
             );
-            Box::pin(std::future::ready(result))
         }
-    }
-
-    #[derive(Debug)]
-    struct TestSigningKey(Arc<ring::signature::Ed25519KeyPair>);
-
-    impl SigningKey for TestSigningKey {
-        fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
-            offered
-                .contains(&SignatureScheme::ED25519)
-                .then(|| Box::new(TestSigner(self.0.clone())) as Box<dyn Signer>)
-        }
-
-        fn algorithm(&self) -> SignatureAlgorithm {
-            SignatureAlgorithm::ED25519
-        }
-    }
-
-    #[derive(Debug)]
-    struct TestSigner(Arc<ring::signature::Ed25519KeyPair>);
-
-    impl Signer for TestSigner {
-        fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rustls::Error> {
-            Ok(self.0.sign(message).as_ref().to_vec())
-        }
-
-        fn scheme(&self) -> SignatureScheme {
-            SignatureScheme::ED25519
-        }
-    }
-
-    fn test_authority() -> TestAuthority {
-        let rng = ring::rand::SystemRandom::new();
-        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("pkcs8");
-        let keypair =
-            Arc::new(ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("keypair"));
-        let mut spki = Vec::with_capacity(44);
-        spki.extend_from_slice(&[
-            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
-        ]);
-        spki.extend_from_slice(keypair.public_key().as_ref());
-
-        TestAuthority {
-            keypair,
-            cert_chain: vec![CertificateDer::from(spki)],
-        }
-    }
-
-    #[tokio::test]
-    async fn signed_publish_request_uses_authority_headers() {
-        let authority = test_authority();
-        let base_url = url::Url::parse("https://dns.example.test:4433").expect("url");
-        let request =
-            signed_publish_request(&base_url, "demo.dhttp.net", b"dns-packet", &authority)
-                .await
-                .expect("signed request");
-
-        assert_eq!(request.method(), http::Method::POST);
+        headers.insert("dhttp-dns-lease-millis", "30000".parse().unwrap());
         assert_eq!(
-            request.uri().to_string(),
-            "https://dns.example.test:4433/api/v2/publish?host=demo.dhttp.net"
+            publish_lease(&headers, false).unwrap(),
+            std::time::Duration::from_secs(30)
         );
-        assert!(
-            request
-                .headers()
-                .contains_key(crate::core::signature::CONTENT_DIGEST_HEADER)
+        assert!(matches!(
+            publish_lease(&headers, true),
+            Err(H3PublishError::InvalidLease)
+        ));
+        headers.append("dhttp-dns-lease-millis", "30000".parse().unwrap());
+        assert!(matches!(
+            publish_lease(&headers, false),
+            Err(H3PublishError::InvalidLease)
+        ));
+        headers.insert("dhttp-dns-lease-millis", "0".parse().unwrap());
+        assert_eq!(
+            publish_lease(&headers, true).unwrap(),
+            std::time::Duration::ZERO
         );
-        assert!(
-            request
-                .headers()
-                .contains_key(crate::core::signature::SIGNATURE_INPUT_HEADER)
-        );
-        assert!(
-            request
-                .headers()
-                .contains_key(crate::core::signature::SIGNATURE_HEADER)
+        assert!(matches!(
+            publish_lease(&headers, false),
+            Err(H3PublishError::InvalidLease)
+        ));
+        headers.insert("dhttp-dns-lease-millis", "1".parse().unwrap());
+        assert_eq!(
+            publish_lease(&headers, false).unwrap(),
+            std::time::Duration::from_millis(1)
         );
     }
 }
