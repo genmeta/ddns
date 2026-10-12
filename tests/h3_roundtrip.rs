@@ -66,7 +66,6 @@ async fn new_dhttp_drives_named_and_anonymous_h3_dns_requests() {
     let key = fs::read(ssl.join("privkey.pem")).unwrap();
     let origin = Endpoint::new(
         qbase::endpoint::Endpoint::new(
-            &qtls::default_provider(),
             "localhost",
             rustls_pemfile::certs(&mut certs.as_slice())
                 .collect::<Result<Vec<_>, _>>()

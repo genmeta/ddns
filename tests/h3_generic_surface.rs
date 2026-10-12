@@ -26,7 +26,6 @@ async fn h3_resolver_accepts_name_bound_dhttp_endpoint() {
         ));
     let cert = params.self_signed(&signing_key).unwrap();
     let identity = qbase::endpoint::Endpoint::new(
-        &qtls::default_provider(),
         "alice.smith.dhttp.net",
         vec![cert.der().clone()],
         qtls::PrivateKeyDer::Pkcs8(signing_key.serialize_der().into()),

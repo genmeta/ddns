@@ -368,6 +368,48 @@ impl MdnsResolverSet {
         errors
     }
 
+    /// Reconcile immediately, then periodically against the caller's snapshots.
+    /// No interface watcher or DHTTP initialization is started. Abort the returned
+    /// task or shut down the resolver set to stop maintenance.
+    pub async fn maintain<F>(
+        &self,
+        period: std::time::Duration,
+        snapshot: F,
+    ) -> io::Result<tokio::task::JoinHandle<()>>
+    where
+        F: Fn() -> io::Result<Vec<MdnsBinding>> + Send + 'static,
+    {
+        if period.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "maintenance interval is zero",
+            ));
+        }
+        for error in self.reconcile(snapshot()?).await {
+            tracing::warn!(%error, "mDNS reconciliation failed");
+        }
+        let set = self.clone();
+        Ok(tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if set.0.closed.load(Ordering::Acquire) {
+                    break;
+                }
+                match snapshot() {
+                    Ok(bindings) => {
+                        for error in set.reconcile(bindings).await {
+                            tracing::warn!(%error, "mDNS reconciliation failed");
+                        }
+                    }
+                    Err(error) => tracing::warn!(%error, "binding snapshot failed"),
+                }
+            }
+        }))
+    }
+
     pub fn snapshot(&self) -> Vec<Arc<MdnsResolver>> {
         self.0
             .resolvers
@@ -610,6 +652,48 @@ fn mdns_lookup_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shutdown_stops_snapshot_maintenance() {
+        let set = MdnsResolverSet::new("_maintenance-test.local");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let task = set
+            .maintain(std::time::Duration::from_millis(1), move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Ok(Vec::new())
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "initial snapshot is synchronous"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while calls.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        set.shutdown().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn zero_maintenance_interval_is_rejected_before_snapshot() {
+        let set = MdnsResolverSet::new("_maintenance-test.local");
+        let result = set
+            .maintain(std::time::Duration::ZERO, || {
+                panic!("invalid interval must not obtain a snapshot")
+            })
+            .await;
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]

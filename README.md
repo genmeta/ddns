@@ -95,7 +95,6 @@ obsolete ones. The application schedules reconciliation and handles its returned
 per-binding errors; dyns does not start another interface watcher or initialize
 the DHTTP network.
 
-
 DHttp domain names can be queried through mDNS and DoH, while conventional domain names continue to be resolved by System DNS. Applications can combine these methods based on the name and network environment:
 
 | Method | Purpose |
@@ -134,3 +133,16 @@ For other query, publication, and Rust API examples, see [Examples and command r
 ## Contributing
 
 Bug reports, protocol discussions, documentation improvements, and code contributions are welcome. Before changing the E record format or resolution protocol, please discuss its compatibility implications in [GitHub Issues](https://github.com/genmeta/ddns/issues) first.
+
+### Explicit resolver setup
+
+With the `h3`, `http` and `mdns` features enabled, call
+`install_resolvers(&[DnsScheme::Mdns, DnsScheme::H3])` with the application's
+selected sources. Repeated registration is idempotent, and H3/HTTP sources also
+install system DNS for their bootstrap origin. This never initializes DHTTP or
+starts an interface watcher.
+
+`MdnsResolverSet::maintain(period, snapshot)` reconciles once before returning,
+then polls the supplied snapshot callback. The caller provides its active
+bindings and scope policy. Abort the returned task or shut down the resolver set
+to stop maintenance. Snapshot failure preserves current instances for retry.
