@@ -87,6 +87,15 @@ For convenience, `.dhttp.net` can be replaced with `~`. For example:
 
 ## DNS Resolution
 
+Applications select their resolver sources and register them with `qresolve::Resolver`.
+DHTTP owns interface watching and exposes live bindings through
+`DhttpNetwork::active_bindings()`. Pass their device names and IP addresses to
+`MdnsResolverSet::reconcile()` to create missing mDNS instances and shut down
+obsolete ones. The application schedules reconciliation and handles its returned
+per-binding errors; dyns does not start another interface watcher or initialize
+the DHTTP network.
+
+
 DHttp domain names can be queried through mDNS and DoH, while conventional domain names continue to be resolved by System DNS. Applications can combine these methods based on the name and network environment:
 
 | Method | Purpose |

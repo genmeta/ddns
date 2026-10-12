@@ -3,7 +3,7 @@ mod protocol;
 mod service;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt, io,
     net::IpAddr,
     sync::{
@@ -58,6 +58,22 @@ pub enum MdnsPublishError {
 pub enum MdnsShutdownError {
     #[snafu(display("mDNS task failed"))]
     TaskFailed { source: tokio::task::JoinError },
+}
+
+/// A failure synchronizing one mDNS binding. Other bindings are still attempted.
+#[derive(Debug, snafu::Snafu)]
+#[non_exhaustive]
+pub enum MdnsReconcileError {
+    #[snafu(display("failed to prepare mDNS binding {binding:?}"))]
+    Bind {
+        binding: MdnsBinding,
+        source: MdnsBindError,
+    },
+    #[snafu(display("failed to retire mDNS binding {binding:?}"))]
+    Remove {
+        binding: MdnsBinding,
+        source: MdnsShutdownError,
+    },
 }
 
 fn valid_service_name(name: &str) -> bool {
@@ -324,6 +340,34 @@ impl MdnsResolverSet {
         Ok(true)
     }
 
+    /// Synchronize mDNS instances with the caller's complete active binding set.
+    /// Duplicate bindings are ignored. Obsolete instances are shut down before
+    /// missing instances are created. All operations are attempted; failures are
+    /// returned individually and missing bindings are retried on the next call.
+    /// This does not watch interfaces, register resolvers, or publish identities.
+    /// The caller must serialize updates to its desired binding set.
+    pub async fn reconcile(
+        &self,
+        bindings: impl IntoIterator<Item = MdnsBinding>,
+    ) -> Vec<MdnsReconcileError> {
+        let desired: HashSet<_> = bindings.into_iter().collect();
+        let mut errors = Vec::new();
+        for instance in self.snapshot() {
+            let binding = MdnsBinding::new(instance.bound_device(), instance.bound_ip());
+            if !desired.contains(&binding)
+                && let Err(source) = self.remove(&binding).await
+            {
+                errors.push(MdnsReconcileError::Remove { binding, source });
+            }
+        }
+        for binding in desired {
+            if let Err(source) = self.upsert(binding.clone()).await {
+                errors.push(MdnsReconcileError::Bind { binding, source });
+            }
+        }
+        errors
+    }
+
     pub fn snapshot(&self) -> Vec<Arc<MdnsResolver>> {
         self.0
             .resolvers
@@ -566,6 +610,66 @@ fn mdns_lookup_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn reconciliation_preserves_live_instances_and_retires_obsolete_ones() {
+        let device = if cfg!(target_os = "macos") {
+            "lo0"
+        } else {
+            "lo"
+        };
+        let binding = MdnsBinding::new(device, std::net::Ipv4Addr::LOCALHOST.into());
+        let set = MdnsResolverSet::new("_reconcile-test.local");
+        assert!(
+            set.reconcile([binding.clone(), binding.clone()])
+                .await
+                .is_empty()
+        );
+        let first = set.snapshot();
+        assert_eq!(first.len(), 1);
+        assert!(set.reconcile([binding.clone()]).await.is_empty());
+        assert!(Arc::ptr_eq(&first[0], &set.snapshot()[0]));
+        assert!(set.reconcile([]).await.is_empty());
+        assert!(set.snapshot().is_empty());
+        assert!(set.reconcile([binding.clone()]).await.is_empty());
+        assert!(!Arc::ptr_eq(&first[0], &set.snapshot()[0]));
+        set.shutdown().await.unwrap();
+        assert!(matches!(
+            set.reconcile([binding]).await.as_slice(),
+            [MdnsReconcileError::Bind {
+                source: MdnsBindError::Closed,
+                ..
+            }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn reconciliation_attempts_every_unique_binding_and_retries_failures() {
+        // An invalid service name fails before opening sockets, on every platform.
+        let set = MdnsResolverSet::new("invalid");
+        let first = MdnsBinding::new("test0", "192.0.2.1".parse().unwrap());
+        let second = MdnsBinding::new("test1", "2001:db8::1".parse().unwrap());
+        for _ in 0..2 {
+            let errors = set
+                .reconcile([first.clone(), first.clone(), second.clone()])
+                .await;
+            assert_eq!(errors.len(), 2);
+            let failed: HashSet<_> = errors
+                .into_iter()
+                .map(|error| match error {
+                    MdnsReconcileError::Bind {
+                        binding,
+                        source: MdnsBindError::InvalidServiceName,
+                    } => binding,
+                    other => panic!("unexpected reconciliation error: {other}"),
+                })
+                .collect();
+            assert_eq!(failed, HashSet::from([first.clone(), second.clone()]));
+        }
+        assert!(set.snapshot().is_empty());
+        assert!(set.reconcile([]).await.is_empty());
+    }
 
     #[test]
     fn binding_and_scope_are_platform_independent_values() {
