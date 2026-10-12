@@ -215,15 +215,19 @@ fn build_http_client() -> Result<Client, BuildHttpResolverError> {
     for error in native.errors {
         tracing::warn!(%error, "failed to load a native root certificate");
     }
-    let mut roots = rustls::RootCertStore::empty();
+    let mut roots = http_rustls::RootCertStore::empty();
     let (valid, invalid) = roots.add_parsable_certificates(native.certs);
     tracing::debug!(valid, invalid, "loaded native root certificates");
     if valid == 0 {
         return Err(BuildHttpResolverError::NoUsableTrustRoots);
     }
-    let mut tls = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let mut tls = http_rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        http_rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("ring supports the default TLS protocol versions")
+    .with_root_certificates(roots)
+    .with_no_client_auth();
     tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Client::builder()
         .use_preconfigured_tls(tls)

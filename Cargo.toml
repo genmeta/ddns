@@ -1,7 +1,7 @@
 [package]
 name = "dyns"
 description = "DNS discovery and resolver support for DHTTP applications"
-version = "0.7.2"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -20,19 +20,20 @@ base64 = "0.22"
 bitfield-struct = "0.13"
 bytes = "1"
 dashmap = { version = "6", optional = true }
-dhttp-home = { version = "0.5.0", features = ["ssl"] }
-qtls = { git = "https://github.com/genmeta/dquic.git", rev = "b9af55da49c2e10a6b2004b72a90b0fff81da0ce" }
-qresolve = { git = "https://github.com/genmeta/dquic.git", rev = "b9af55da49c2e10a6b2004b72a90b0fff81da0ce" }
+dhttp-home = { version = "0.6.0", features = ["ssl"] }
+qtls = { version = "0.1.0" }
+qresolve = { version = "0.9.0" }
 flume = { version = "0.12", optional = true }
 futures = "0.3"
 libc = { version = "0.2", optional = true }
 nom = "8"
 rand = "0.10"
 ring = "0.17"
-rustls = { version = "0.23", default-features = false, features = [
+rustls = { package = "qrustls", version = "0.23.45", default-features = false, features = [
     "logging",
     "ring",
 ] }
+http-rustls = { package = "rustls", version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
 rustls-native-certs = { version = "0.8", optional = true }
 rustls-pemfile = "2"
 snafu = "0.9"
@@ -49,7 +50,7 @@ tokio = { version = "1", features = [
 tracing = "0.1"
 x509-parser = { version = "0.18", features = ["verify"] }
 
-dhttp = { version = "0.6.2", optional = true }
+dhttp = { version = "0.7.0", optional = true }
 http = { version = "1", optional = true }
 http-body = { version = "1", optional = true }
 http-body-util = { version = "0.1", optional = true }
@@ -75,12 +76,12 @@ h3 = [
     "dep:http-body-util",
     "dep:url",
 ]
-http = ["dep:dashmap", "dep:http", "dep:reqwest", "dep:rustls-native-certs", "dep:url"]
+http = ["dep:dashmap", "dep:http", "dep:reqwest", "dep:http-rustls", "dep:rustls-native-certs", "dep:url"]
 mdns = ["dep:dashmap", "dep:flume", "dep:libc", "dep:socket2"]
 
 [dev-dependencies]
-qbase = { git = "https://github.com/genmeta/dquic.git", rev = "b9af55da49c2e10a6b2004b72a90b0fff81da0ce" }
-qprotocol = { git = "https://github.com/genmeta/dquic.git", rev = "b9af55da49c2e10a6b2004b72a90b0fff81da0ce" }
+qbase = { version = "0.7.0" }
+qprotocol = { version = "0.7.0" }
 scopeguard = "1"
 tower = { version = "0.5", features = ["util"] }
 rcgen = "0.14"
